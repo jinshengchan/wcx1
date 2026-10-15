@@ -1,6 +1,7 @@
 package com.Johnny.wcx.features.hchat
 
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import com.Johnny.wcx.utils.HostInfo
 import com.Johnny.wcx.utils.WeLogger
@@ -206,6 +207,19 @@ object HchatScriptBootstrap {
 
             WeLogger.i(TAG, "Hchat 脚本子系统已安装（WechatApiFeature + ScriptPluginFeature + markDexBridgeReady）")
 
+            // 自动初始化：启动一个轻量后台线程，延迟 5s 后主动调一次 ensureWarmupReady + retryAllPending。
+            // 这是用户在脚本诊断页「一键修复」按钮的核心操作——把它放在启动链路里，用户不再需要手动点。
+            // 不重建 DexKitBridge（install() 已成功完成），仅推进就绪阶段 + 重排未装 Hook 任务，开销可控。
+            // 跑在独立 HandlerThread 上，不阻塞主线程 / 当前 Hchat-Bootstrap 线程。
+            val autoInitThread = HandlerThread("WCX-Script-AutoInit").apply { start() }
+            Handler(autoInitThread.looper).postDelayed({
+                runCatching { DexInstallScheduler.ensureWarmupReady() }
+                    .onFailure { WeLogger.e(TAG, "自动初始化 ensureWarmupReady 失败", it) }
+                runCatching { DexInstallScheduler.retryAllPending() }
+                    .onFailure { WeLogger.e(TAG, "自动初始化 retryAllPending 失败", it) }
+                runCatching { autoInitThread.quitSafely() }
+            }, 5_000L)
+
             // 就绪自检：把最终结果写进 WCX 日志，避免「总开关一直提示未就绪」时无从定位。
             Thread({
                 val startedAt = System.currentTimeMillis()
@@ -232,24 +246,33 @@ object HchatScriptBootstrap {
     /**
      * 冷启动自愈看门狗：定时重排未装 Hook 任务；若多轮仍未推进到 WARMUP，则强制推进。
      * 目的：让「强停后/更新后重启」不再需要用户手动去脚本诊断里点修复。
+     *
+     * 关键：使用独立的 [HandlerThread] 而非主线程 Handler —— 否则每 5s 在主线程做 dex
+     * 操作会直接卡微信 UI（用户反馈的「卡顿/假死」根因之一）。
      */
     private fun scheduleReadyWatchdog() {
-        val handler = Handler(Looper.getMainLooper())
+        val watchdogThread = HandlerThread("WCX-Script-Watchdog").apply { start() }
+        val handler = Handler(watchdogThread.looper)
         var attempts = 0
         val task = object : Runnable {
             override fun run() {
                 attempts++
                 val level = runCatching { DexInstallScheduler.readyLevelName() }.getOrDefault("")
-                if (level.contains("WARMUP")) return
+                if (level.contains("WARMUP")) {
+                    // 已就绪，主动退出线程，避免无谓占用资源
+                    runCatching { watchdogThread.quitSafely() }
+                    return
+                }
                 runCatching { DexInstallScheduler.retryAllPending() }
                     .onFailure { WeLogger.e(TAG, "看门狗重排失败", it) }
-                if (attempts >= 3) {
+                if (attempts >= 2) {
                     runCatching { DexInstallScheduler.ensureWarmupReady() }
                         .onFailure { WeLogger.e(TAG, "看门狗强制推进失败", it) }
                 }
-                if (attempts < 8) handler.postDelayed(this, 5_000L)
+                if (attempts < 6) handler.postDelayed(this, 8_000L)
+                else runCatching { watchdogThread.quitSafely() }
             }
         }
-        handler.postDelayed(task, 5_000L)
+        handler.postDelayed(task, 8_000L)
     }
 }

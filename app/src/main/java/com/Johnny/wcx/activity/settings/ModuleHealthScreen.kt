@@ -43,6 +43,7 @@ import com.Johnny.wcx.features.items.secret_friend.SecretFriendDiagnostics
 import com.Johnny.wcx.features.items.secret_friend.SecretFriendState
 import com.Johnny.wcx.preferences.WePrefs
 import com.Johnny.wcx.utils.android.showToast
+import com.Johnny.wcx.BuildConfig
 import com.Johnny.wcx.utils.reflection.ClassLoaders
 import h.Hchat.hooks.api.core.WeChatApis
 import h.Hchat.hooks.core.DexInstallScheduler
@@ -196,6 +197,31 @@ fun ModuleHealthScreen(onBack: () -> Unit) {
                     )
                 }
 
+                item {
+                    OverviewHealthCard(
+                        total = items.size,
+                        pass = items.count { it.ok },
+                        fail = items.size - items.count { it.ok },
+                        moduleVersion = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                        wechatVersion = runCatching {
+                            WeChatApis.version()?.current()?.displayVersion() ?: "未识别"
+                        }.getOrDefault("未识别"),
+                        internalVersion = "${BuildConfig.VERSION_CODE}",
+                        lastScan = lastScan,
+                        onRescan = { rescan() },
+                        onRepair = {
+                            launchRun(
+                                "一键修复",
+                                { moduleRepairSteps(context) },
+                                showOverlay = true,
+                                reportTitle = "一键修复结果",
+                                replaceItems = false,
+                                afterRun = { rescan() },
+                            )
+                        },
+                    )
+                }
+
                 val grouped = items.groupBy { it.section }
                 grouped.forEach { (section, list) ->
                     item { SmallTitle(modifier = Modifier.padding(top = 6.dp), text = section) }
@@ -303,6 +329,169 @@ fun ModuleHealthScreen(onBack: () -> Unit) {
 }
 
 // ---------------------------------------------------------------------------
+/**
+ * 模块自检顶部"DEX 适配"风格总览卡片（自画）：
+ *   大标题 + 状态主标题 + 元信息三行 + 蓝色分隔线 + 4 格统计 + 提示语 + 主/次按钮。
+ *   数据来源是当前 [items]，随自检/修复结果实时刷新；按总览模板风格化（参考截图）。
+ */
+@Composable
+private fun OverviewHealthCard(
+    total: Int,
+    pass: Int,
+    fail: Int,
+    moduleVersion: String,
+    wechatVersion: String,
+    internalVersion: String,
+    lastScan: String,
+    onRescan: () -> Unit,
+    onRepair: () -> Unit,
+) {
+    val accent = Color(0xFF2E7DFF) // DEX 适配风品牌蓝
+    val cardBg = MiuixTheme.colorScheme.surface
+    val chipBg = Color(0xFFF1F5F9)
+    val muted = Color(0xFF6B7280)
+    val title = Color(0xFF1F2937)
+    val allOk = fail == 0 && total > 0
+    val statusTitle = if (total == 0) "尚未检测" else if (allOk) "适配检查完成" else "存在缺失项"
+    val statusColor = if (total == 0) muted else if (allOk) Color(0xFF1F2937) else Color(0xFFD93025)
+    val todo = 0
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+            .clip(RoundedCornerShape(24.dp))
+            .background(cardBg),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 20.dp)) {
+            // 顶部小标题
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "模块自检",
+                    fontSize = 14.sp,
+                    color = muted,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = "DEX 适配",
+                    fontSize = 12.sp,
+                    color = accent,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            // 状态主标题
+            Text(
+                text = statusTitle,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                color = statusColor,
+            )
+            Spacer(Modifier.height(6.dp))
+            // 状态行
+            Text(
+                text = if (total == 0) {
+                    "尚未扫描，点击下方按钮立即开始。"
+                } else if (allOk) {
+                    "已检查 $total / $total 项，本轮全部通过。"
+                } else {
+                    "已检查 $total / $total 项，通过 $pass，异常 $fail。"
+                },
+                fontSize = 14.sp,
+                color = muted,
+            )
+            Spacer(Modifier.height(10.dp))
+            // 元信息 3 行
+            Text(text = "模块版本：$moduleVersion", fontSize = 13.sp, color = muted)
+            Text(text = "当前微信：$wechatVersion", fontSize = 13.sp, color = muted)
+            Text(text = "内部版本：$internalVersion", fontSize = 13.sp, color = muted)
+            // 蓝色分隔线
+            Spacer(Modifier.height(16.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(2.dp)
+                    .background(accent),
+            )
+            Spacer(Modifier.height(16.dp))
+            // 4 格统计网格
+            Row(modifier = Modifier.fillMaxWidth()) {
+                StatCell("耗时", lastScan, chipBg, title, muted, Modifier.weight(1f).padding(end = 6.dp))
+                StatCell("通过", pass.toString(), chipBg, title, muted, Modifier.weight(1f).padding(horizontal = 3.dp))
+                StatCell("异常", fail.toString(), chipBg, title, muted, Modifier.weight(1f).padding(horizontal = 3.dp))
+                StatCell("待验证", todo.toString(), chipBg, title, muted, Modifier.weight(1f).padding(start = 6.dp))
+            }
+            Spacer(Modifier.height(12.dp))
+            // 提示语
+            Text(
+                text = "通过表示公共能力可用，不等于所有使用场景已验证。",
+                fontSize = 13.sp,
+                color = muted,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(16.dp))
+            // 主按钮：立即重新自检
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(accent)
+                    .clickable { onRescan() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "立即重新自检",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = Color.White,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            // 次按钮：一键修复（描边式）
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(40.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(cardBg)
+                    .clickable { onRepair() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "一键修复（重建引导链路）",
+                    fontSize = 13.sp,
+                    color = accent,
+                )
+            }
+        }
+    }
+}
+
+/** 4 格统计网格中每个格子的内部渲染。 */
+@Composable
+private fun StatCell(
+    label: String,
+    value: String,
+    bg: Color,
+    valueColor: Color,
+    labelColor: Color,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .height(64.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(bg),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(text = value, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = valueColor)
+            Spacer(Modifier.height(2.dp))
+            Text(text = label, fontSize = 13.sp, color = labelColor)
+        }
+    }
+}
+
 //  数据模型
 // ---------------------------------------------------------------------------
 

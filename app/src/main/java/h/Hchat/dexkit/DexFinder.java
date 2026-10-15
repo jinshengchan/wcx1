@@ -276,6 +276,14 @@ public class DexFinder {
                 ? HchatStorage.preferences(hostContext, CACHE_PREFS)
                 : null;
         this.runtimeCacheKey = buildRuntimeCacheKey(hostContext, classLoader);
+        // 初始化远程特征包（异步拉取，网络操作在内部 HandlerThread）——失败降级为仅用内置特征。
+        if (hostContext != null) {
+            try {
+                DexFeaturePack.INSTANCE.init(hostContext);
+            } catch (Throwable e) {
+                h.Hchat.utils.HLog.e(TAG + " DexFeaturePack.init 失败: " + e.getMessage(), e);
+            }
+        }
     }
 
     public synchronized void resolveAll() {
@@ -376,6 +384,29 @@ public class DexFinder {
         cm.className(name);
         fc.matcher(cm);
         return fc;
+    }
+
+    /**
+     * 合并「内置锚点」与「远程特征包锚点」（特征包在前，优先尝试）。
+     * 微信更新导致内置特征失效时，可由特征包补入新锚点，无需重发 APK。
+     * 特征包为空/加载失败时，行为与只用内置锚点完全一致。
+     */
+    private String[][] mergeAnchors(String[][] builtin, String apiKey, boolean classAnchors) {
+        List<String[]> all = new ArrayList<>();
+        try {
+            List<String[]> extra = classAnchors
+                    ? DexFeaturePack.INSTANCE.classAnchors(apiKey)
+                    : DexFeaturePack.INSTANCE.methodAnchors(apiKey);
+            if (extra != null && !extra.isEmpty()) {
+                all.addAll(extra);
+                logDetail("特征包补充 " + apiKey + (classAnchors ? " class" : " method")
+                        + " 锚点 " + extra.size() + " 组");
+            }
+        } catch (Throwable e) {
+            h.Hchat.utils.HLog.e(TAG + " 合并特征包锚点失败(" + apiKey + "): " + e.getMessage(), e);
+        }
+        if (builtin != null) all.addAll(Arrays.asList(builtin));
+        return all.toArray(new String[0][]);
     }
 
     private void collectMethodOwnerClass(List<MethodData> methods, List<Class<?>> out) {
@@ -697,18 +728,18 @@ public class DexFinder {
 
             List<Class<?>> candidates = new ArrayList<>();
             collectSendTextClassCandidates(candidates, 20,
-                    new String[][]{
+                    mergeAnchors(new String[][]{
                             {"/cgi-bin/micromsg-bin/newsendmsg"},
                             {"MicroMsg.NetSceneSendMsg"},
                             {"NetSceneSendMsg"},
                             {"newsendmsg"}
-                    });
+                    }, "sendTextMsg", true));
             collectSendTextMethodOwnerCandidates(candidates, 20,
-                    new String[][]{
+                    mergeAnchors(new String[][]{
                             {"/cgi-bin/micromsg-bin/newsendmsg"},
                             {"MicroMsg.NetSceneSendMsg"},
                             {"NetSceneSendMsg"}
-                    });
+                    }, "sendTextMsg", false));
 
             for (Class<?> cl : candidates) {
                 Constructor<?> longCtor = findCtorByExactTypes(

@@ -5,6 +5,10 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -434,6 +438,20 @@ fun ScriptDiagnosticsScreen(onBack: () -> Unit) {
                         fontSize = 12.sp,
                         color = BasicComponentDefaults.summaryColor().color,
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                    )
+                }
+
+                item {
+                    DexScriptOverview(
+                        moduleVersion = "${com.Johnny.wcx.BuildConfig.VERSION_NAME} (${com.Johnny.wcx.BuildConfig.VERSION_CODE})",
+                        wechatVersion = runCatching { WeChatApis.version()?.current()?.displayVersion() }.getOrNull().orEmpty(),
+                        rowsCount = rows.size,
+                        lastRefresh = lastRefresh,
+                        onRescan = {
+                            refreshVersion++
+                            lastRefresh = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
+                            showToast("诊断信息已刷新")
+                        }
                     )
                 }
                 item { SmallTitle(modifier = Modifier.padding(top = 6.dp), text = "运行时状态") }
@@ -920,5 +938,117 @@ private fun FaqItem(question: String, answer: String) {
             color = BasicComponentDefaults.summaryColor().color,
             modifier = Modifier.padding(top = 4.dp),
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  DEX 适配风格总览（脚本功能诊断页）
+// ---------------------------------------------------------------------------
+@Composable
+private fun DexScriptOverview(
+    moduleVersion: String,
+    wechatVersion: String,
+    rowsCount: Int,
+    lastRefresh: String,
+    onRescan: () -> Unit
+) {
+    val ready = runCatching {
+        val d = ScriptPluginRuntime.scriptApiReadinessDetail()
+        d.isNullOrBlank()
+    }.getOrDefault(false)
+    val hookPending = runCatching { h.Hchat.hooks.core.DexInstallScheduler.pendingCount() }.getOrNull() ?: 0
+    val badCount = if (ready && hookPending == 0) 0 else 1
+    val primary = MiuixTheme.colorScheme.primary
+    val onSurface = MiuixTheme.colorScheme.onSurface
+    val onSurfaceVar = MiuixTheme.colorScheme.onSurfaceVariantSummary
+    val surface = MiuixTheme.colorScheme.surface
+    val surfaceVar = MiuixTheme.colorScheme.secondaryVariant
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(24.dp))
+            .background(surface)
+            .border(1.dp, surfaceVar, RoundedCornerShape(24.dp))
+            .padding(20.dp)
+    ) {
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("DEX 适配", fontSize = 18.sp, fontWeight = FontWeight.Medium, color = onSurface)
+                Spacer(Modifier.weight(1f))
+                Text(
+                    if (badCount == 0) "通过" else "需修复",
+                    fontSize = 13.sp, color = primary, fontWeight = FontWeight.Medium
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = if (badCount == 0) "脚本适配检查完成" else "脚本运行时尚未完全就绪",
+                fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                color = if (badCount == 0) onSurface else primary
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "已检查 " + rowsCount + " 项，待装 Hook " + hookPending,
+                fontSize = 14.sp, color = onSurfaceVar
+            )
+            Spacer(Modifier.height(16.dp))
+            Text("模块版本：" + moduleVersion, fontSize = 13.sp, color = onSurfaceVar)
+            Text("当前微信：" + wechatVersion, fontSize = 13.sp, color = onSurfaceVar)
+            Spacer(Modifier.height(12.dp))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(primary.copy(alpha = 0.25f)))
+            Spacer(Modifier.height(14.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                DexStatCell("已检查", rowsCount.toString(), Modifier.weight(1f))
+                DexStatCell("Hook", hookPending.toString(), Modifier.weight(1f))
+                DexStatCell("就绪", if (ready) "是" else "否", Modifier.weight(1f))
+                DexStatCell("耗时", "—", Modifier.weight(1f))
+            }
+            Spacer(Modifier.height(14.dp))
+            Text(
+                "检查通过表示底层接口可用，不等于所有使用场景已验证。",
+                fontSize = 12.sp, color = onSurfaceVar,
+                modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(16.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(primary)
+                    .clickable { onRescan() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("刷新诊断信息", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "最后刷新：" + lastRefresh,
+                fontSize = 11.sp, color = onSurfaceVar,
+                modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.End
+            )
+        }
+    }
+}
+
+
+/** DEX 适配风 4 格统计网格单格（脚本诊断页）。 */
+@Composable
+private fun DexStatCell(label: String, value: String, modifier: Modifier = Modifier) {
+    val onSurface = MiuixTheme.colorScheme.onSurface
+    val onSurfaceVar = MiuixTheme.colorScheme.onSurfaceVariantSummary
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(MiuixTheme.colorScheme.secondaryVariant.copy(alpha = 0.6f))
+            .padding(horizontal = 8.dp, vertical = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(text = value, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = onSurface)
+            Spacer(Modifier.height(2.dp))
+            Text(text = label, fontSize = 12.sp, color = onSurfaceVar)
+        }
     }
 }
