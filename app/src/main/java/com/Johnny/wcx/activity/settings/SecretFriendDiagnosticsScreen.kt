@@ -202,6 +202,7 @@ fun SecretFriendDiagnosticsScreen(onBack: () -> Unit) {
                     }
                 }
 
+                item { DiagnosticLogCard(context) }
                 item {
                     Text(
                         text = "说明：若某隐藏面显示「开启」却仍能看到密友，多为该面依赖的类/方法在当前微信版本已漂移" +

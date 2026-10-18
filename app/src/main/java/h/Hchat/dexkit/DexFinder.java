@@ -295,9 +295,19 @@ public class DexFinder {
         openUnionLocatorResolved = false;
         networkQueueLocatorResolved = false;
         if (loadCache()) {
-            resolvedAll = true;
-            logDetail("命中缓存: " + shortKey(runtimeCacheKey));
-            return;
+            // 缓存命中不等于缓存完整：解析失败的锚点会以空串落盘，而 loadMethod 读到空串只返回 null、
+            // 不标记 descriptorInvalid，于是「某锚点永远为 null」会被固化，后续 resolveXxx 直接 return。
+            // 这里在采纳缓存前校验关键锚点，缺失或无效则就地补解析。
+            String missing = missingCriticalAnchors();
+            if (missing.isEmpty()) {
+                boolean repairVideo = !isSendVideoMethod(sendVideoMethod);
+                if (repairVideo) resolveSendVideoApi();
+                if (repairVideo) saveCache();
+                resolvedAll = true;
+                logDetail("命中缓存: " + shortKey(runtimeCacheKey));
+                return;
+            }
+            logDetail("缓存命中但关键锚点缺失(" + missing + ")，改为重新解析");
         }
         cacheDescriptorInvalid = false;
         resolveAddMsgClasses();
@@ -313,7 +323,11 @@ public class DexFinder {
         resolveSendXmlApi();
         resolveGroupSolitaireApi();
         resolveLocalMessageApi();
+        // 视频发送：旧版本走 CopyVideoTask（AsyncTask），8.0.79 起改走 SendMsgMgr 的 15 参实现。
+        // 这里必须两个都解析——之前只调了 Task 版本，导致 sendVideoMethod 一直是 null，
+        // 「完整性自检」永远报 interaction.media.video 缺失。
         resolveSendVideoTaskApi();
+        resolveSendVideoApi();
         resolveVideoPathApi();
         resolveVideoInfoApi();
         resolveSendVoiceApi();
@@ -423,13 +437,13 @@ public class DexFinder {
         try {
             // 策略1: 搜索 "dkAddMsg" (OR 搜索，不同时要求两个字符串)
             List<MethodData> methods1 = dexKit.findMethod(
-                    mkMethodUsingStrings("dkAddMsg"));
+                    mkMethodUsingStrings("dkAddMsg from:%s to:%s id:[%d,%d,%d] status:%d type:%d time:[%d %s] diff:%d imgstatus:%d imgbuf:%d src:%d push:%d content:%s flag:%s"));
             collectMethodOwnerClass(methods1, addMsgClasses);
 
             // 策略2: 搜索 "processAddMsg"
             if (addMsgClasses.isEmpty()) {
                 List<MethodData> methods2 = dexKit.findMethod(
-                        mkMethodUsingStrings("processAddMsg"));
+                        mkMethodUsingStrings("processAddMsg insert db error"));
                 collectMethodOwnerClass(methods2, addMsgClasses);
             }
 
@@ -620,7 +634,7 @@ public class DexFinder {
 
             // 策略1: 搜索 doSceneImp 字符串，找到包含 dispatch 方法的类
             List<MethodData> methods = dexKit.findMethod(
-                    mkMethodUsingStrings("doSceneImp"));
+                    mkMethodUsingStrings("doSceneImp runningQueue Type:"));
             if (netQueueClass == null) {
                 for (MethodData m : methods) {
                     try {
@@ -742,10 +756,19 @@ public class DexFinder {
                     }, "sendTextMsg", false));
 
             for (Class<?> cl : candidates) {
+                // 微信 8.0.79+ 构造器尾部多一个 msgSource(String) 参数：先按 6 参匹配，再回落 5 参。
                 Constructor<?> longCtor = findCtorByExactTypes(
                         cl, String.class, String.class, int.class, int.class, long.class);
+                if (longCtor == null) {
+                    longCtor = findCtorByExactTypes(
+                            cl, String.class, String.class, int.class, int.class, long.class, String.class);
+                }
                 Constructor<?> objectCtor = findCtorByExactTypes(
                         cl, String.class, String.class, int.class, int.class, Object.class);
+                if (objectCtor == null) {
+                    objectCtor = findCtorByExactTypes(
+                            cl, String.class, String.class, int.class, int.class, Object.class, String.class);
+                }
                 if (longCtor != null || objectCtor != null) {
                     sendTextMsgClass = cl;
                     sendTextMsgCtorLong = longCtor;
@@ -838,7 +861,7 @@ public class DexFinder {
             }
 
             List<MethodData> methods = dexKit.findMethod(
-                    mkMethodUsingStrings("sendImg: args error"));
+                    mkMethodUsingStrings("sendImg: args error, toUser[%s], fileName[%s]"));
             for (MethodData methodData : methods) {
                 try {
                     Method method = methodData.getMethodInstance(classLoader);
@@ -1296,8 +1319,14 @@ public class DexFinder {
                 return;
             }
 
+            // 微信 8.0.79 起日志文案带后缀，完整串为 "attachFilePath[%s], content[%s]"；
+            // DexKit 按字符串常量精确匹配，故优先用完整新串，找不到再回落旧串（兼容旧版微信）。
             List<MethodData> methods = dexKit.findMethod(
-                    mkMethodUsingStrings("summerbig sendAppMsg attachFilePath"));
+                    mkMethodUsingStrings("summerbig sendAppMsg attachFilePath[%s], content[%s]"));
+            if (methods == null || methods.isEmpty()) {
+                methods = dexKit.findMethod(
+                        mkMethodUsingStrings("summerbig sendAppMsg attachFilePath"));
+            }
             for (MethodData methodData : methods) {
                 try {
                     Method method = methodData.getMethodInstance(classLoader);
@@ -1402,22 +1431,46 @@ public class DexFinder {
         }
     }
 
+    /** 缓存里必须存在、否则视为缓存不可用的关键锚点。 */
+    private String missingCriticalAnchors() {
+        StringBuilder sb = new StringBuilder();
+        if (sendTextMsgClass == null) appendMissing(sb, "sendTextMsg");
+        if (sendImageMethod == null) appendMissing(sb, "sendImage");
+        if (sendFileMethod == null) appendMissing(sb, "sendFile");
+        if (serviceGetterMethod == null) appendMissing(sb, "serviceGetter");
+        return sb.toString();
+    }
+
+    private void appendMissing(StringBuilder sb, String name) {
+        if (sb.length() > 0) sb.append(',');
+        sb.append(name);
+    }
+
     public void resolveSendVideoApi() {
         if (ensureSnapshotLoaded()) return;
         try {
             if (sendVideoMethod != null) return;
 
             List<MethodData> methods = dexKit.findMethod(
-                    mkMethodUsingStrings("send vedio args error"));
+                    mkMethodUsingStrings("send vedio args error, toUser[%s] fileName[%s]"));
+            if (methods.isEmpty()) {
+                // 老版本微信的日志串没有后半段，保留回落。
+                methods = dexKit.findMethod(mkMethodUsingStrings("send vedio args error"));
+            }
+            Method best = null;
             for (MethodData methodData : methods) {
                 try {
                     Method method = methodData.getMethodInstance(classLoader);
                     if (!isSendVideoMethod(method)) continue;
                     KavaReflector.accessible(method);
-                    sendVideoMethod = method;
-                    break;
+                    // 同时存在 13 参（老版）与 15 参（8.0.79 SendMsgMgr）时优先取参数更多的那个。
+                    if (best == null
+                            || method.getParameterTypes().length > best.getParameterTypes().length) {
+                        best = method;
+                    }
                 } catch (Throwable ignored) {}
             }
+            sendVideoMethod = best;
 
             logDetail("视频发送方法: " + methodName(sendVideoMethod));
         } catch (Throwable e) {
@@ -1587,7 +1640,7 @@ public class DexFinder {
 
             if (voiceFullPathMethod == null) {
                 List<MethodData> methods = dexKit.findMethod(
-                        mkMethodUsingStrings("getAmrFullPath cost:"));
+                        mkMethodUsingStrings("getAmrFullPath cost: "));
                 for (MethodData methodData : methods) {
                     try {
                         Method method = methodData.getMethodInstance(classLoader);
@@ -1787,7 +1840,7 @@ public class DexFinder {
         try {
             if (emojiSendMethod == null) {
                 List<MethodData> methods = dexKit.findMethod(
-                        mkMethodUsingStrings("NetSceneUploadEmoji: msgId"));
+                        mkMethodUsingStrings("NetSceneUploadEmoji: msgId = %s, md5 %s, len %s"));
                 for (MethodData methodData : methods) {
                     try {
                         Method method = methodData.getMethodInstance(classLoader);
@@ -1801,7 +1854,7 @@ public class DexFinder {
 
             if (emojiManagerSendMethod == null) {
                 List<MethodData> methods = dexKit.findMethod(
-                        mkMethodUsingStrings("sendEmoji: context is null", "sendEmoji: emoji not found"));
+                        mkMethodUsingStrings("sendEmoji: context is null", "sendEmoji: emoji not found, imgPath %s"));
                 for (MethodData methodData : methods) {
                     try {
                         Method method = methodData.getMethodInstance(classLoader);
@@ -2367,7 +2420,7 @@ public class DexFinder {
             if (isContactCardXmlMethod(contactCardXmlMethod)) return;
 
             List<MethodData> methods = dexKit.findMethod(
-                    mkMethodUsingStrings("MicroMsg.SendContactCardHelper", "getBizNameCardString"));
+                    mkMethodUsingStrings("MicroMsg.SendContactCardHelper", "getBizNameCardString buffer size: "));
             for (MethodData methodData : methods) {
                 try {
                     Method method = methodData.getMethodInstance(classLoader);
@@ -2401,7 +2454,7 @@ public class DexFinder {
             if (!isPatDisplayTemplateMethod(patDisplayTemplateMethod)) {
                 List<MethodData> methods = dexKit.findMethod(
                         mkMethodUsingStrings("MicroMsg.PluginPatMsg",
-                                "parseDisplayTemplate realtime templateStr:%s"));
+                                "parseDisplayTemplate realtime templateStr:%s "));
                 for (MethodData methodData : methods) {
                     try {
                         Method method = methodData.getMethodInstance(classLoader);
@@ -2838,7 +2891,7 @@ public class DexFinder {
         Class<?> contactType = mute.getParameterTypes()[0];
         List<Method> invokes = new ArrayList<>();
         for (MethodData data : dexKit.findMethod(
-                mkMethodUsingStrings("setMute contact invalid username"))) {
+                mkMethodUsingStrings("setMute contact invalid username: %s, contactId: %s"))) {
             try {
                 Method candidate = data.getMethodInstance(classLoader);
                 if (!mute.equals(candidate)) continue;
@@ -3028,7 +3081,7 @@ public class DexFinder {
                             "will insert sysmsg from:",
                             "content null, cannot to insert sysmsg!",
                             "failed to insert sysmsg",
-                            "sysmsg inserted"));
+                            "sysmsg inserted: "));
             for (MethodData methodData : methods) {
                 try {
                     Method method = methodData.getMethodInstance(classLoader);
@@ -3687,8 +3740,16 @@ public class DexFinder {
             wishWxHbCtor = findCtorByArgCount(wishWxHbClass, 4);
             sendTextMsgCtorLong = findCtorByExactTypes(
                     sendTextMsgClass, String.class, String.class, int.class, int.class, long.class);
+            if (sendTextMsgCtorLong == null) {
+                sendTextMsgCtorLong = findCtorByExactTypes(
+                        sendTextMsgClass, String.class, String.class, int.class, int.class, long.class, String.class);
+            }
             sendTextMsgCtorObject = findCtorByExactTypes(
                     sendTextMsgClass, String.class, String.class, int.class, int.class, Object.class);
+            if (sendTextMsgCtorObject == null) {
+                sendTextMsgCtorObject = findCtorByExactTypes(
+                        sendTextMsgClass, String.class, String.class, int.class, int.class, Object.class, String.class);
+            }
             if (localMessageClass == null && localMessageInsertMethod != null
                     && localMessageInsertMethod.getParameterTypes().length == 1) {
                 localMessageClass = localMessageInsertMethod.getParameterTypes()[0];
@@ -4130,7 +4191,7 @@ public class DexFinder {
         if (!"android.util.Pair".equals(method.getReturnType().getName())) return false;
         if (!KavaReflector.isStatic(method)) return false;
         Class<?>[] params = method.getParameterTypes();
-        if (params.length != 10 && params.length != 12) return false;
+        if (params.length != 10 && params.length != 12 && params.length != 13) return false;
         if (params[0].isPrimitive()) return false;
         return params[1] == String.class
                 && params[2] == String.class
@@ -4144,7 +4205,14 @@ public class DexFinder {
                 || (params.length == 12
                 && !params[9].isPrimitive()
                 && (params[10] == boolean.class || params[10] == Boolean.class)
-                && params[11] == String.class));
+                && params[11] == String.class)
+                // 微信 8.0.79+: 在 12 参基础上末尾再加一个 String 参数（
+                // com.tencent.mm.pluginsdk.model.app.k0.M）。
+                || (params.length == 13
+                && !params[9].isPrimitive()
+                && (params[10] == boolean.class || params[10] == Boolean.class)
+                && params[11] == String.class
+                && params[12] == String.class));
     }
 
     private boolean isAppMsgParseMethod(Method method, Class<?> appMsgClass) {
@@ -4186,16 +4254,16 @@ public class DexFinder {
         if (method == null || method.getReturnType() != void.class) return false;
         Class<?>[] params = method.getParameterTypes();
         if (params.length < 13) return false;
+        // 微信 8.0.79 把视频发送重构成协程链路，SendMsgMgr 的签名也随之漂移：
+        // 旧版第 7 位是 boolean、第 9 位是 String；新版第 7 位变成回调对象、第 9 位变成 boolean。
+        // 因此这里只锁定「Context + 3 个 String + 2 个 int」的形状，
+        // 唯一性由特征串 "send vedio args error, toUser[%s] fileName[%s]" 保证（见 resolveSendVideoApi）。
         return params[0] == Context.class
                 && params[1] == String.class
                 && params[2] == String.class
                 && params[3] == String.class
                 && (params[4] == int.class || params[4] == Integer.class)
-                && (params[5] == int.class || params[5] == Integer.class)
-                && (params[7] == boolean.class || params[7] == Boolean.class)
-                && (params[8] == boolean.class || params[8] == Boolean.class)
-                && params[9] == String.class
-                && params[10] == String.class;
+                && (params[5] == int.class || params[5] == Integer.class);
     }
 
     private boolean isEmojiSendMethod(Method method) {
@@ -4627,7 +4695,7 @@ public class DexFinder {
     private Method findSnsCommitMethod(Class<?> helperClass) {
         if (helperClass == null) return null;
         try {
-            List<MethodData> methods = dexKit.findMethod(mkMethodUsingStrings("commit sns info ret %d"));
+            List<MethodData> methods = dexKit.findMethod(mkMethodUsingStrings("commit sns info ret %d, typeFlag %d sightMd5 %s"));
             for (MethodData methodData : methods) {
                 try {
                     Method method = methodData.getMethodInstance(classLoader);
@@ -5485,7 +5553,7 @@ public class DexFinder {
             return;
         }
         try {
-            for (MethodData md : dexKit.findMethod(mkMethodUsingStrings("updateGiftMsgByCgi"))) {
+            for (MethodData md : dexKit.findMethod(mkMethodUsingStrings("updateGiftMsgByCgi, giftMsgId:"))) {
                 Class<?> task = KavaReflector.loadClass(md.getClassName(), classLoader);
                 if (task == null) continue;
                 for (Constructor<?> ctor : KavaReflector.declaredConstructors(task)) {

@@ -106,7 +106,7 @@ object WeMessageApi : ApiFeature(), IResolveDex {
             methods {
                 add {
                     paramCount = 2
-                    usingStrings("worker thread has not been se", "MicroMsg.NetSceneQueue")
+                    usingStrings("worker thread has not been set", "MicroMsg.NetSceneQueue")
                 }
             }
         }
@@ -300,7 +300,7 @@ object WeMessageApi : ApiFeature(), IResolveDex {
     }
     private val classVfs by dexClass {
         matcher {
-            usingStrings("MicroMsg.VFSFileOp", "Cannot resolve path or URI")
+            usingStrings("MicroMsg.VFSFileOp", "Cannot resolve path or URI: ")
         }
     }
     private val classPathUtil by dexClass {
@@ -323,7 +323,7 @@ object WeMessageApi : ApiFeature(), IResolveDex {
     }
     private val classMmKernel by dexClass {
         matcher {
-            usingStrings("MicroMsg.MMKernel", "Initialize skeleton")
+            usingStrings("MicroMsg.MMKernel", "Initialize skeleton, create whole world.")
         }
     }
     private val methodMmKernelGetStorage by dexMethod(allowMultiple = true) {
@@ -905,6 +905,17 @@ object WeMessageApi : ApiFeature(), IResolveDex {
     }.getOrNull()
 
     fun sendEmojiByMd5(toUser: String, md5: String): Boolean {
+        hchatMedia()?.let { media ->
+            val emojis = runCatching { media.emojis() }.getOrNull()
+            if (emojis != null && emojis.canSendSilently()) {
+                val ok = runCatching { emojis.sendByMd5(toUser, md5) }.getOrDefault(false)
+                if (ok) {
+                    WeLogger.i(TAG, "sent emoji via Hchat media api: $md5")
+                    return true
+                }
+                WeLogger.w(TAG, "Hchat media sendEmojiByMd5 returned false, falling back to legacy path")
+            }
+        }
         return runCatching {
             WeLogger.i(TAG, "sending registered emoji")
             val emojiInfo = WeServiceApi.getEmojiInfoByMd5(md5)
@@ -973,7 +984,7 @@ object WeMessageApi : ApiFeature(), IResolveDex {
         return try {
             WeLogger.i(TAG, "sending location: $x,$y to $toUser")
             val locJson = """{"msg":{"location":{"poiname":"$poiName","label":"$label","x":"$x","y":"$y","scale":"$scale"}}}"""
-            val netScene = ctorNetSceneSendMsgLocation.newInstance(toUser, locJson, 1, 0, null)
+            val netScene = newSendMsgSceneInstance(ctorNetSceneSendMsgLocation.constructor, toUser, locJson)
             WeNetSceneApi.sendNetScene(netScene)
             true
         } catch (e: Exception) {
@@ -991,7 +1002,7 @@ object WeMessageApi : ApiFeature(), IResolveDex {
             json2.put("nickname", nickname)
             json2.put("certflag", if (cardWxId.startsWith("gh_")) 4928270286903575946L else 4928270274018674058L)
             json1.put("msg", json2)
-            val netScene = ctorNetSceneSendMsgLocation.newInstance(toUser, json1.toString(), 1, 0, null)
+            val netScene = newSendMsgSceneInstance(ctorNetSceneSendMsgLocation.constructor, toUser, json1.toString())
             WeNetSceneApi.sendNetScene(netScene)
             true
         } catch (e: Exception) {
@@ -1000,6 +1011,21 @@ object WeMessageApi : ApiFeature(), IResolveDex {
     }
 
     fun sendVideo(toUser: String, videoPath: String): Boolean {
+        if (runCatching { !java.io.File(videoPath).let { it.isFile && it.length() > 0 } }.getOrDefault(true)) {
+            WeLogger.w(TAG, "sendVideo skipped: mp4 missing/empty ($videoPath)")
+            return false
+        }
+        hchatMedia()?.let { media ->
+            val videos = runCatching { media.videos() }.getOrNull()
+            if (videos != null && videos.canSendSilently()) {
+                val ok = runCatching { videos.send(toUser, videoPath) }.getOrDefault(false)
+                if (ok) {
+                    WeLogger.i(TAG, "sent video via Hchat media api: $videoPath")
+                    return true
+                }
+                WeLogger.w(TAG, "Hchat media sendVideo returned false, falling back to legacy path")
+            }
+        }
         return try {
             WeLogger.i(TAG, "sending video: $videoPath to $toUser")
             val thread = classImportMultiVideo.clazz.createInstance(
@@ -1169,11 +1195,96 @@ object WeMessageApi : ApiFeature(), IResolveDex {
     }
 
     /** 发送文本消息 */
+    /**
+     * 构造 NetSceneSendMsg 实例。
+     *
+     * 微信 8.0.79+ 的构造器在末尾多了一个 msgSource(String) 参数（共 6 参），
+     * 旧版为 5 参。早期实现写死 5 参，遇到 6 参宿主会抛 IllegalArgumentException
+     * 被上层 catch 后表现为「复读/发送失败」。这里按实际构造器参数个数自适应。
+     */
+    private fun newSendMsgSceneInstance(clazz: Class<*>, toUser: String, content: String): Any? {
+        // 微信 8.0.79 的 NetSceneSendMsg 只有 ()V、(J I String)V 以及两个 6 参构造器，
+        // 早期写死的 5 参调用会直接抛「找不到构造器」。这里按「首参为 String」过滤后
+        // 从参数多到少逐个尝试，任一成功即返回，避免依赖构造器的反射顺序。
+        val filtered = clazz.constructors
+            .filter { it.parameterTypes.isNotEmpty() && it.parameterTypes[0] == String::class.java }
+            .sortedByDescending { it.parameterCount }
+        val candidates = if (filtered.isNotEmpty()) filtered else clazz.constructors.toList()
+        for (ctor in candidates) {
+            val args = buildSendMsgCtorArgs(ctor, toUser, content) ?: continue
+            val obj = runCatching { ctor.newInstance(*args) }.getOrElse {
+                WeLogger.w(TAG, "NetSceneSendMsg 构造失败(${ctor.toGenericString()}): ${it.message}")
+                null
+            }
+            if (obj != null) return obj
+        }
+        WeLogger.e(
+            TAG,
+            "未找到可用的 NetSceneSendMsg 构造器；候选=" +
+                clazz.constructors.joinToString(" | ") { it.toGenericString() },
+        )
+        return null
+    }
+
+    /** 按实际构造器参数个数自适应地构造「位置/名片」用的 NetSceneSendMsg 实例。 */
+    private fun newSendMsgSceneInstance(ctor: java.lang.reflect.Constructor<*>, toUser: String, content: String): Any {
+        val args = buildSendMsgCtorArgs(ctor, toUser, content)
+            ?: error("unsupported NetSceneSendMsg constructor: ${ctor.toGenericString()}")
+        return ctor.newInstance(*args)
+    }
+
+    /**
+     * 依据构造器的真实形参类型构造实参，兼容微信 8.0.79 的 6 参形态
+     * (String,String,int,int,long|Object,String) 与旧版 5 参形态。
+     */
+    private fun buildSendMsgCtorArgs(
+        ctor: java.lang.reflect.Constructor<*>,
+        toUser: String,
+        content: String,
+    ): Array<Any?>? {
+        val types = ctor.parameterTypes
+        if (types.size < 5) return null
+        val args = arrayOfNulls<Any?>(types.size)
+        for (i in types.indices) {
+            val t = types[i]
+            args[i] = when {
+                t == String::class.java -> when (i) {
+                    0 -> toUser
+                    1 -> content
+                    else -> null
+                }
+                t == java.lang.Integer.TYPE || t == java.lang.Integer::class.java -> if (i == 2) 1 else 0
+                t == java.lang.Long.TYPE || t == java.lang.Long::class.java -> 0L
+                t == java.lang.Boolean.TYPE || t == java.lang.Boolean::class.java -> false
+                t == java.lang.Byte.TYPE || t == java.lang.Byte::class.java -> 0.toByte()
+                t == java.lang.Character.TYPE || t == java.lang.Character::class.java -> '\u0000'
+                else -> null
+            }
+        }
+        return args
+    }
+
+    /** 供诊断页展示：发送文本（NetSceneSendMsg）类定位与构造器自检结果。 */
+    fun sendTextDiagnostics(): String {
+        return runCatching {
+            val clazz = classNetSceneSendMsg.clazz
+            val ctors = clazz.constructors.joinToString(" / ") { c ->
+                "(" + c.parameterTypes.joinToString(",") { it.simpleName } + ")"
+            }
+            val usable = clazz.constructors.any {
+                it.parameterCount >= 5 && it.parameterTypes.isNotEmpty() &&
+                    it.parameterTypes[0] == String::class.java
+            }
+            val state = if (usable) "是" else "✗ 否（无可用构造器）"
+            "类=${clazz.name}｜构造器=[$ctors]｜可发送=$state"
+        }.getOrElse { "✗ 未解析（${it.javaClass.simpleName}: ${it.message}）" }
+    }
+
     fun sendText(toUser: String, text: String): Boolean {
         return try {
             WeLogger.i(TAG, "sending text message: $text")
             val sendMsgObject = methodGetSendMsgObject.method.invoke(null) ?: return false
-            val msgObj = classNetSceneSendMsg.clazz.createInstance(toUser, text, 1, 0, null)
+            val msgObj = newSendMsgSceneInstance(classNetSceneSendMsg.clazz, toUser, text) ?: return false
             methodPostToQueue.method.invoke(sendMsgObject, msgObj) as? Boolean ?: false
         } catch (e: Exception) {
             WeLogger.e(TAG, "failed to send text message", e)
@@ -1271,7 +1382,40 @@ object WeMessageApi : ApiFeature(), IResolveDex {
             }.invokeStatic(msgInfo.instance)
     }
 
+    // -------------------------------------------------------------------------------------
+    // Hchat 侧发送能力桥接
+    //
+    // WCX 这套发送实现是按旧版微信写的，8.0.79 上语音/视频/表情/卡片各自失效在不同环节
+    // （语音是 VoiceLogic 定位、视频是 ImportMultiVideo、卡片是 AppMsgLogic 的特征串）。
+    // h.Hchat 的 media / message API 已按版本做过适配（v320 修过视频 service、v309 修过
+    // AppMsg 13 参、v308 修过消息构造器），这里统一「优先 Hchat、失败回退本类实现」，
+    // 避免同一能力两套逻辑各修一半。
+    // -------------------------------------------------------------------------------------
+
+    private fun hchatMedia(): h.Hchat.hooks.api.media.WeChatMediaApi? = runCatching {
+        h.Hchat.hooks.api.core.WeChatApis.media()?.takeIf { it.isAvailable }
+    }.getOrNull()
+
+    private fun hchatMessages(): h.Hchat.hooks.api.message.WeChatMessageApi? = runCatching {
+        h.Hchat.hooks.api.core.WeChatApis.messages()?.takeIf { it.isAvailable }
+    }.getOrNull()
+
     fun sendVoice(toUser: String, path: String, durationMs: Int): Boolean {
+        // 源文件不在就没有任何通道能发出去，先判掉，避免误报「发送成功」
+        if (runCatching { !java.io.File(path).let { it.isFile && it.length() > 0 } }.getOrDefault(true)) {
+            WeLogger.w(TAG, "sendVoice skipped: source file missing/empty ($path)")
+            return false
+        }
+        hchatMedia()?.let { media ->
+            if (media.canSendVoiceSilently()) {
+                val ok = runCatching { media.sendVoice(toUser, path, durationMs) }.getOrDefault(false)
+                if (ok) {
+                    WeLogger.i(TAG, "sent voice via Hchat media api: $path")
+                    return true
+                }
+                WeLogger.w(TAG, "Hchat media sendVoice returned false, falling back to legacy path")
+            }
+        }
         var succeeded = runCatching {
             // 准备文件
             val fileName = voiceNameGenMethod.invoke(getReceiverForMethod(voiceNameGenMethod), toUser, "amr_") as? String
@@ -1397,6 +1541,15 @@ object WeMessageApi : ApiFeature(), IResolveDex {
     }
 
     fun sendXmlAppMsg(target: String, xmlContent: String): Boolean {
+        // Hchat 侧 sendXml 走 AppMsgLogic 的 13 参重载（8.0.79 上 6 参那条已不可用）
+        hchatMessages()?.let { messages ->
+            val ok = runCatching { messages.sendXml(target, xmlContent) }.getOrDefault(false)
+            if (ok) {
+                WeLogger.i(TAG, "sent appmsg via Hchat message api")
+                return true
+            }
+            WeLogger.w(TAG, "Hchat message sendXml returned false, falling back to WeAppMsgApi")
+        }
         val appId = extractXmlAttr(xmlContent, "appid")
         val title = extractXmlTag(xmlContent, "title")
 
@@ -1797,7 +1950,12 @@ object WeMessageApi : ApiFeature(), IResolveDex {
      * 在真正写入文件字节 *之前* 就从 SERVERID:// 改写为最终文件名, 所以只能以磁盘上文件是否存在为准。
      */
     private fun ensureImageCachedFile(msgSvrId: Long): Path? {
-        val baseRow = queryImgInfoRow(msgSvrId) ?: return null
+        val baseRow = queryImgInfoRow(msgSvrId)
+        if (baseRow == null) {
+            // 查不到图片信息行：多数是消息未入库 / 表结构与当前微信版本不一致。
+            WeLogger.w(TAG, "cacheImage: image info row not found, msgSvrId=" + msgSvrId)
+            return null
+        }
 
         // 有原图行则优先下载原图, 否则退回基础行
         val targetRow = baseRow.hdImgId.takeIf { it > 0 }
@@ -1809,8 +1967,23 @@ object WeMessageApi : ApiFeature(), IResolveDex {
         resolveExistingImageFile(targetRow)?.let { return it }
 
         // 触发 CDN 下载, 轮询直到文件真正落地。talker 用基础行的 (原图行可能未存 msgTalker)。
-        if (!triggerDownload(targetRow.localId, targetRow.talker.ifEmpty { baseRow.talker })) return null
-        return pollUntilImageFileExists(targetRow.localId)
+        if (!triggerDownload(targetRow.localId, targetRow.talker.ifEmpty { baseRow.talker })) {
+            WeLogger.w(
+                TAG,
+                "cacheImage: trigger download rejected, msgSvrId=" + msgSvrId +
+                    ", localId=" + targetRow.localId
+            )
+            return null
+        }
+        val cached = pollUntilImageFileExists(targetRow.localId)
+        if (cached == null) {
+            WeLogger.w(
+                TAG,
+                "cacheImage: download timeout, msgSvrId=" + msgSvrId +
+                    ", localId=" + targetRow.localId
+            )
+        }
+        return cached
     }
 
     /**
@@ -1860,7 +2033,7 @@ object WeMessageApi : ApiFeature(), IResolveDex {
             }
 
             val result = m.invoke(downloadService, imgLocalId, msgIdTalker, 0, null, 0, listener, -1, false)
-            WeLogger.i(TAG, "triggerDownload result=$result")
+            WeLogger.d(TAG, "triggerDownload result=$result")
             (result as? Int)?.let { it >= 0 } ?: false
         } catch (e: Exception) {
             WeLogger.e(TAG, "triggerDownload failed", e)
