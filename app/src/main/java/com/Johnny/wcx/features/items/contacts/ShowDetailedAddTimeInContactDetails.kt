@@ -27,9 +27,13 @@ import java.util.Locale
  * 格式：添加时间：yyyy-MM-dd (N天)，N 为按日历日期相减的天数（不是毫秒相除向下取整，
  * 后者会因添加时刻晚于当前时刻而少算一天）。
  *
- * 数据源：聊天记录里最早一条 type=10000 系统消息（加好友通过时微信插入的
- * “你已添加了X，现在可以开始聊天了”）的 createTime；语义上就是加好友那一刻。
- * 只有这一个数据源：拿不到（例如清空过聊天记录）就显示“未知”，不猜、不编。
+ * 数据源：好友资料表 rcontact 的 createTime 列（好友记录创建时间，语义上就是加好友那一刻）。
+ * 2026-10-24 诊断版三例实测全对：艳 2017-08-18（对自带 2017年08月）、陈梦妮 2014-09-23
+ * （对自带 2014年09月）、A 2026-03-06（对参考图）；三例 rcontact 均只有 createTime 一个
+ * 时间戳候选列，无歧义。
+ * 注意：聊天记录里最早一条 type=10000 系统消息不可靠——艳的那条是 2026-09-18 的后来
+ * 系统消息（内容为图片标记，非加好友问候），陈梦妮与 A 则一条系统消息都没有；故本功能
+ * 不再用系统消息作源或兜底。createTime 拿不到才显示“未知”，不猜、不编。
  * 非好友、群资料页不展示。
  *
  * 显示时机：资料页打开时微信可能先拿缓存渲染头部、拿到异步数据后再重建头部，
@@ -214,26 +218,25 @@ object ShowDetailedAddTimeInContactDetails : SwitchFeature() {
         val daysAgo: Int?
     )
 
-    /** 唯一数据源：最早一条 type=10000 系统消息；拿不到则显示未知。 */
+    /** 唯一数据源：好友资料表 rcontact 的 createTime；拿不到则显示未知。 */
     private fun resolveAddTime(wxId: String): ResolveResult {
         val escaped = wxId.replace("'", "''")
-        val sysMsgMillis = runCatching {
+        val createMillis = runCatching {
             WeDatabaseApi.executeQuery(
-                "SELECT createTime FROM message " +
-                    "WHERE talker = '$escaped' AND type = 10000 " +
-                    "ORDER BY createTime ASC LIMIT 1"
+                "SELECT createTime FROM rcontact " +
+                    "WHERE username = '$escaped' LIMIT 1"
             ).firstOrNull()?.get("createTime") as? Long
         }.getOrNull()?.let { normalizeToMillis(it) }
 
-        val displayDate = sysMsgMillis?.let { dateFormat.format(Date(it)) } ?: "未知"
+        val displayDate = createMillis?.let { dateFormat.format(Date(it)) } ?: "未知"
         // 按日历日期相减，不是毫秒相除：添加当天的时刻晚于当前时刻时毫秒法会少算一天。
-        val daysAgo = sysMsgMillis?.let {
+        val daysAgo = createMillis?.let {
             val addDate = LocalDate.ofInstant(Instant.ofEpochMilli(it), ZoneId.systemDefault())
             val diff = ChronoUnit.DAYS.between(addDate, LocalDate.now())
             if (diff < 0) null else diff.toInt()
         }
 
-        WeLogger.i(TAG, "addTime for $wxId: sysMsg=${sysMsgMillis?.let { dateFormat.format(Date(it)) }}")
+        WeLogger.i(TAG, "addTime for $wxId: rcontact.createTime=${createMillis?.let { dateFormat.format(Date(it)) }}")
         return ResolveResult(displayDate, daysAgo)
     }
 
