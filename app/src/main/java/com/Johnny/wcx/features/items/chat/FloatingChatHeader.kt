@@ -217,7 +217,9 @@ object FloatingChatHeader : ClickableFeature(), IResolveDex {
     private var capsuleLengthDp by prefOption("floating_chat_header_capsule_length", 0)
     private var backgroundTransparency by prefOption("floating_chat_header_background_transparency", 5)
     /** 三段式（返回/标题/更多三段独立胶囊 + 顶部渐变遮罩）；关闭则退回整块悬浮卡片。 */
-    private var segmentedHeader by prefOption("floating_chat_header_segmented", true)
+    // 默认关闭：这个样式依赖微信标题栏内部结构，换个微信版本就可能不生效。
+    // 作为「可选美化项」交给用户手动开，避免升级后看起来「开关开着但没效果」。
+    private var segmentedHeader by prefOption("floating_chat_header_segmented", false)
 
     /** 每个窗口是否已由本特性启用状态栏 edge-to-edge。 */
     private val edgeToEdgeApplied = WeakHashMap<Window, Boolean>()
