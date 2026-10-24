@@ -44,7 +44,7 @@ object ShowDetailedAddTimeInContactDetails : SwitchFeature(), IContactInfoProvid
         if (wxId.endsWith("@chatroom")) return emptyList()
 
         val result = resolveAddTime(wxId)
-        val daysSuffix = result.daysAgo?.let { " ($it天)" } ?: ""
+        val daysSuffix = result.daysAgo?.let { " (${it}天)" } ?: ""
         return listOf(
             PreferenceItem(
                 key = PREF_KEY,
