@@ -28,6 +28,11 @@ import com.Johnny.wcx.utils.WeLogger
  *
  * 已知局限：只藏 iframe 本身；如果广告卡外层容器还带留白，藏完会留一个
  * 空框，下一版再收容器。测试分支专用，不要合入 master。
+ *
+ * v2：Jim 实测广告已消失，但偶尔能看到广告先出现再消失的过程——2 秒轮询
+ * 有窗口期，广告先渲染出来才被藏掉。改成先往页面注入一条 CSS 规则，
+ * 让含该路径的 iframe 在渲染时就直接不显示；2 秒循环保留作兜底
+ * （盖页面加载前就已存在的 iframe）。
  */
 @Feature(
     name = "隐藏文章内广告卡",
@@ -44,8 +49,10 @@ object ArticleAdHider : SwitchFeature() {
     // 要自己发现文章页在哪个进程，因此全部进程都加载。
     override val shouldLoadInCurrentProcess: Boolean = true
 
-    // 藏 iframe 的 JS：只动来源含微信模板广告路径的 iframe，返回本轮新藏的数量。
-    private const val HIDE_JS = """(function(){var n=0;var ifs=document.getElementsByTagName('iframe');for(var i=0;i<ifs.length;i++){var f=ifs[i];var s=f.src||'';if(s.indexOf('wxa.wxs.qq.com/tmpl/qe/')>=0&&f.style.display!=='none'){f.style.display='none';n++;}}return n;})()"""
+    // 藏 iframe 的 JS：先注入一条 CSS 规则（渲染时直接不显示，消灭闪一下的
+    // 窗口期），再藏已存在的同类 iframe，返回本轮新藏的数量。只动来源含
+    // 微信模板广告路径的 iframe。
+    private const val HIDE_JS = """(function(){if(!document.getElementById('wcx-qe-hide')){var s=document.createElement('style');s.id='wcx-qe-hide';s.textContent='iframe[src*="wxa.wxs.qq.com/tmpl/qe/"]{display:none!important}';(document.head||document.documentElement).appendChild(s);}var n=0;var ifs=document.getElementsByTagName('iframe');for(var i=0;i<ifs.length;i++){var f=ifs[i];var src=f.src||'';if(src.indexOf('wxa.wxs.qq.com/tmpl/qe/')>=0&&f.style.display!=='none'){f.style.display='none';n++;}}return n;})()"""
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
