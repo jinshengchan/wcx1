@@ -64,7 +64,8 @@ object ArticleAdProbe : SwitchFeature() {
 
     // JS 探针：返回含“广告”标记的最内层元素（标签、class、id、文本片段）与总数。
     // 只读，不改动页面。文本片段截 24 字，避免日志过长。
-    private const val PROBE_JS = """(function(){var nodes=[];var total=0;var all=document.getElementsByTagName('*');for(var i=0;i<all.length;i++){var el=all[i];var t=el.textContent||'';if(t.indexOf('广告')<0)continue;total++;var childHas=false;for(var j=0;j<el.children.length;j++){if((el.children[j].textContent||'').indexOf('广告')>=0){childHas=true;break;}}if(!childHas){var cls=(typeof el.className==='string')?el.className:'';var txt=t.replace(/\s+/g,' ').substring(0,24);nodes.push(el.tagName+'|'+cls+'|'+(el.id||'')+'|'+txt);if(nodes.length>=30)break;}}return JSON.stringify({href:location.href,title:document.title,adRelated:total,adNodes:nodes});})()"""
+    // v5：每个最内层节点再带往上 6 层祖先链（tag.class#id），用来定广告卡容器。
+    private const val PROBE_JS = """(function(){var nodes=[];var total=0;var all=document.getElementsByTagName('*');for(var i=0;i<all.length;i++){var el=all[i];var t=el.textContent||'';if(t.indexOf('广告')<0)continue;total++;var childHas=false;for(var j=0;j<el.children.length;j++){if((el.children[j].textContent||'').indexOf('广告')>=0){childHas=true;break;}}if(!childHas){var cls=(typeof el.className==='string')?el.className:'';var txt=t.replace(/\s+/g,' ').substring(0,24);var chain=[];var p=el;for(var k=0;k<6&&p;k++){var pc=(typeof p.className==='string')?p.className:'';chain.push(p.tagName+'.'+pc.substring(0,40)+'#'+(p.id||''));p=p.parentElement;}nodes.push(el.tagName+'|'+cls+'|'+(el.id||'')+'|'+txt+'|chain:'+chain.join('>'));if(nodes.length>=30)break;}}return JSON.stringify({href:location.href,title:document.title,adRelated:total,adNodes:nodes});})()"""
 
     // 采样延迟（毫秒）：覆盖打开后滚动懒加载的时间窗。
     private val SAMPLE_DELAYS = longArrayOf(1000L, 3000L, 6000L, 12000L, 25000L, 45000L, 75000L, 120000L)
