@@ -35,6 +35,11 @@ object RemoveArticleAds : SwitchFeature(), IWePacketInterceptor {
     }
 
     override fun onResponse(uri: String, cgiId: Int, respBytes: ByteArray): ByteArray? {
+        // 全量诊断（第二版）：记下每一条经过包拦截管线的响应接口（不限 mmbiz / appmsg），
+        // 只记 uri + cgiId，不记响应内容。用于判断底部广告请求是否经过本管线：
+        // 若日志里找不到广告填充接口而广告仍在显示，则属 WebView 侧直连，不经过本管线。
+        // 注意：全量日志量大，诊断时只打开一篇文章、尽快发日志。
+        WeLogger.i(TAG, "diag articleAd all: uri=$uri cgiId=$cgiId")
         // 诊断：21909 命中记一条；其余 mmbiz / appmsg 相关接口也记一条（找替代链路）。
         // 注意：只记 uri + cgiId，不记响应内容。
         if (cgiId == 21909) {
