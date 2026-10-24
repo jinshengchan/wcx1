@@ -31,6 +31,12 @@ import com.Johnny.wcx.utils.WeLogger
  * v2：每次采样都打一行 probe sample（不管有没有文章页），含 Activity 名、
  * WebView 数量与全部 WebView 的 URL——阴性结果也能定位：是没打开文章、
  * 还是文章页在探针够不到的地方。
+ *
+ * v3：v2 实测文章页在主进程 TmplWebViewMMUI，WebView 每次都找到 1 个，
+ * 但 getUrl 一直返回空，导致 mp 域名过滤把采样全扔掉。因此 v3 不再依赖 URL：
+ * 只要 Activity 是 TmplWebViewMMUI，就对每个 WebView 节点直接跑 JS；
+ * 采样行同时打节点类名（区分真 WebView 还是名字含 WebView 的容器）。
+ * 遍历也不再在 WebView 节点处停下，容器里的真 WebView 也能被收到。
  */
 @Feature(
     name = "文章广告探针",
@@ -97,21 +103,28 @@ object ArticleAdProbe : SwitchFeature() {
                     runCatching { WeWebViewApi.getUrl(wv, 5000L) }.getOrNull()
                 }
                 // v2 无条件采样日志：每次采样都打，不管有没有文章页。
+                // v3 加节点类名：区分真 WebView 还是名字含 WebView 的容器。
+                val classes = webViews.map { it.javaClass.name.substringAfterLast('.') }
                 WeLogger.i(
                     TAG,
                     "probe sample: delay=${delay}ms process=${TargetProcesses.currentName} " +
                         "activity=${activity.javaClass.simpleName} webviews=${webViews.size} " +
+                        "classes=[" + classes.joinToString("; ") + "] " +
                         "urls=[" + urls.joinToString("; ") { (it ?: "?").take(100) } + "]"
                 )
+                // v3：文章页不依赖 URL。TmplWebViewMMUI 就是文章页 Activity，
+                // 对它的每个 WebView 节点都直接跑 JS；其它页面仍用 mp 域名过滤。
+                val isArticlePage = activity.javaClass.name.contains("TmplWebViewMMUI")
                 for ((wv, url) in webViews.zip(urls)) {
-                    if (url == null || !url.contains("mp.weixin.qq.com")) continue
-                    val key = System.identityHashCode(wv).toString() + "|" + url
+                    if (!isArticlePage && (url == null || !url.contains("mp.weixin.qq.com"))) continue
+                    val key = System.identityHashCode(wv).toString() + "|" + (url ?: "tmpl")
                     synchronized(lastResultsLock) {
                         if (!lastResults.containsKey(key)) {
                             WeLogger.i(
                                 TAG,
                                 "probe found article webview: process=${TargetProcesses.currentName} " +
-                                    "activity=${activity.javaClass.name} url=$url"
+                                    "activity=${activity.javaClass.name} url=${url ?: "?"} " +
+                                    "class=${wv.javaClass.name}"
                             )
                             lastResults[key] = ""
                         }
@@ -120,7 +133,11 @@ object ArticleAdProbe : SwitchFeature() {
                         WeWebViewApi.evaluateJavascript(wv, PROBE_JS, 8000L)
                     }.getOrNull()
                     if (result == null) {
-                        WeLogger.i(TAG, "probe eval failed: delay=${delay}ms url=$url")
+                        WeLogger.i(
+                            TAG,
+                            "probe eval failed: delay=${delay}ms url=${url ?: "?"} " +
+                                "class=${wv.javaClass.name}"
+                        )
                         continue
                     }
                     val changed = synchronized(lastResultsLock) {
@@ -140,6 +157,8 @@ object ArticleAdProbe : SwitchFeature() {
         }.start()
     }
 
+    // v3：名字含 WebView 的节点都收下，同时继续往里走——容器节点里可能还包着真 WebView，
+    // v2 在第一个 WebView 节点处停下，可能只收到容器而错过里面的真 WebView。
     private fun collectWebViews(root: View, out: MutableList<Any>) {
         val stack = ArrayDeque<View>()
         stack.add(root)
@@ -147,7 +166,6 @@ object ArticleAdProbe : SwitchFeature() {
             val v = stack.removeFirst()
             if (v.javaClass.name.contains("WebView")) {
                 out.add(v)
-                continue
             }
             if (v is ViewGroup) {
                 for (i in 0 until v.childCount) {
