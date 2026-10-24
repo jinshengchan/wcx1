@@ -2,7 +2,6 @@ package com.Johnny.wcx.features.items.contacts
 
 import android.app.Activity
 import android.util.TypedValue
-import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
 import com.Johnny.wcx.features.api.core.WeDatabaseApi
@@ -23,14 +22,16 @@ import java.util.Locale
 /**
  * 测试版：好友资料页在“地区”正下方显示精确到日的添加时间，对齐参考图样式。
  *
- * 位置：上一版走偏好列表插行，落在头部区块下方、带箭头和副标题，与参考图不符。
- * 本版改走头部注入：ContactInfoUI.initView 跑完后遍历视图树，找到文字以“地区”
- * 开头的 TextView，在其父布局的下一位插入一个同样式 TextView，紧贴在地区行下方。
+ * 位置：偏好列表插行会落在头部区块下方、带箭头和间隔，与参考图不符；所以改走头部注入。
+ * 上一版（只试一次、只认文字以“地区”开头的 TextView）在真机上完全没显示：头部地区行
+ * 可能是一整块文本的一部分，也可能文字比 initView 设得晚，单次扫描命中不了就静默放弃了。
+ * 本版三重兜底：①文字以“地区”开头的 TextView → 在其父布局下一位插同样式行；
+ * ②含“地区”的整块文本 → 在块内地区行后插一行；③都没命中则 0.5s/1.5s/3s 各重试一次。
+ * 每次结果都写日志（标签 ShowDetailedAddTime），以便区分“没找到”和“插入失败”。
  *
  * 格式：添加时间：yyyy-MM-dd (N天)，N = 按日历日期相减的天数（不是毫秒相除向下取整，
  * 后者会因添加时刻晚于当前时刻而少算一天，如 2026-03-06 到 2026-10-24 应为 232 天）。
- * 候选数据源同时写日志（标签 ShowDetailedAddTime），供对照微信自带月份验证；
- * 验证通过后再做正式版（去掉测试标记）。
+ * 候选数据源同时写日志，供对照微信自带月份验证；验证通过后再做正式版（去掉测试标记）。
  *
  * 候选数据源（按优先级）：
  * 1. message 表最早一条 type=10000 系统消息的 createTime（加好友通过时微信插入的
@@ -45,6 +46,7 @@ object ShowDetailedAddTimeInContactDetails : SwitchFeature() {
     override val defaultEnabled: Boolean = true
 
     private const val TAG = "ShowDetailedAddTime"
+    private const val INSERT_TAG = "add_time_test_inserted"
 
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
 
@@ -53,52 +55,90 @@ object ShowDetailedAddTimeInContactDetails : SwitchFeature() {
             firstMethod { name = "initView" }
                 .hookAfter {
                     val activity = thisObject as Activity
-                    runCatching { insertHeaderAddTime(activity) }
+                    runCatching { tryInsertHeaderAddTime(activity) }
                         .onFailure { WeLogger.e(TAG, "insert header addTime failed", it) }
                 }
         }
     }
 
-    private fun insertHeaderAddTime(activity: Activity) {
+    private fun tryInsertHeaderAddTime(activity: Activity) {
         val wxId = activity.currentWxId ?: return
         // 群资料页（ChatroomInfoUI）传进来的是群 id，不是好友，不展示。
         if (wxId.endsWith("@chatroom")) return
 
         val result = resolveAddTime(wxId)
         val daysSuffix = result.daysAgo?.let { " (${it}天)" } ?: ""
-        val text = "添加时间：${result.displayDate}$daysSuffix（测试）"
-
+        val line = "添加时间：${result.displayDate}$daysSuffix（测试）"
         val decorView = activity.window?.decorView as? ViewGroup ?: return
-        val regionView = findRegionTextView(decorView) ?: run {
-            WeLogger.i(TAG, "region TextView not found for $wxId")
-            return
-        }
-        val parent = regionView.parent as? ViewGroup ?: return
-        val index = parent.indexOfChild(regionView)
 
-        val textView = TextView(activity).apply {
-            this.text = text
-            // 照抄地区行的样式：字号、颜色、字体、内边距、布局参数。
-            setTextSize(TypedValue.COMPLEX_UNIT_PX, regionView.textSize)
-            setTextColor(regionView.textColors)
-            typeface = regionView.typeface
-            setPadding(
-                regionView.paddingLeft,
-                regionView.paddingTop,
-                regionView.paddingRight,
-                regionView.paddingBottom
-            )
-            layoutParams = runCatching {
-                ViewGroup.MarginLayoutParams(regionView.layoutParams as ViewGroup.MarginLayoutParams)
-            }.getOrElse {
-                ViewGroup.LayoutParams(
-                    regionView.layoutParams?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT,
-                    regionView.layoutParams?.height ?: ViewGroup.LayoutParams.WRAP_CONTENT
+        var attempt = 0
+        fun runAttempt() {
+            if (hasInsertedMarker(decorView)) return
+            if (insertOnce(decorView, line)) {
+                WeLogger.i(TAG, "inserted header addTime for $wxId: $line")
+                return
+            }
+            attempt++
+            if (attempt <= 3) {
+                val delay = longArrayOf(500L, 1500L, 3000L)[attempt - 1]
+                WeLogger.i(TAG, "region not found yet for $wxId, retry $attempt in ${delay}ms")
+                decorView.postDelayed(
+                    { runCatching { runAttempt() }.onFailure { WeLogger.e(TAG, "retry insert failed", it) } },
+                    delay
                 )
+            } else {
+                WeLogger.i(TAG, "region not found for $wxId after retries, giving up")
             }
         }
-        parent.addView(textView, index + 1)
-        WeLogger.i(TAG, "inserted header addTime for $wxId: $text")
+        runAttempt()
+    }
+
+    /** 本次已插过（防重试重复插）。 */
+    private fun hasInsertedMarker(root: ViewGroup): Boolean {
+        for (i in 0 until root.childCount) {
+            val child = root.getChildAt(i) ?: continue
+            if (child.tag == INSERT_TAG) return true
+            if (child is ViewGroup && hasInsertedMarker(child)) return true
+        }
+        return false
+    }
+
+    /**
+     * 试一次：先找以“地区”开头的 TextView 做兄弟行插入；没有则找含“地区”的整块文本做块内插行。
+     * 返回是否插上了。
+     */
+    private fun insertOnce(root: ViewGroup, line: String): Boolean {
+        val regionView = findRegionTextView(root)
+        if (regionView != null) {
+            val parent = regionView.parent as? ViewGroup ?: return false
+            val index = parent.indexOfChild(regionView)
+            val textView = TextView(regionView.context).apply {
+                tag = INSERT_TAG
+                text = line
+                // 照抄地区行的样式：字号、颜色、字体、内边距、布局参数。
+                setTextSize(TypedValue.COMPLEX_UNIT_PX, regionView.textSize)
+                setTextColor(regionView.textColors)
+                typeface = regionView.typeface
+                setPadding(
+                    regionView.paddingLeft,
+                    regionView.paddingTop,
+                    regionView.paddingRight,
+                    regionView.paddingBottom
+                )
+                layoutParams = runCatching {
+                    ViewGroup.MarginLayoutParams(regionView.layoutParams as ViewGroup.MarginLayoutParams)
+                }.getOrElse {
+                    ViewGroup.LayoutParams(
+                        regionView.layoutParams?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT,
+                        regionView.layoutParams?.height ?: ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                }
+            }
+            parent.addView(textView, index + 1)
+            return true
+        }
+        val blockView = findBlockTextView(root) ?: return false
+        return insertLineAfterRegionInText(blockView, line)
     }
 
     /** 深度遍历找文字以“地区”开头的 TextView（头部区块的地区行）。 */
@@ -113,6 +153,33 @@ object ShowDetailedAddTimeInContactDetails : SwitchFeature() {
             }
         }
         return null
+    }
+
+    /** 深度遍历找文字含“地区”的 TextView（地区行是一整块文本的一部分时用）。 */
+    private fun findBlockTextView(root: ViewGroup): TextView? {
+        for (i in 0 until root.childCount) {
+            val child = root.getChildAt(i) ?: continue
+            if (child is TextView) {
+                val text = child.text?.toString() ?: ""
+                if (text.contains("地区")) return child
+            } else if (child is ViewGroup) {
+                findBlockTextView(child)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    /** 在整块文本的地区行后插一行；已插过则返回 false。 */
+    private fun insertLineAfterRegionInText(textView: TextView, line: String): Boolean {
+        val original = textView.text?.toString() ?: return false
+        if (original.contains(line)) return false
+        val lines = original.split("\n").toMutableList()
+        val index = lines.indexOfFirst { it.contains("地区") }
+        if (index < 0) return false
+        lines.add(index + 1, line)
+        textView.text = lines.joinToString("\n")
+        textView.tag = INSERT_TAG
+        return true
     }
 
     private data class ResolveResult(
