@@ -27,6 +27,10 @@ import com.Johnny.wcx.utils.WeLogger
  * （标签、class、id、文本片段）与数量打到 info 日志。什么都不隐藏、不改页面。
  * 多次采样（1s / 3s / 6s / 12s / 25s / 45s / 75s / 120s）覆盖滚动懒加载；
  * 同一页面结果不变时不重复打日志。诊断结束即废弃，不要合入 master。
+ *
+ * v2：每次采样都打一行 probe sample（不管有没有文章页），含 Activity 名、
+ * WebView 数量与全部 WebView 的 URL——阴性结果也能定位：是没打开文章、
+ * 还是文章页在探针够不到的地方。
  */
 @Feature(
     name = "文章广告探针",
@@ -89,10 +93,18 @@ object ArticleAdProbe : SwitchFeature() {
             runCatching {
                 val webViews = mutableListOf<Any>()
                 collectWebViews(decor, webViews)
-                for (wv in webViews) {
-                    val url = runCatching { WeWebViewApi.getUrl(wv, 5000L) }.getOrNull()
-                        ?: continue
-                    if (!url.contains("mp.weixin.qq.com")) continue
+                val urls = webViews.map { wv ->
+                    runCatching { WeWebViewApi.getUrl(wv, 5000L) }.getOrNull()
+                }
+                // v2 无条件采样日志：每次采样都打，不管有没有文章页。
+                WeLogger.i(
+                    TAG,
+                    "probe sample: delay=${delay}ms process=${TargetProcesses.currentName} " +
+                        "activity=${activity.javaClass.simpleName} webviews=${webViews.size} " +
+                        "urls=[" + urls.joinToString("; ") { (it ?: "?").take(100) } + "]"
+                )
+                for ((wv, url) in webViews.zip(urls)) {
+                    if (url == null || !url.contains("mp.weixin.qq.com")) continue
                     val key = System.identityHashCode(wv).toString() + "|" + url
                     synchronized(lastResultsLock) {
                         if (!lastResults.containsKey(key)) {
