@@ -10,6 +10,7 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import java.util.Collections
 import java.util.WeakHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import com.Johnny.wcx.features.api.ui.WeWebViewApi
 import com.Johnny.wcx.features.core.Feature
 import com.Johnny.wcx.features.core.SwitchFeature
@@ -82,6 +83,12 @@ object ArticleAdProbe : SwitchFeature() {
     private val captured = Collections.newSetFromMap(WeakHashMap<Any, Boolean>())
     private val capturedLock = Any()
 
+    // v6 后补（与隐藏版 v3 同因）：连续跑 JS 失败的次数；同一时间只跑一个扫线程。
+    // 捕获集合会越积越多（实测 45 秒内从 5 涨到 10，v2 日志里到过 21 个），每次扫
+    // 都要挨个对已销毁的旧页面跑 JS，扫的线程越堆越多。连续 2 次失败即踢出。
+    private val failCounts = Collections.synchronizedMap(WeakHashMap<Any, Int>())
+    private val sweepRunning = AtomicBoolean(false)
+
     override fun onEnable() {
         registerUnhook(
             XposedHelpers.findAndHookMethod(
@@ -137,32 +144,49 @@ object ArticleAdProbe : SwitchFeature() {
     private fun sweepCaptured(tag: String) {
         val list = synchronized(capturedLock) { captured.filterNotNull() }
         if (list.isEmpty()) return
+        if (!sweepRunning.compareAndSet(false, true)) return
         Thread {
-            runCatching {
-                val classes = list.map { it.javaClass.name.substringAfterLast('.') }
-                WeLogger.i(
-                    TAG,
-                    "probe captured $tag: process=${TargetProcesses.currentName} count=${list.size} " +
-                        "classes=[" + classes.joinToString("; ") + "]"
-                )
-                for (wv in list) {
-                    val url = runCatching { WeWebViewApi.getUrl(wv, 5000L) }.getOrNull()
-                    val result = runCatching {
-                        WeWebViewApi.evaluateJavascript(wv, PROBE_JS, 8000L)
-                    }.getOrNull()
-                    if (result == null) {
-                        WeLogger.i(
-                            TAG,
-                            "probe captured eval failed: $tag url=${url ?: "?"} class=${wv.javaClass.name}"
-                        )
-                        continue
-                    }
-                    logAdDomIfChanged(
-                        System.identityHashCode(wv).toString() + "|" + (url ?: "captured"),
-                        "probe captured adDom: $tag url=${url ?: "?"} result=$result"
+            try {
+                runCatching {
+                    val classes = list.map { it.javaClass.name.substringAfterLast('.') }
+                    WeLogger.i(
+                        TAG,
+                        "probe captured $tag: process=${TargetProcesses.currentName} count=${list.size} " +
+                            "classes=[" + classes.joinToString("; ") + "]"
                     )
-                }
-            }.onFailure { WeLogger.w(TAG, "sweepCaptured failed", it) }
+                    for (wv in list) {
+                        val url = runCatching { WeWebViewApi.getUrl(wv, 5000L) }.getOrNull()
+                        val result = runCatching {
+                            WeWebViewApi.evaluateJavascript(wv, PROBE_JS, 8000L)
+                        }.getOrNull()
+                        if (result == null) {
+                            val c = (failCounts[wv] ?: 0) + 1
+                            if (c >= 2) {
+                                synchronized(capturedLock) { captured.remove(wv) }
+                                failCounts.remove(wv)
+                                WeLogger.i(
+                                    TAG,
+                                    "probe pruned dead webview: $tag class=${wv.javaClass.name}"
+                                )
+                            } else {
+                                failCounts[wv] = c
+                            }
+                            WeLogger.i(
+                                TAG,
+                                "probe captured eval failed: $tag url=${url ?: "?"} class=${wv.javaClass.name}"
+                            )
+                            continue
+                        }
+                        failCounts.remove(wv)
+                        logAdDomIfChanged(
+                            System.identityHashCode(wv).toString() + "|" + (url ?: "captured"),
+                            "probe captured adDom: $tag url=${url ?: "?"} result=$result"
+                        )
+                    }
+                }.onFailure { WeLogger.w(TAG, "sweepCaptured failed", it) }
+            } finally {
+                sweepRunning.set(false)
+            }
         }.start()
     }
 

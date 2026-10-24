@@ -7,6 +7,7 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import java.util.Collections
 import java.util.WeakHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import com.Johnny.wcx.features.api.ui.WeWebViewApi
 import com.Johnny.wcx.features.core.Feature
 import com.Johnny.wcx.features.core.SwitchFeature
@@ -33,6 +34,13 @@ import com.Johnny.wcx.utils.WeLogger
  * 有窗口期，广告先渲染出来才被藏掉。改成先往页面注入一条 CSS 规则，
  * 让含该路径的 iframe 在渲染时就直接不显示；2 秒循环保留作兜底
  * （盖页面加载前就已存在的 iframe）。
+ *
+ * v3：Jim 实测 3-4 篇文章后失效，重启微信又好——根因是捕获集合越积越多：
+ * 日志里主进程捕获实例 45 秒内从 5 涨到 10（v2 日志里到过 21 个），每次扫
+ * 都要挨个对已销毁的旧页面跑 JS，扫的线程越堆越多，活页面的藏跟不上。
+ * 改两处：连续 2 次跑 JS 失败的实例直接踢出捕获集合（销毁的页面永远失败，
+ * 活页面加载中最多失败 1 次，不会误踢）；同一时间只跑一个扫线程，跑不完
+ * 的跳过，不再堆线程。
  */
 @Feature(
     name = "隐藏文章内广告卡",
@@ -59,6 +67,12 @@ object ArticleAdHider : SwitchFeature() {
     // 构造方法捕获的真 WebView 实例（弱引用，实例回收后自动移除）。
     private val captured = Collections.newSetFromMap(WeakHashMap<Any, Boolean>())
     private val capturedLock = Any()
+
+    // v3：连续跑 JS 失败的次数（弱引用键，随实例回收消失）。
+    private val failCounts = Collections.synchronizedMap(WeakHashMap<Any, Int>())
+
+    // v3：同一时间只跑一个扫线程，跑不完的跳过，不堆线程。
+    private val sweepRunning = AtomicBoolean(false)
 
     override fun onEnable() {
         for (className in listOf(
@@ -94,22 +108,43 @@ object ArticleAdHider : SwitchFeature() {
     private fun sweepHide() {
         val list = synchronized(capturedLock) { captured.filterNotNull() }
         if (list.isEmpty()) return
+        if (!sweepRunning.compareAndSet(false, true)) return
         Thread {
-            runCatching {
-                for (wv in list) {
-                    val hid = runCatching {
-                        WeWebViewApi.evaluateJavascript(wv, HIDE_JS, 8000L)
-                    }.getOrNull()
-                    val n = hid?.trim()?.toIntOrNull() ?: 0
-                    if (n > 0) {
-                        WeLogger.i(
-                            TAG,
-                            "hider hid $n qe iframes: process=${TargetProcesses.currentName} " +
-                                "class=${wv.javaClass.name}"
-                        )
+            try {
+                runCatching {
+                    for (wv in list) {
+                        val hid = runCatching {
+                            WeWebViewApi.evaluateJavascript(wv, HIDE_JS, 8000L)
+                        }.getOrNull()
+                        if (hid == null) {
+                            val c = (failCounts[wv] ?: 0) + 1
+                            if (c >= 2) {
+                                synchronized(capturedLock) { captured.remove(wv) }
+                                failCounts.remove(wv)
+                                WeLogger.i(
+                                    TAG,
+                                    "hider pruned dead webview: process=${TargetProcesses.currentName} " +
+                                        "class=${wv.javaClass.name}"
+                                )
+                            } else {
+                                failCounts[wv] = c
+                            }
+                            continue
+                        }
+                        failCounts.remove(wv)
+                        val n = hid.trim().toIntOrNull() ?: 0
+                        if (n > 0) {
+                            WeLogger.i(
+                                TAG,
+                                "hider hid $n qe iframes: process=${TargetProcesses.currentName} " +
+                                    "class=${wv.javaClass.name}"
+                            )
+                        }
                     }
-                }
-            }.onFailure { WeLogger.w(TAG, "sweepHide failed", it) }
+                }.onFailure { WeLogger.w(TAG, "sweepHide failed", it) }
+            } finally {
+                sweepRunning.set(false)
+            }
         }.start()
     }
 }
