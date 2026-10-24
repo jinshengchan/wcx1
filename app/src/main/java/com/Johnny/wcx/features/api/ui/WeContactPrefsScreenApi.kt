@@ -31,7 +31,12 @@ object WeContactPrefsScreenApi : ApiFeature() {
         val key: String,
         val title: String,
         val summary: String? = null,
-        val position: Int = -1
+        val position: Int = -1,
+        /**
+         * 锚点标题：非空时插到标题等于该值的那一项下一行，找不到则回落到 position。
+         * 用于“地区下一行”这类相对位置，微信各页面的行顺序不固定时比写死 position 可靠。
+         */
+        val afterTitle: String? = null
     )
 
     private const val TAG = "WeContactPrefsScreenApi"
@@ -73,7 +78,8 @@ object WeContactPrefsScreenApi : ApiFeature() {
                                     setKeyMethod.invoke(pref, item.key)
                                     setTitleMethod.invoke(pref, item.title)
                                     item.summary?.let { summary -> setSummaryMethod.invoke(pref, summary) }
-                                    addPreferenceMethod.invoke(adapterInstance, pref, item.position)
+                                    val insertPos = resolveInsertPosition(adapterInstance, item)
+                                    addPreferenceMethod.invoke(adapterInstance, pref, insertPos)
                                 }
                             } catch (ex: Exception) {
                                 WeLogger.e(
@@ -113,6 +119,54 @@ object WeContactPrefsScreenApi : ApiFeature() {
                 }
             }
         }
+    }
+
+    /**
+     * 带 afterTitle 的插入：先在 adapter 里找标题等于 afterTitle 的一项，插到它下一行；
+     * 找不到则回落到 position（并记日志）。position 越界时钳到列表末尾。
+     */
+    private fun resolveInsertPosition(adapterInstance: Any, item: PreferenceItem): Int {
+        val adapter = adapterInstance as? BaseAdapter ?: return item.position
+        val count = runCatching { adapter.count }.getOrNull() ?: return item.position
+        item.afterTitle?.let { anchor ->
+            findPreferenceIndex(adapter, anchor)?.let { return (it + 1).coerceAtMost(count) }
+            WeLogger.i(TAG, "anchor title '$anchor' not found, falling back to position ${item.position}")
+        }
+        return when {
+            item.position < 0 -> count
+            item.position > count -> count
+            else -> item.position
+        }
+    }
+
+    private fun findPreferenceIndex(adapter: BaseAdapter, title: String): Int? {
+        val count = runCatching { adapter.count }.getOrNull() ?: return null
+        for (i in 0 until count) {
+            val pref = runCatching { adapter.getItem(i) }.getOrNull() ?: continue
+            if (readPreferenceTitle(pref) == title) return i
+        }
+        return null
+    }
+
+    /** 读微信 Preference 的标题：优先 getTitle()，没有则读 title/mTitle 字段。 */
+    private fun readPreferenceTitle(pref: Any): String? {
+        return runCatching {
+            val getter = pref.javaClass.methods.firstOrNull { it.name == "getTitle" && it.parameterCount == 0 }
+            if (getter != null) return@runCatching (getter.invoke(pref) as? CharSequence)?.toString()
+            var cls: Class<*>? = pref.javaClass
+            while (cls != null) {
+                val field = cls.declaredFields.firstOrNull {
+                    (it.name == "title" || it.name == "mTitle") &&
+                        (CharSequence::class.java.isAssignableFrom(it.type) || it.type == String::class.java)
+                }
+                if (field != null) {
+                    field.isAccessible = true
+                    return@runCatching (field.get(pref) as? CharSequence)?.toString()
+                }
+                cls = cls.superclass
+            }
+            null
+        }.getOrNull()
     }
 
     private fun initReflection() {
