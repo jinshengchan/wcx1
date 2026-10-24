@@ -6,7 +6,9 @@ import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
 import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
+import java.util.Collections
 import com.Johnny.wcx.features.api.ui.WeWebViewApi
 import com.Johnny.wcx.features.core.Feature
 import com.Johnny.wcx.features.core.SwitchFeature
@@ -37,6 +39,12 @@ import com.Johnny.wcx.utils.WeLogger
  * 只要 Activity 是 TmplWebViewMMUI，就对每个 WebView 节点直接跑 JS；
  * 采样行同时打节点类名（区分真 WebView 还是名字含 WebView 的容器）。
  * 遍历也不再在 WebView 节点处停下，容器里的真 WebView 也能被收到。
+ *
+ * v4：v3 实测文章页树里只有 4 个界面壳，没有真 WebView——爬树这条路到头了。
+ * 改钩三类 WebView 的全部构造方法，真 WebView 一创建就抓住实例直接跑 JS，
+ * 不管它挂在哪个窗口、哪个进程；另加文章页完整视图树类名清单，看正文到底
+ * 由什么渲染。Jim 实测是快速连刷多篇文章不停留，因此捕获与树清单都放在
+ * 打开后 1s/3s 的早期采样，不依赖 2 分钟停留。
  */
 @Feature(
     name = "文章广告探针",
@@ -66,6 +74,10 @@ object ArticleAdProbe : SwitchFeature() {
     private val lastResults = mutableMapOf<String, String>()
     private val lastResultsLock = Any()
 
+    // v4：构造方法捕获的真 WebView 实例（弱引用，实例回收后自动移除）。
+    private val captured = Collections.newSetFromMap(WeakHashMap<Any, Boolean>())
+    private val capturedLock = Any()
+
     override fun onEnable() {
         registerUnhook(
             XposedHelpers.findAndHookMethod(
@@ -80,7 +92,88 @@ object ArticleAdProbe : SwitchFeature() {
                 }
             )
         )
+        // v4：钩三类 WebView 的全部构造方法，真 WebView 一创建就抓住实例，
+        // 不管它挂在哪个窗口、哪个进程。类不存在（如 smtt）就记一行跳过。
+        for (className in listOf(
+            "android.webkit.WebView",
+            "com.tencent.xweb.WebView",
+            "com.tencent.smtt.sdk.WebView"
+        )) {
+            runCatching {
+                val clazz = Class.forName(className)
+                val hook = object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val wv = param.thisObject ?: return
+                        synchronized(capturedLock) { captured.add(wv) }
+                        WeLogger.i(
+                            TAG,
+                            "probe webview created: process=${TargetProcesses.currentName} class=$className"
+                        )
+                    }
+                }
+                XposedBridge.hookAllConstructors(clazz, hook).forEach { registerUnhook(it) }
+            }.onFailure {
+                WeLogger.i(TAG, "probe ctor hook unavailable: $className")
+            }
+        }
+        // v4：无 Activity 进程（如 xweb 特权进程）里的捕获实例也定期扫一次。
+        scheduleCapturedSweep()
         WeLogger.i(TAG, "probe enabled in process ${TargetProcesses.currentName}")
+    }
+
+    // v4：每 15 秒扫一次捕获集合；空集合静默，不打日志。
+    private fun scheduleCapturedSweep() {
+        mainHandler.postDelayed({
+            runCatching { sweepCaptured("sweep") }
+            scheduleCapturedSweep()
+        }, 15000L)
+    }
+
+    // v4：对捕获的真 WebView 跑 JS，广告 DOM 结果去重后打日志。
+    private fun sweepCaptured(tag: String) {
+        val list = synchronized(capturedLock) { captured.filterNotNull() }
+        if (list.isEmpty()) return
+        Thread {
+            runCatching {
+                val classes = list.map { it.javaClass.name.substringAfterLast('.') }
+                WeLogger.i(
+                    TAG,
+                    "probe captured $tag: process=${TargetProcesses.currentName} count=${list.size} " +
+                        "classes=[" + classes.joinToString("; ") + "]"
+                )
+                for (wv in list) {
+                    val url = runCatching { WeWebViewApi.getUrl(wv, 5000L) }.getOrNull()
+                    val result = runCatching {
+                        WeWebViewApi.evaluateJavascript(wv, PROBE_JS, 8000L)
+                    }.getOrNull()
+                    if (result == null) {
+                        WeLogger.i(
+                            TAG,
+                            "probe captured eval failed: $tag url=${url ?: "?"} class=${wv.javaClass.name}"
+                        )
+                        continue
+                    }
+                    logAdDomIfChanged(
+                        System.identityHashCode(wv).toString() + "|" + (url ?: "captured"),
+                        "probe captured adDom: $tag url=${url ?: "?"} result=$result"
+                    )
+                }
+            }.onFailure { WeLogger.w(TAG, "sweepCaptured failed", it) }
+        }.start()
+    }
+
+    // 广告 DOM 结果去重：同一实例同一结果只打一次。
+    private fun logAdDomIfChanged(key: String, line: String) {
+        val changed = synchronized(lastResultsLock) {
+            val prev = lastResults[key]
+            if (prev != line) {
+                lastResults[key] = line
+                true
+            } else {
+                false
+            }
+        }
+        if (changed) WeLogger.i(TAG, line)
     }
 
     private fun scheduleProbe(activity: Activity) {
@@ -115,6 +208,34 @@ object ArticleAdProbe : SwitchFeature() {
                 // v3：文章页不依赖 URL。TmplWebViewMMUI 就是文章页 Activity，
                 // 对它的每个 WebView 节点都直接跑 JS；其它页面仍用 mp 域名过滤。
                 val isArticlePage = activity.javaClass.name.contains("TmplWebViewMMUI")
+                // v4：文章页打开后 1 秒就扫一次捕获集合（Jim 刷文章不停留，等不到长采样）；
+                // 3 秒时再打一张完整视图树类名清单，看正文到底由什么渲染。
+                if (isArticlePage && delay == 1000L) {
+                    sweepCaptured("resume-1s")
+                }
+                if (isArticlePage && delay == 3000L) {
+                    val counts = LinkedHashMap<String, Int>()
+                    var total = 0
+                    val stack = ArrayDeque<View>()
+                    stack.add(decor)
+                    while (stack.isNotEmpty()) {
+                        val v = stack.removeFirst()
+                        total++
+                        val name = v.javaClass.name.substringAfterLast('.')
+                        counts[name] = (counts[name] ?: 0) + 1
+                        if (v is ViewGroup) {
+                            for (i in 0 until v.childCount) {
+                                stack.add(v.getChildAt(i))
+                            }
+                        }
+                    }
+                    val top = counts.entries.sortedByDescending { it.value }.take(80)
+                        .joinToString("; ") { "${it.key}x${it.value}" }
+                    WeLogger.i(
+                        TAG,
+                        "probe tree: activity=TmplWebViewMMUI total=$total classes=[$top]"
+                    )
+                }
                 for ((wv, url) in webViews.zip(urls)) {
                     if (!isArticlePage && (url == null || !url.contains("mp.weixin.qq.com"))) continue
                     val key = System.identityHashCode(wv).toString() + "|" + (url ?: "tmpl")
