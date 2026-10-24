@@ -29,6 +29,11 @@ import java.util.Locale
  * ②含“地区”的整块文本 → 在块内地区行后插一行；③都没命中则 0.5s/1.5s/3s 各重试一次。
  * 每次结果都写日志（标签 ShowDetailedAddTime），以便区分“没找到”和“插入失败”。
  *
+ * 闪烁问题（2026-10-24 真机反馈：部分联系人该行显示 1 秒、消失 1 秒、再显示）：
+ * 资料未全缓存的联系人，微信拿到异步数据后会重建头部，把外加的行清掉，之后逻辑
+ * 第二次触发又补上。修法：插上后启动 4 秒观察期，每 400ms 查一次头部，被清掉就
+ * 立刻补上（缺口从约 1 秒缩到 0.4 秒内）；观察期结束即停，不常驻后台。
+ *
  * 格式：添加时间：yyyy-MM-dd (N天)，N = 按日历日期相减的天数（不是毫秒相除向下取整，
  * 后者会因添加时刻晚于当前时刻而少算一天，如 2026-03-06 到 2026-10-24 应为 232 天）。
  * 候选数据源同时写日志，供对照微信自带月份验证；验证通过后再做正式版（去掉测试标记）。
@@ -47,6 +52,10 @@ object ShowDetailedAddTimeInContactDetails : SwitchFeature() {
 
     private const val TAG = "ShowDetailedAddTime"
     private const val INSERT_TAG = "add_time_test_inserted"
+
+    // 头部观察期：插上后每 400ms 查一次、共 10 次（约 4 秒），微信重建头部清掉行时立刻补上。
+    private const val WATCH_INTERVAL_MS = 400L
+    private const val WATCH_CHECKS = 10
 
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
 
@@ -76,6 +85,7 @@ object ShowDetailedAddTimeInContactDetails : SwitchFeature() {
             if (hasInsertedMarker(decorView)) return
             if (insertOnce(decorView, line)) {
                 WeLogger.i(TAG, "inserted header addTime for $wxId: $line")
+                startHeaderWatcher(decorView, wxId, line)
                 return
             }
             attempt++
@@ -105,9 +115,10 @@ object ShowDetailedAddTimeInContactDetails : SwitchFeature() {
 
     /**
      * 试一次：先找以“地区”开头的 TextView 做兄弟行插入；没有则找含“地区”的整块文本做块内插行。
-     * 返回是否插上了。
+     * 已插过则直接返回 false，避免观察期与重试并发时插出双行。
      */
     private fun insertOnce(root: ViewGroup, line: String): Boolean {
+        if (hasInsertedMarker(root)) return false
         val regionView = findRegionTextView(root)
         if (regionView != null) {
             val parent = regionView.parent as? ViewGroup ?: return false
@@ -139,6 +150,33 @@ object ShowDetailedAddTimeInContactDetails : SwitchFeature() {
         }
         val blockView = findBlockTextView(root) ?: return false
         return insertLineAfterRegionInText(blockView, line)
+    }
+
+    /**
+     * 插上后观察一段时间：微信异步刷新重建头部时会清掉插入的行，发现没了就立刻补上。
+     * 观察期约 4 秒，结束即停；不常驻、不碰微信数据，只是补自己插的那行。
+     */
+    private fun startHeaderWatcher(decorView: ViewGroup, wxId: String, line: String) {
+        var checks = 0
+        fun tick() {
+            if (checks >= WATCH_CHECKS) return
+            checks++
+            if (!hasInsertedMarker(decorView)) {
+                if (insertOnce(decorView, line)) {
+                    WeLogger.i(TAG, "re-inserted header addTime for $wxId after header refresh")
+                }
+            }
+            if (checks < WATCH_CHECKS) {
+                decorView.postDelayed(
+                    { runCatching { tick() }.onFailure { WeLogger.e(TAG, "header watcher failed", it) } },
+                    WATCH_INTERVAL_MS
+                )
+            }
+        }
+        decorView.postDelayed(
+            { runCatching { tick() }.onFailure { WeLogger.e(TAG, "header watcher failed", it) } },
+            WATCH_INTERVAL_MS
+        )
     }
 
     /** 深度遍历找文字以“地区”开头的 TextView（头部区块的地区行）。 */
