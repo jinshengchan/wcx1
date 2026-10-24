@@ -68,7 +68,7 @@ object ShowDetailedAddTimeInContactDetails : SwitchFeature() {
 
         val result = resolveAddTime(wxId)
         val daysSuffix = result.daysAgo?.let { " (${it}天)" } ?: ""
-        val line = "添加时间：${result.displayDate}$daysSuffix（测试）"
+        val line = "添加时间：${result.displayDate}$daysSuffix"
         val decorView = activity.window?.decorView as? ViewGroup ?: return
 
         var attempt = 0
