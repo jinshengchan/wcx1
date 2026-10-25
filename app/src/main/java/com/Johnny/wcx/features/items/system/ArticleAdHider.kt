@@ -49,6 +49,12 @@ import com.Johnny.wcx.utils.WeLogger
  * 藏法，清旧实例与单飞扫线程保留。刷 5 篇以上：不失效则 CSS 有罪，
  * 还失效则 CSS 无罪，再查广告格式或进程那条线。闪一下会回来（第一版
  * 的老样子），这是定性用的版本，不是最终方案。
+ *
+ * v5：Jim 确认第四版不再出现 3-4 篇后失效，只剩有的藏得太慢——定性上
+ * CSS 这条线可以先定罪（机制以后再深究），最终方案不用 CSS。慢的原因
+ * 是 2 秒扫一轮，新广告 iframe 出来要等下一轮，忙时还要排队（实测有
+ * 一处等了 6 秒）。改动只有一处：扫间隔 2 秒改 0.5 秒；清旧实例与单飞
+ * 保护都在，线程不会堆起来。
  */
 @Feature(
     name = "隐藏文章内广告卡",
@@ -105,12 +111,12 @@ object ArticleAdHider : SwitchFeature() {
         WeLogger.i(TAG, "hider enabled in process ${TargetProcesses.currentName}")
     }
 
-    // 每 2 秒扫一次捕获集合；空集合静默，不打日志。
+    // v5：每 0.5 秒扫一次捕获集合；空集合静默，不打日志。
     private fun scheduleHiderSweep() {
         mainHandler.postDelayed({
             runCatching { sweepHide() }
             scheduleHiderSweep()
-        }, 2000L)
+        }, 500L)
     }
 
     private fun sweepHide() {
