@@ -57,8 +57,8 @@ object ArticleAdProbe : SwitchFeature() {
 
     private const val TAG = "ArticleAdProbe"
 
-    // 探针默认开启，装上即工作，省去再去设置里找开关。
-    override val defaultEnabled: Boolean = true
+    // v6 隐藏测试默认关闭高频探针；需要诊断时由用户手动启用。
+    override val defaultEnabled: Boolean = false
 
     // 探针要自己发现文章页在哪个进程，因此全部进程都加载。
     override val shouldLoadInCurrentProcess: Boolean = true
@@ -68,7 +68,7 @@ object ArticleAdProbe : SwitchFeature() {
     // v5：每个最内层节点再带往上 6 层祖先链（tag.class#id），用来定广告卡容器。
     // v6：再枚举全部 iframe（来源、尺寸、视口位置、是否可见）——可见广告卡不在
     // 顶层文档文字里，最大可能是跨域 iframe，藏 iframe 本身不需要读里面。
-    private const val PROBE_JS = """(function(){var nodes=[];var total=0;var all=document.getElementsByTagName('*');for(var i=0;i<all.length;i++){var el=all[i];var t=el.textContent||'';if(t.indexOf('广告')<0)continue;total++;var childHas=false;for(var j=0;j<el.children.length;j++){if((el.children[j].textContent||'').indexOf('广告')>=0){childHas=true;break;}}if(!childHas){var cls=(typeof el.className==='string')?el.className:'';var txt=t.replace(/\s+/g,' ').substring(0,24);var chain=[];var p=el;for(var k=0;k<6&&p;k++){var pc=(typeof p.className==='string')?p.className:'';chain.push(p.tagName+'.'+pc.substring(0,40)+'#'+(p.id||''));p=p.parentElement;}nodes.push(el.tagName+'|'+cls+'|'+(el.id||'')+'|'+txt+'|chain:'+chain.join('>'));if(nodes.length>=30)break;}}var frs=[];var ifs=document.getElementsByTagName('iframe');for(var i=0;i<ifs.length;i++){var f=ifs[i];var rt=null;try{rt=f.getBoundingClientRect();}catch(e){}frs.push({src:(f.src||'').substring(0,120),w:f.clientWidth,h:f.clientHeight,top:rt?Math.round(rt.top):-1,vis:!!f.offsetParent});if(frs.length>=30)break;}return JSON.stringify({href:location.href,title:document.title,adRelated:total,adNodes:nodes,iframes:frs});})()"""
+    private const val PROBE_JS = """(function(){var nodes=[];var total=0;var all=document.getElementsByTagName('*');for(var i=0;i<all.length;i++){var el=all[i];if(/^(SCRIPT|STYLE|NOSCRIPT)$/.test(el.tagName))continue;var t=el.textContent||'';if(t.indexOf('广告')<0)continue;total++;var childHas=false;for(var j=0;j<el.children.length;j++){if((el.children[j].textContent||'').indexOf('广告')>=0){childHas=true;break;}}if(!childHas){var cls=(typeof el.className==='string')?el.className:'';var txt=t.replace(/\s+/g,' ').substring(0,24);var chain=[];var p=el;for(var k=0;k<6&&p;k++){var pc=(typeof p.className==='string')?p.className:'';chain.push(p.tagName+'.'+pc.substring(0,40)+'#'+(p.id||''));p=p.parentElement;}nodes.push(el.tagName+'|'+cls+'|'+(el.id||'')+'|'+txt+'|chain:'+chain.join('>'));if(nodes.length>=30)break;}}var frs=[];var ifs=document.getElementsByTagName('iframe');for(var i=0;i<ifs.length;i++){var f=ifs[i];var rt=null;try{rt=f.getBoundingClientRect();}catch(e){}var chain=[];var p=f;for(var k=0;k<5&&p;k++){chain.push(p.tagName+'#'+(p.id||'')+'.'+(typeof p.className==='string'?p.className.substring(0,80):''));p=p.parentElement;}frs.push({chain:chain,src:(f.src||'').substring(0,120),w:f.clientWidth,h:f.clientHeight,top:rt?Math.round(rt.top):-1,vis:!!f.offsetParent});if(frs.length>=30)break;}return JSON.stringify({href:location.href,title:document.title,adRelated:total,adNodes:nodes,iframes:frs});})()"""
 
     // 采样延迟（毫秒）：覆盖打开后滚动懒加载的时间窗。
     private val SAMPLE_DELAYS = longArrayOf(1000L, 3000L, 6000L, 12000L, 25000L, 45000L, 75000L, 120000L)
@@ -313,7 +313,10 @@ object ArticleAdProbe : SwitchFeature() {
         stack.add(root)
         while (stack.isNotEmpty()) {
             val v = stack.removeFirst()
-            if (v.javaClass.name.contains("WebView")) {
+            if (v.javaClass.methods.any {
+                    it.name == "evaluateJavascript" && it.parameterTypes.size == 2 &&
+                        it.parameterTypes[0] == String::class.java
+                }) {
                 out.add(v)
             }
             if (v is ViewGroup) {

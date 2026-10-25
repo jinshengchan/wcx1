@@ -6,6 +6,7 @@ on:
     branches:
       - master
       - dev
+      - test/article-ad-probe
     tags:
       - 'v*'
     paths-ignore:
@@ -43,6 +44,7 @@ jobs:
         (
           github.ref == 'refs/heads/master' ||
           github.ref == 'refs/heads/dev' ||
+          github.ref == 'refs/heads/test/article-ad-probe' ||
           github.event_name == 'pull_request'
         )
       )
