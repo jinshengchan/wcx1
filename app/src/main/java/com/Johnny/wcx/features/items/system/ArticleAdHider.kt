@@ -41,6 +41,14 @@ import com.Johnny.wcx.utils.WeLogger
  * 改两处：连续 2 次跑 JS 失败的实例直接踢出捕获集合（销毁的页面永远失败，
  * 活页面加载中最多失败 1 次，不会误踢）；同一时间只跑一个扫线程，跑不完
  * 的跳过，不再堆线程。
+ *
+ * v4：定性对照版。Jim 指明隐藏第一版没有 3-4 篇后失效的问题，而第一版
+ * 与第二版之间只差 CSS 注入这一处——但 CSS 怎么导致多篇后失效，机制上
+ * 尚未想通（按说 CSS 只会让藏得更彻底），也不能排除第一版那次测得少、
+ * 没刷到阈值。因此 v4 只做一处改动：拿掉 CSS 注入，回到第一版的纯内联
+ * 藏法，清旧实例与单飞扫线程保留。刷 5 篇以上：不失效则 CSS 有罪，
+ * 还失效则 CSS 无罪，再查广告格式或进程那条线。闪一下会回来（第一版
+ * 的老样子），这是定性用的版本，不是最终方案。
  */
 @Feature(
     name = "隐藏文章内广告卡",
@@ -57,10 +65,10 @@ object ArticleAdHider : SwitchFeature() {
     // 要自己发现文章页在哪个进程，因此全部进程都加载。
     override val shouldLoadInCurrentProcess: Boolean = true
 
-    // 藏 iframe 的 JS：先注入一条 CSS 规则（渲染时直接不显示，消灭闪一下的
-    // 窗口期），再藏已存在的同类 iframe，返回本轮新藏的数量。只动来源含
-    // 微信模板广告路径的 iframe。
-    private const val HIDE_JS = """(function(){if(!document.getElementById('wcx-qe-hide')){var s=document.createElement('style');s.id='wcx-qe-hide';s.textContent='iframe[src*="wxa.wxs.qq.com/tmpl/qe/"]{display:none!important}';(document.head||document.documentElement).appendChild(s);}var n=0;var ifs=document.getElementsByTagName('iframe');for(var i=0;i<ifs.length;i++){var f=ifs[i];var src=f.src||'';if(src.indexOf('wxa.wxs.qq.com/tmpl/qe/')>=0&&f.style.display!=='none'){f.style.display='none';n++;}}return n;})()"""
+    // v4 定性对照：拿掉 CSS 注入，回到第一版的纯内联藏法（只改这一处，
+    // 其余 v3 逻辑不变）。藏 iframe 的 JS：只动来源含微信模板广告路径
+    // 的 iframe，返回本轮新藏的数量。
+    private const val HIDE_JS = """(function(){var n=0;var ifs=document.getElementsByTagName('iframe');for(var i=0;i<ifs.length;i++){var f=ifs[i];var s=f.src||'';if(s.indexOf('wxa.wxs.qq.com/tmpl/qe/')>=0&&f.style.display!=='none'){f.style.display='none';n++;}}return n;})()"""
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
