@@ -133,6 +133,10 @@ object MarkdownRendering : ClickableFeature(), IResolveDex {
                         color =
                             if (isDarkMode && !isSelfSender) "#CDCDCD".toColorInt() else "#282828".toColorInt()
 
+                        // URLSpan 绘制链接时取 TextPaint.linkColor；新造的 TextPaint 默认 linkColor 为 0（全透明），
+                        // 会导致 markdown-rs + Html 路径下的链接看不见；此处按深浅色显式指定链接色。
+                        linkColor = if (isDarkMode) "#8AB4F8".toColorInt() else "#576B95".toColorInt()
+
                         val spSize = 17f
                         textSize = TypedValue.applyDimension(
                             TypedValue.COMPLEX_UNIT_SP,
