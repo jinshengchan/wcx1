@@ -509,7 +509,7 @@ fun BaseContactSelector(
                     OutlinedTextField(
                         value = searchQuery,
                         onValueChange = onSearchQueryChange,
-                        modifier = Modifier.weight(1f).height(48.dp),
+                        modifier = Modifier.weight(1f).height(52.dp),
                         placeholder = { Text("搜索昵称或微信号") },
                         leadingIcon = {
                             Icon(
@@ -551,6 +551,7 @@ fun BaseContactSelector(
                                     val count = typeCounts[type] ?: 0
                                     val displayName = type.displayNameRes
                                     FilterChip(
+                                        modifier = Modifier.height(28.dp),
                                         selected = isSelected,
                                         onClick = { selectedType = type },
                                         label = {
@@ -588,6 +589,7 @@ fun BaseContactSelector(
                                     val modeIndex = availableFilterModes.indexOf(filterMode).coerceAtLeast(0)
                                     val hasMoreModes = availableFilterModes.size > 1
                                     FilterChip(
+                                        modifier = Modifier.height(28.dp),
                                         selected = true,
                                         onClick = {
                                             if (!hasMoreModes) {
@@ -616,6 +618,7 @@ fun BaseContactSelector(
                                 if (filterMode == ContactFilterMode.LABELS) {
                                         val isSelected = selectedLabelName == null
                                         FilterChip(
+                                            modifier = Modifier.height(28.dp),
                                             selected = isSelected,
                                             onClick = { selectedLabelName = null },
                                             label = { Text("全部") }
@@ -625,6 +628,7 @@ fun BaseContactSelector(
                                         val isSelected = selectedLabelName == label.labelName
                                         val labelCount = labelCounts[label.labelName] ?: 0
                                         FilterChip(
+                                            modifier = Modifier.height(28.dp),
                                             selected = isSelected,
                                             onClick = { selectedLabelName = if (isSelected) null else label.labelName },
                                             label = {
@@ -644,6 +648,7 @@ fun BaseContactSelector(
                                             selectedGroupingId == null
                                         }
                                         FilterChip(
+                                            modifier = Modifier.height(28.dp),
                                             selected = isSelected,
                                             onClick = {
                                                 if (filterMode == ContactFilterMode.AGGREGATION) {
@@ -659,6 +664,7 @@ fun BaseContactSelector(
                                         val isSelected = selectedId == option.id
                                         val count = filteredContacts.count { it.wxId in option.wxIds }
                                         FilterChip(
+                                            modifier = Modifier.height(28.dp),
                                             selected = isSelected,
                                             onClick = {
                                                 if (filterMode == ContactFilterMode.AGGREGATION) {
@@ -685,6 +691,7 @@ fun BaseContactSelector(
                             SortMode.entries.forEach { mode ->
                                 val displayName = mode.displayNameRes(sortReversed)
                                 FilterChip(
+                                    modifier = Modifier.height(28.dp),
                                     selected = sortMode == mode,
                                     enabled = !isSortLoading,
                                     onClick = { switchSortMode(mode) },
@@ -707,6 +714,7 @@ fun BaseContactSelector(
                             }
 
                             FilterChip(
+                                modifier = Modifier.height(28.dp),
                                 selected = sortReversed,
                                 enabled = !isSortLoading,
                                 onClick = { sortReversed = !sortReversed },
@@ -731,6 +739,7 @@ fun BaseContactSelector(
                             ) {
                                 onSelectAll?.let {
                                     FilterChip(
+                                        modifier = Modifier.height(28.dp),
                                         selected = false,
                                         onClick = { it(displayedContacts) },
                                         label = { Text("全选") },
@@ -745,6 +754,7 @@ fun BaseContactSelector(
                                 }
                                 onDeselectAll?.let {
                                     FilterChip(
+                                        modifier = Modifier.height(28.dp),
                                         selected = false,
                                         onClick = { it(displayedContacts) },
                                         label = { Text("全不选") },
@@ -759,6 +769,7 @@ fun BaseContactSelector(
                                 }
                                 onInvertSelection?.let {
                                     FilterChip(
+                                        modifier = Modifier.height(28.dp),
                                         selected = false,
                                         onClick = { it(displayedContacts) },
                                         label = { Text("反选") },
