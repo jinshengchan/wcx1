@@ -16,7 +16,7 @@ import org.json.JSONTokener
 import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 
-/** Test branch v7: article-scoped CSS plus inline DOM filtering, no blocking scan thread.
+/** Test branch v8: article-scoped CSS plus inline DOM filtering, no blocking scan thread.
  * Each WebView has an independent callback deadline; stale pages cannot delay a live article.
  * The existing qe iframe rule is retained as an experimental rule, restricted to article pages.
  * Explicit ad slots cover body/footer/comment ads; no parent/text-based blanket deletion.
@@ -24,18 +24,21 @@ import java.util.WeakHashMap
 @Feature(
     name = "隐藏文章内广告卡",
     categories = ["系统与隐私"],
-    description = "测试版 v7：异步清理文章广告，监听正文、底部及留言流动态广告节点"
+    description = "页面层：隐藏正文、底部及留言广告；v8 跟随开关撤销 CSS 和监听，默认关闭"
 )
 object ArticleAdHider : SwitchFeature() {
     private const val TAG = "ArticleAdHider"
-    override val defaultEnabled: Boolean = true
+    override val defaultEnabled: Boolean = false
+    // The controller stays available even when filtering is off, to observe saved changes.
+    override val shouldEnableOnStartup: Boolean = true
     override val shouldLoadInCurrentProcess: Boolean = true
 
     // Exported by tests directly from this literal: this is the exact script sent to WeChat.
     internal val HIDE_JS = """
 (function () {
     if (window.__wcxArticleAdV6) window.__wcxArticleAdV6.stop();
-    var key = '__wcxArticleAdV7';
+    if (window.__wcxArticleAdV7) window.__wcxArticleAdV7.stop();
+    var key = '__wcxArticleAdV8';
     function article() {
         return location.hostname === 'mp.weixin.qq.com' &&
             /^\/(s|s\/|mp\/appmsg\/show)(\?|$)/.test(location.pathname + location.search);
@@ -48,7 +51,7 @@ object ArticleAdHider : SwitchFeature() {
     if (previous) { previous.scan(); return previous.report(); }
     var stopped = false, total = 0, reapplied = 0;
     var changed = [], hidden = new Map();
-    var styleId = '__wcx_article_ads_v7_style';
+    var styleId = '__wcx_article_ads_v8_style';
     var sheet = null;
     function ensureStyle() {
         if (sheet && sheet.isConnected) return;
@@ -144,21 +147,52 @@ object ArticleAdHider : SwitchFeature() {
 })()
 """.trimIndent()
 
-    private const val STOP_JS = "window.__wcxArticleAdV7 && window.__wcxArticleAdV7.stop();"
+    internal const val STOP_JS = "(function(){['__wcxArticleAdV6','__wcxArticleAdV7','__wcxArticleAdV8'].forEach(function(k){if(window[k])window[k].stop();});return 'cleaned';})()"
     private val handler = Handler(Looper.getMainLooper())
     // Accessed only on main thread, values never retain a WebView.
     private data class State(var request: Long = 0, var deadline: Long = 0, var failures: Int = 0,
-                             var retryAt: Long = 0, var lastTotal: Int = -1, var lastReapplied: Int = -1)
+                             var retryAt: Long = 0, var lastTotal: Int = -1, var lastReapplied: Int = -1, var cleaned: Boolean = false)
     private val captured = WeakHashMap<Any, State>()
     private var running = false
+    private var lastDesired: Boolean? = null
     private var generation = 0
     private var nextRequest = 0L
     private val sweep = object : Runnable {
         override fun run() {
             if (!running) return
+            val desired = configuredEnabled
+            _isEnabled = desired
+            if (lastDesired != desired) {
+                lastDesired = desired
+                if (!desired) captured.values.forEach { state ->
+                    state.request = ++nextRequest
+                    state.deadline = 0
+                    state.retryAt = 0
+                    state.cleaned = false
+                }
+                WeLogger.i(TAG, "v8 saved switch=$desired process=${TargetProcesses.currentName}")
+            }
             captured.entries.toList().forEach { (view, state) -> evaluate(view, state) }
             handler.postDelayed(this, 500L)
         }
+    }
+
+    override fun onBeforeToggle(newState: Boolean, context: android.content.Context): Boolean {
+        com.Johnny.wcx.preferences.WePrefs.putBool(name, newState)
+        _isEnabled = newState
+        // Keep the controller/hooks installed; filtering and cleanup read the saved switch.
+        handler.post {
+            if (running) captured.entries.toList().forEach { (view, state) ->
+                state.retryAt = 0
+                if (!newState) {
+                    state.request = ++nextRequest
+                    state.deadline = 0
+                    state.cleaned = false
+                }
+                evaluate(view, state)
+            }
+        }
+        return true
     }
 
     override fun onEnable() {
@@ -172,6 +206,7 @@ object ArticleAdHider : SwitchFeature() {
                     handler.post {
                         if (running) {
                             val state = captured.getOrPut(view) { State() }
+                            state.cleaned = false
                             state.retryAt = 0
                             evaluate(view, state)
                         }
@@ -208,7 +243,7 @@ object ArticleAdHider : SwitchFeature() {
         ))
         handler.removeCallbacks(sweep)
         handler.post(sweep)
-        WeLogger.i(TAG, "v7 asynchronous DOM hider enabled: ${TargetProcesses.currentName}")
+        WeLogger.i(TAG, "v8 asynchronous DOM hider enabled: ${TargetProcesses.currentName}")
     }
 
     private fun invokeJs(view: Any, script: String, callback: ValueCallback<String>) {
@@ -222,6 +257,11 @@ object ArticleAdHider : SwitchFeature() {
 
     private fun evaluate(view: Any, state: State) {
         val now = SystemClock.uptimeMillis()
+        if (!configuredEnabled) {
+            cleanDisabledPage(view, state, now)
+            return
+        }
+        state.cleaned = false
         if (state.deadline != 0L) {
             if (now < state.deadline) return
             state.deadline = 0
@@ -241,6 +281,11 @@ object ArticleAdHider : SwitchFeature() {
                     val current = reference.get() ?: return@post
                     if (!running || epoch != generation || captured[current] !== state || state.request != request) return@post
                     state.deadline = 0
+                    if (!configuredEnabled) {
+                        state.cleaned = false
+                        cleanDisabledPage(current, state, SystemClock.uptimeMillis())
+                        return@post
+                    }
                     val json = runCatching {
                         val value = JSONTokener(result ?: "null").nextValue()
                         if (value is String) JSONObject(value) else value as? JSONObject
@@ -259,7 +304,7 @@ object ArticleAdHider : SwitchFeature() {
                     if (article && (total != state.lastTotal || reapplied != state.lastReapplied)) {
                         state.lastTotal = total
                         state.lastReapplied = reapplied
-                        WeLogger.i(TAG, "v7 article hidden=$total reapplied=$reapplied rules=${json.optJSONArray("changed")} class=${current.javaClass.name}")
+                        WeLogger.i(TAG, "v8 article hidden=$total reapplied=$reapplied rules=${json.optJSONArray("changed")} class=${current.javaClass.name}")
                     }
                 }
             })
@@ -267,7 +312,35 @@ object ArticleAdHider : SwitchFeature() {
             state.deadline = 0
             state.failures++
             state.retryAt = now + 15_000L
-            if (state.failures == 1) WeLogger.w(TAG, "v7 evaluate unavailable: ${view.javaClass.name}", ex)
+            if (state.failures == 1) WeLogger.w(TAG, "v8 evaluate unavailable: ${view.javaClass.name}", ex)
+        }
+    }
+
+    /** Retry cleanup until the page acknowledges it; an injected observer is independent of hooks. */
+    private fun cleanDisabledPage(view: Any, state: State, now: Long) {
+        if (state.cleaned || (state.deadline != 0L && now < state.deadline) || now < state.retryAt) return
+        val request = ++nextRequest
+        val epoch = generation
+        val reference = WeakReference(view)
+        state.request = request
+        state.deadline = now + 2000L
+        try {
+            invokeJs(view, STOP_JS, ValueCallback { result ->
+                handler.post {
+                    val current = reference.get() ?: return@post
+                    if (!running || epoch != generation || captured[current] !== state || state.request != request) return@post
+                    state.deadline = 0
+                    val acknowledged = runCatching { JSONTokener(result ?: "null").nextValue() == "cleaned" }.getOrDefault(false)
+                    state.cleaned = acknowledged && !configuredEnabled
+                    state.lastTotal = -1
+                    state.lastReapplied = -1
+                    state.retryAt = SystemClock.uptimeMillis() + if (acknowledged) 0L else 2000L
+                    if (state.cleaned) WeLogger.i(TAG, "v8 disabled cleanup acknowledged class=${current.javaClass.name}")
+                }
+            })
+        } catch (_: Exception) {
+            state.deadline = 0
+            state.retryAt = now + 2000L
         }
     }
 
