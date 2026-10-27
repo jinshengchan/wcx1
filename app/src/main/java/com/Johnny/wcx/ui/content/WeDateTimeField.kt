@@ -68,7 +68,7 @@ fun WeDateTimeField(
         singleLine = true,
         isError = isError,
         supportingText = if (isError) {
-            { Text("时间格式不正确 (".format(mode.pattern)) }
+            { Text("时间格式不正确 (%1\$s)".format(mode.pattern)) }
         } else null,
         trailingIcon = {
             IconButton(

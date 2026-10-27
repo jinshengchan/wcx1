@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -508,7 +509,7 @@ fun BaseContactSelector(
                     OutlinedTextField(
                         value = searchQuery,
                         onValueChange = onSearchQueryChange,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).height(48.dp),
                         placeholder = { Text("搜索昵称或微信号") },
                         leadingIcon = {
                             Icon(
@@ -539,7 +540,7 @@ fun BaseContactSelector(
                         if (showTypeFilterRow) {
                             FlowRow(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 4.dp)
@@ -578,7 +579,7 @@ fun BaseContactSelector(
                         if (showFilterModeRow) {
                             FlowRow(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 4.dp)
