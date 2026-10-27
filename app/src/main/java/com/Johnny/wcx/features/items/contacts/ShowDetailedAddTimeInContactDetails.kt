@@ -1,16 +1,18 @@
 package com.Johnny.wcx.features.items.contacts
 
 import android.app.Activity
+import android.content.ContextWrapper
 import android.util.TypedValue
+import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
+import com.Johnny.wcx.dexkit.abc.IResolveDex
+import com.Johnny.wcx.dexkit.dsl.dexMethod
 import com.Johnny.wcx.features.api.core.WeDatabaseApi
 import com.Johnny.wcx.features.core.Feature
 import com.Johnny.wcx.features.core.SwitchFeature
 import com.Johnny.wcx.utils.WeLogger
 import com.Johnny.wcx.utils.android.currentWxId
-import com.tencent.mm.plugin.profile.ui.ContactInfoUI
-import dev.ujhhgtg.reflekt.reflekt
 import java.text.SimpleDateFormat
 import java.time.Instant
 import java.time.LocalDate
@@ -36,67 +38,61 @@ import java.util.Locale
  * 不再用系统消息作源或兜底。createTime 拿不到才显示“未知”，不猜、不编。
  * 非好友、群资料页不展示。
  *
- * 显示时机：资料页打开时微信可能先拿缓存渲染头部、拿到异步数据后再重建头部，
- * 外加的行会被清掉；因此插上后观察约 4 秒（每 400ms 查一次），被清掉就立刻补上。
- * 找不到地区行时也会在 0.5s/1.5s/3s 各重试一次。观察期与重试结束即停，不常驻。
+ * 渲染时机（B 方案）：hook 资料页头部的绑定方法（NormalProfileHeaderPreference 的 onBindView，
+ * 8.0.79 上混淆名 D），在每次绑定完成后把行插进本次绑定的头部视图；微信异步拿到数据重建
+ * 头部时，绑定方法会再跑一次，行跟着重建，不再有旧版“initView 时插上、重建时被清掉、
+ * 观察期每 400ms 补上”造成的闪烁，因此也不需要重试与观察期。绑定方法用其体内唯一的
+ * 日志字符串定位，不依赖混淆名；沙箱核过 8.0.79 dex，该字符串全量仅出现一次。
  */
 @Feature(name = "显示详细添加时间", categories = ["联系人与群组", "联系人详情页面"], description = "在联系人详情页面地区正下方显示精确到日的添加时间")
-object ShowDetailedAddTimeInContactDetails : SwitchFeature() {
+object ShowDetailedAddTimeInContactDetails : SwitchFeature(), IResolveDex {
 
     private const val TAG = "ShowDetailedAddTime"
     private const val INSERT_TAG = "add_time_detail_inserted"
 
-    // 头部观察期：插上后每 400ms 查一次、共 10 次（约 4 秒），微信重建头部清掉行时立刻补上。
-    private const val WATCH_INTERVAL_MS = 400L
-    private const val WATCH_CHECKS = 10
-
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
 
-    override fun onEnable() {
-        ContactInfoUI::class.reflekt().apply {
-            firstMethod { name = "initView" }
-                .hookAfter {
-                    val activity = thisObject as Activity
-                    runCatching { tryInsertHeaderAddTime(activity) }
-                        .onFailure { WeLogger.e(TAG, "insert header addTime failed", it) }
-                }
+    private val bindHeader by dexMethod {
+        matcher {
+            usingStrings("[onBindView] never attach!")
+            paramCount = 1
+            paramTypes(View::class.java)
+            returnType(Void.TYPE)
         }
     }
 
-    private fun tryInsertHeaderAddTime(activity: Activity) {
+    override fun onEnable() {
+        runCatching {
+            bindHeader.hookAfter {
+                val root = args[0] as? ViewGroup ?: return@hookAfter
+                var context = root.context
+                while (context is ContextWrapper && context !is Activity) {
+                    context = context.baseContext
+                }
+                val activity = context as? Activity ?: return@hookAfter
+                runCatching { tryInsertHeaderAddTime(activity, root) }
+                    .onFailure { WeLogger.e(TAG, "insert header addTime failed", it) }
+            }
+        }.onFailure { WeLogger.e(TAG, "hook bindHeader failed", it) }
+    }
+
+    private fun tryInsertHeaderAddTime(activity: Activity, root: ViewGroup) {
         val wxId = activity.currentWxId ?: return
         // 群资料页传进来的是群 id，不是好友，不展示。
         if (wxId.endsWith("@chatroom")) return
+        if (hasInsertedMarker(root)) return
 
         val result = resolveAddTime(wxId)
         val daysSuffix = result.daysAgo?.let { " (${it}天)" } ?: ""
         val line = "添加时间：${result.displayDate}$daysSuffix"
-        val decorView = activity.window?.decorView as? ViewGroup ?: return
-
-        var attempt = 0
-        fun runAttempt() {
-            if (hasInsertedMarker(decorView)) return
-            if (insertOnce(decorView, line)) {
-                WeLogger.i(TAG, "inserted header addTime for $wxId: $line")
-                startHeaderWatcher(decorView, wxId, line)
-                return
-            }
-            attempt++
-            if (attempt <= 3) {
-                val delay = longArrayOf(500L, 1500L, 3000L)[attempt - 1]
-                WeLogger.i(TAG, "region not found yet for $wxId, retry $attempt in ${delay}ms")
-                decorView.postDelayed(
-                    { runCatching { runAttempt() }.onFailure { WeLogger.e(TAG, "retry insert failed", it) } },
-                    delay
-                )
-            } else {
-                WeLogger.i(TAG, "region not found for $wxId after retries, giving up")
-            }
+        if (insertOnce(root, line)) {
+            WeLogger.i(TAG, "inserted header addTime for $wxId: $line")
+        } else {
+            WeLogger.i(TAG, "region not found for $wxId on this bind, next bind will retry")
         }
-        runAttempt()
     }
 
-    /** 本次已插过（防重试与观察期重复插）。 */
+    /** 本次绑定已插过（防同一头部视图重复绑定时插出双行）。 */
     private fun hasInsertedMarker(root: ViewGroup): Boolean {
         for (i in 0 until root.childCount) {
             val child = root.getChildAt(i) ?: continue
@@ -108,7 +104,7 @@ object ShowDetailedAddTimeInContactDetails : SwitchFeature() {
 
     /**
      * 试一次：先找以“地区”开头的 TextView 做兄弟行插入；没有则找含“地区”的整块文本做块内插行。
-     * 已插过则直接返回 false，避免观察期与重试并发时插出双行。
+     * 已插过则直接返回 false，避免重复绑定时插出双行。
      */
     private fun insertOnce(root: ViewGroup, line: String): Boolean {
         if (hasInsertedMarker(root)) return false
@@ -184,33 +180,6 @@ object ShowDetailedAddTimeInContactDetails : SwitchFeature() {
         textView.text = lines.joinToString("\n")
         textView.tag = INSERT_TAG
         return true
-    }
-
-    /**
-     * 插上后观察一段时间：微信异步刷新重建头部时会清掉插入的行，发现没了就立刻补上。
-     * 观察期约 4 秒，结束即停；不常驻、不碰微信数据，只是补自己插的那行。
-     */
-    private fun startHeaderWatcher(decorView: ViewGroup, wxId: String, line: String) {
-        var checks = 0
-        fun tick() {
-            if (checks >= WATCH_CHECKS) return
-            checks++
-            if (!hasInsertedMarker(decorView)) {
-                if (insertOnce(decorView, line)) {
-                    WeLogger.i(TAG, "re-inserted header addTime for $wxId after header refresh")
-                }
-            }
-            if (checks < WATCH_CHECKS) {
-                decorView.postDelayed(
-                    { runCatching { tick() }.onFailure { WeLogger.e(TAG, "header watcher failed", it) } },
-                    WATCH_INTERVAL_MS
-                )
-            }
-        }
-        decorView.postDelayed(
-            { runCatching { tick() }.onFailure { WeLogger.e(TAG, "header watcher failed", it) } },
-            WATCH_INTERVAL_MS
-        )
     }
 
     private data class ResolveResult(
