@@ -12,6 +12,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -23,7 +25,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyItemScope
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -135,6 +136,7 @@ enum class SortMode(val icon: ImageVector) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun BaseContactSelector(
     title: String,
@@ -535,15 +537,15 @@ fun BaseContactSelector(
                 ) {
                     Column(modifier = Modifier.fillMaxWidth()) {
                         if (showTypeFilterRow) {
-                            LazyRow(
+                            FlowRow(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                contentPadding = PaddingValues(horizontal = 4.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .padding(horizontal = 4.dp)
                                     .padding(bottom = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                items(availableTypes) { type ->
+                                availableTypes.forEach { type ->
                                     val isSelected = selectedType == type
                                     val count = typeCounts[type] ?: 0
                                     val displayName = type.displayNameRes
@@ -574,15 +576,14 @@ fun BaseContactSelector(
                         }
 
                         if (showFilterModeRow) {
-                            LazyRow(
+                            FlowRow(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                contentPadding = PaddingValues(horizontal = 4.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .padding(horizontal = 4.dp)
                                     .padding(bottom = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                item {
                                     val modeIndex = availableFilterModes.indexOf(filterMode).coerceAtLeast(0)
                                     val hasMoreModes = availableFilterModes.size > 1
                                     FilterChip(
@@ -610,26 +611,23 @@ fun BaseContactSelector(
                                             )
                                         },
                                     )
-                                }
 
                                 if (filterMode == ContactFilterMode.LABELS) {
-                                    item {
                                         val isSelected = selectedLabelName == null
                                         FilterChip(
                                             selected = isSelected,
                                             onClick = { selectedLabelName = null },
                                             label = { Text("全部") }
                                         )
-                                    }
 
-                                    items(availableLabels) { label ->
+                                    availableLabels.forEach { label ->
                                         val isSelected = selectedLabelName == label.labelName
                                         val labelCount = labelCounts[label.labelName] ?: 0
                                         FilterChip(
                                             selected = isSelected,
                                             onClick = { selectedLabelName = if (isSelected) null else label.labelName },
                                             label = {
-                                                Text("%1\$s (".format(label.labelName, labelCount))
+                                                Text("%1\$s (%2\$d)".format(label.labelName, labelCount))
                                             }
                                         )
                                     }
@@ -639,7 +637,6 @@ fun BaseContactSelector(
                                     } else {
                                         availableGroupingOptions
                                     }
-                                    item {
                                         val isSelected = if (filterMode == ContactFilterMode.AGGREGATION) {
                                             selectedAggregationId == null
                                         } else {
@@ -656,8 +653,7 @@ fun BaseContactSelector(
                                             },
                                             label = { Text("全部") },
                                         )
-                                    }
-                                    items(options, key = { it.id }) { option ->
+                                    options.forEach { option ->
                                         val selectedId = if (filterMode == ContactFilterMode.AGGREGATION) selectedAggregationId else selectedGroupingId
                                         val isSelected = selectedId == option.id
                                         val count = filteredContacts.count { it.wxId in option.wxIds }
@@ -670,7 +666,7 @@ fun BaseContactSelector(
                                                     selectedGroupingId = if (isSelected) null else option.id
                                                 }
                                             },
-                                            label = { Text("%1\$s (".format(option.name, count)) },
+                                            label = { Text("%1\$s (%2\$d)".format(option.name, count)) },
                                         )
                                     }
                                 }
@@ -1006,7 +1002,7 @@ fun ContactsSelector(
         onSearchQueryChange = { searchQuery = it },
         filteredContacts = filteredContacts,
         allContacts = contacts,
-        confirmButtonText = "确定 (".format(selectedWxIds.size),
+        confirmButtonText = "确定 (%1\$d)".format(selectedWxIds.size),
         confirmButtonEnabled = true,
         onDismiss = onDismiss,
         onConfirm = { onConfirm(selectedWxIds) },
