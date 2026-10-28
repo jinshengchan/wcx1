@@ -1,6 +1,7 @@
 package com.Johnny.wcx.features.items.chat
 
 import android.app.Activity
+import android.graphics.Rect
 import android.graphics.Outline
 import android.view.View
 import android.view.ViewGroup
@@ -28,6 +29,7 @@ import com.Johnny.wcx.ui.content.DefaultColumn
 import com.Johnny.wcx.ui.content.TextButton
 import com.Johnny.wcx.ui.utils.showComposeDialog
 import com.Johnny.wcx.utils.WeLogger
+import java.util.WeakHashMap
 import kotlin.math.roundToInt
 
 @Feature(
@@ -70,7 +72,12 @@ object FloatingChatFooter : ClickableFeature(), IResolveDex {
         }
     }
 
+    private data class LayoutTrace(val signatures: MutableMap<String, String> = mutableMapOf(), var count: Int = 0)
+    private val layoutTraces = WeakHashMap<ChatFooter, LayoutTrace>()
+
     override fun onEnable() {
+        layoutTraces.clear()
+        WeLogger.i(TAG, "layout-diag-v1 enabled: side=${sideMarginDp}dp gap=${bottomGapDp}dp corner=${cornerRadiusDp}dp")
         val reflekt = ChatFooter::class.reflekt()
 
         // Cover constructor overloads without requiring one specific signature.
@@ -88,6 +95,7 @@ object FloatingChatFooter : ClickableFeature(), IResolveDex {
             if (!configuredEnabled) return@hookAfter
             applyDrawingStyle(footer)
             applySideMargins(footer)
+            logLayout(footer, "layout/attach/resume")
         }
 
         // Existing/preloaded chat views may have been constructed and attached before
@@ -100,6 +108,7 @@ object FloatingChatFooter : ClickableFeature(), IResolveDex {
             if (!configuredEnabled) return@hookAfter
             applyDrawingStyle(footer)
             applySideMargins(footer)
+            logLayout(footer, "layout/attach/resume")
         } ?: WeLogger.w(TAG, "ChatFooter.onLayout unavailable; using constructor/attach hooks")
 
         // A version-specific gap adjustment must not disable the base card styling.
@@ -108,9 +117,14 @@ object FloatingChatFooter : ClickableFeature(), IResolveDex {
         if (refresh != null && refresh.returnType == Void.TYPE &&
             ChatFooter::class.java.isAssignableFrom(refresh.declaringClass)
         ) {
+            WeLogger.i(TAG, "layout-diag-v1 refresh hook: ${refresh.declaringClass.name}.${refresh.name}")
             refresh.hookAfter {
                 val footer = thisObject as? ChatFooter ?: return@hookAfter
-                if (configuredEnabled) applyBottomGap(footer)
+                if (configuredEnabled) {
+                    val before = (footer.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin
+                    applyBottomGap(footer)
+                    logLayout(footer, "refresh bottomBefore=$before")
+                }
             }
         } else {
             WeLogger.w(TAG, "refreshBottomHeight unavailable; bottom gap skipped, card styling retained")
@@ -125,7 +139,36 @@ object FloatingChatFooter : ClickableFeature(), IResolveDex {
             val footer = findChatFooter(activity) ?: return@hookAfter
             applyDrawingStyle(footer)
             applySideMargins(footer)
+            logLayout(footer, "layout/attach/resume")
         }
+    }
+
+    /** Temporary bounded geometry trace; never includes messages, input text or contacts. */
+    private fun logLayout(footer: ChatFooter, source: String) {
+        if (footer.width <= 0 || footer.height <= 0) return
+        val trace = layoutTraces.getOrPut(footer) { LayoutTrace() }
+        if (trace.count >= 16) return
+        val visible = Rect()
+        val hasVisibleRect = footer.getLocalVisibleRect(visible)
+        val frame = Rect()
+        footer.getWindowVisibleDisplayFrame(frame)
+        val location = IntArray(2)
+        footer.getLocationOnScreen(location)
+        val lp = footer.layoutParams as? ViewGroup.MarginLayoutParams
+        val children = (0 until footer.childCount.coerceAtMost(8)).joinToString(";") { index ->
+            val child = footer.getChildAt(index)
+            "${child.javaClass.simpleName}:${child.visibility},${child.top}..${child.bottom},h=${child.height}"
+        }
+        val signature = "size=${footer.width}x${footer.height} screenY=${location[1]} " +
+            "visible=$hasVisibleRect:${visible.top}..${visible.bottom} windowBottom=${frame.bottom} " +
+            "parentH=${(footer.parent as? View)?.height} margin=${lp?.leftMargin},${lp?.rightMargin},${lp?.bottomMargin} " +
+            "paddingBottom=${footer.paddingBottom} children=[$children]"
+        // Separate refresh from layout so the trace confirms whether the gap hook ran.
+        val key = source.substringBefore(' ')
+        if (signature == trace.signatures[key]) return
+        trace.signatures[key] = signature
+        trace.count++
+        WeLogger.i(TAG, "layout-diag-v1 #${trace.count} $source $signature")
     }
 
     private val floatingOutlineProvider = object : ViewOutlineProvider() {
