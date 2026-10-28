@@ -28,7 +28,6 @@ import com.Johnny.wcx.ui.content.DefaultColumn
 import com.Johnny.wcx.ui.content.TextButton
 import com.Johnny.wcx.ui.utils.showComposeDialog
 import com.Johnny.wcx.utils.WeLogger
-import com.Johnny.wcx.utils.android.constructor
 import kotlin.math.roundToInt
 
 @Feature(
@@ -63,42 +62,76 @@ object FloatingChatFooter : ClickableFeature(), IResolveDex {
      * Locates ChatFooter.refreshBottomHeight() by the unique log string WeChat emits at the
      * start of the method. The intentional typo "keyborPx" is WeChat's own, copied faithfully.
      */
-    private val methodRefreshBottomHeight by dexMethod {
+    private val methodRefreshBottomHeight by dexMethod(allowFailure = true) {
         searchPackages("com.tencent.mm.pluginsdk.ui.chat")
         matcher {
             usingEqStrings("MicroMsg.ChatFooter", "[refreshBottomHeight] keyborPx:%d")
+            returnType = "void"
         }
     }
 
     override fun onEnable() {
         val reflekt = ChatFooter::class.reflekt()
 
-        // Outline + elevation can be set immediately after construction (no LayoutParams needed)
-        ChatFooter::class.constructor.hookAfter {
-            applyDrawingStyle(thisObject as ChatFooter)
+        // Cover constructor overloads without requiring one specific signature.
+        ChatFooter::class.java.declaredConstructors.forEach { constructor ->
+            constructor.hookAfter {
+                if (configuredEnabled) applyDrawingStyle(thisObject as ChatFooter)
+            }
         }
 
-        // Side margins must wait until onAttachedToWindow: LayoutParams is set by the parent
-        // ViewGroup (ChattingScrollLayout) when it calls addView(), which happens after the
-        // constructor returns. It is guaranteed to be non-null by the time the view attaches.
-        reflekt.firstMethod { name = "onAttachedToWindow" }.hookAfter {
-            applySideMargins(thisObject as ChatFooter)
+        reflekt.firstMethodOrNull {
+            name = "onAttachedToWindow"
+            superclass()
+        }?.hookAfter {
+            val footer = thisObject as? ChatFooter ?: return@hookAfter
+            if (!configuredEnabled) return@hookAfter
+            applyDrawingStyle(footer)
+            applySideMargins(footer)
         }
 
-        // Shift the footer upward after WeChat writes its negative bottomMargin so the
-        // rounded bottom corners clear the keyboard edge
-        methodRefreshBottomHeight.hookAfter {
-            applyBottomGap(thisObject as ChatFooter)
+        // Existing/preloaded chat views may have been constructed and attached before
+        // the switch was enabled. Reconcile on layout, including inherited overrides.
+        reflekt.firstMethodOrNull {
+            name = "onLayout"
+            superclass()
+        }?.hookAfter {
+            val footer = thisObject as? ChatFooter ?: return@hookAfter
+            if (!configuredEnabled) return@hookAfter
+            applyDrawingStyle(footer)
+            applySideMargins(footer)
+        } ?: WeLogger.w(TAG, "ChatFooter.onLayout unavailable; using constructor/attach hooks")
+
+        // A version-specific gap adjustment must not disable the base card styling.
+        // Validate the actual method rather than the shared delegate's placeholder flag.
+        val refresh = runCatching { methodRefreshBottomHeight.method }.getOrNull()
+        if (refresh != null && refresh.returnType == Void.TYPE &&
+            ChatFooter::class.java.isAssignableFrom(refresh.declaringClass)
+        ) {
+            refresh.hookAfter {
+                val footer = thisObject as? ChatFooter ?: return@hookAfter
+                if (configuredEnabled) applyBottomGap(footer)
+            }
+        } else {
+            WeLogger.w(TAG, "refreshBottomHeight unavailable; bottom gap skipped, card styling retained")
         }
 
-        // Notification jump (and other non-standard entry paths) can bypass the normal
-        // ChatFooter creation lifecycle. Re-check on every ChattingUI.onResume and re-apply
-        // the floating style if the footer exists but hasn't been styled yet.
-        ChattingUI::class.reflekt().firstMethod { name = "onResume" }.hookAfter {
+        ChattingUI::class.reflekt().firstMethodOrNull {
+            name = "onResume"
+            superclass()
+        }?.hookAfter {
             val activity = thisObject as? ChattingUI ?: return@hookAfter
+            if (!configuredEnabled) return@hookAfter
             val footer = findChatFooter(activity) ?: return@hookAfter
             applyDrawingStyle(footer)
             applySideMargins(footer)
+        }
+    }
+
+    private val floatingOutlineProvider = object : ViewOutlineProvider() {
+        override fun getOutline(view: View, outline: Outline) {
+            val r = view.resources.displayMetrics.density * cornerRadiusDp
+            outline.setRoundRect(0, 0, view.width, view.height.coerceAtLeast(1), r)
         }
     }
 
@@ -106,25 +139,13 @@ object FloatingChatFooter : ClickableFeature(), IResolveDex {
      *  that don't require LayoutParams. Safe to call from the constructor hook. */
     private fun applyDrawingStyle(footer: ChatFooter) {
         val density = footer.resources.displayMetrics.density
-        footer.outlineProvider = object : ViewOutlineProvider() {
-            override fun getOutline(view: View, outline: Outline) {
-                // Use the view's full measured height as the outline bounds.
-                //
-                // When AppPanel is closed ChatFooterBottom is GONE so view.height equals
-                // just the input row (~56dp). When AppPanel is open ChatFooterBottom
-                // becomes VISIBLE and contributes its height, so view.height expands to
-                // include it. In both cases view.height is the correct clip boundary.
-                //
-                // Do NOT use (view.height + bottomMargin): bottomMargin is set to
-                // –keyboardHeight (≈–250dp) by WeChat, and the input row is only ~56dp,
-                // so that formula produces a negative value and collapses the outline to 1px.
-                val r = view.resources.displayMetrics.density * cornerRadiusDp
-                outline.setRoundRect(0, 0, view.width, view.height.coerceAtLeast(1), r)
-            }
+        if (footer.outlineProvider !== floatingOutlineProvider) {
+            footer.outlineProvider = floatingOutlineProvider
         }
         footer.clipToOutline = true
-        footer.elevation = elevationDp * density
-        WeLogger.d(TAG, "applied drawing style: corner=${cornerRadiusDp}dp elev=${elevationDp}dp")
+        val elevationPx = elevationDp * density
+        if (footer.elevation != elevationPx) footer.elevation = elevationPx
+        footer.invalidateOutline()
     }
 
     /** Applies left/right margins so the footer appears as a floating card inset from the
@@ -132,6 +153,7 @@ object FloatingChatFooter : ClickableFeature(), IResolveDex {
     private fun applySideMargins(footer: ChatFooter) {
         val lp = footer.layoutParams as? ViewGroup.MarginLayoutParams ?: return
         val sideMarginPx = (sideMarginDp * footer.resources.displayMetrics.density).toInt()
+        if (lp.leftMargin == sideMarginPx && lp.rightMargin == sideMarginPx) return
         lp.leftMargin = sideMarginPx
         lp.rightMargin = sideMarginPx
         footer.requestLayout()
@@ -246,3 +268,4 @@ object FloatingChatFooter : ClickableFeature(), IResolveDex {
         }
     }
 }
+
