@@ -209,21 +209,33 @@ fun CategoryDetailScreen(
     }
 
     val isSecretFriendCategory = categoryName == SwitchFeature.SECRET_FRIEND_CATEGORY
+    val isArticleAdCategory = categoryName == SwitchFeature.ARTICLE_AD_CATEGORY
     var masterEnabled by remember(categoryName) {
-        mutableStateOf(Preferences.secretFriendMasterEnabled)
+        mutableStateOf(
+            if (isSecretFriendCategory) Preferences.secretFriendMasterEnabled
+            else Preferences.articleAdMasterEnabled
+        )
     }
 
     // 总开关：切换后立即对该分类下所有开关生效（各功能自身开关状态保留）。
     fun applyMasterSwitch(next: Boolean) {
         masterEnabled = next
-        Preferences.secretFriendMasterEnabled = next
-        items.filterIsInstance<SwitchFeature>().forEach { feature ->
-            // 「密友名单管理」是密友名单编辑入口（无独立开关），直接跟随总开关；
-            // 其余功能按各自原有开关状态恢复。
-            feature.isEnabled = if (feature.name == SecretFriendManager.name) {
-                next
-            } else {
-                next && WePrefs.getBoolOrFalse(feature.name)
+        if (isSecretFriendCategory) {
+            Preferences.secretFriendMasterEnabled = next
+            items.filterIsInstance<SwitchFeature>().forEach { feature ->
+                // 「密友名单管理」是密友名单编辑入口（无独立开关），直接跟随总开关；
+                // 其余功能按各自原有开关状态恢复。
+                feature.isEnabled = if (feature.name == SecretFriendManager.name) {
+                    next
+                } else {
+                    next && WePrefs.getBoolOrFalse(feature.name)
+                }
+            }
+        } else {
+            // 「文章去广告」分类：两个子功能按各自保存值恢复（默认关闭）。
+            Preferences.articleAdMasterEnabled = next
+            items.filterIsInstance<SwitchFeature>().forEach { feature ->
+                feature.isEnabled = next && feature.configuredEnabled
             }
         }
         switchStates.keys.forEach { key ->
@@ -245,7 +257,7 @@ fun CategoryDetailScreen(
     ) {
         if (items.isEmpty()) return@MiuixListScaffold
 
-        if (isSecretFriendCategory) {
+        if (isSecretFriendCategory || isArticleAdCategory) {
             item {
                 Column(
                     modifier = Modifier
@@ -260,7 +272,7 @@ fun CategoryDetailScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "密友功能总开关",
+                                text = if (isSecretFriendCategory) "密友功能总开关" else "文章去广告总开关",
                                 fontSize = MiuixTheme.textStyles.headline1.fontSize,
                                 fontWeight = FontWeight.Medium,
                                 color = MiuixTheme.colorScheme.onSurface,

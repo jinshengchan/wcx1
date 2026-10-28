@@ -23,7 +23,7 @@ import java.util.WeakHashMap
  */
 @Feature(
     name = "隐藏文章内广告卡",
-    categories = ["系统与隐私"],
+    categories = ["文章去广告"],
     description = "页面层：隐藏正文、底部及留言广告；v8 跟随开关撤销 CSS 和监听，默认关闭"
 )
 object ArticleAdHider : SwitchFeature() {
@@ -160,7 +160,7 @@ object ArticleAdHider : SwitchFeature() {
     private val sweep = object : Runnable {
         override fun run() {
             if (!running) return
-            val desired = configuredEnabled
+            val desired = isMasterGroupEnabled
             _isEnabled = desired
             if (lastDesired != desired) {
                 lastDesired = desired
@@ -257,7 +257,7 @@ object ArticleAdHider : SwitchFeature() {
 
     private fun evaluate(view: Any, state: State) {
         val now = SystemClock.uptimeMillis()
-        if (!configuredEnabled) {
+        if (!isMasterGroupEnabled) {
             cleanDisabledPage(view, state, now)
             return
         }
@@ -281,7 +281,7 @@ object ArticleAdHider : SwitchFeature() {
                     val current = reference.get() ?: return@post
                     if (!running || epoch != generation || captured[current] !== state || state.request != request) return@post
                     state.deadline = 0
-                    if (!configuredEnabled) {
+                    if (!isMasterGroupEnabled) {
                         state.cleaned = false
                         cleanDisabledPage(current, state, SystemClock.uptimeMillis())
                         return@post
@@ -331,7 +331,7 @@ object ArticleAdHider : SwitchFeature() {
                     if (!running || epoch != generation || captured[current] !== state || state.request != request) return@post
                     state.deadline = 0
                     val acknowledged = runCatching { JSONTokener(result ?: "null").nextValue() == "cleaned" }.getOrDefault(false)
-                    state.cleaned = acknowledged && !configuredEnabled
+                    state.cleaned = acknowledged && !isMasterGroupEnabled
                     state.lastTotal = -1
                     state.lastReapplied = -1
                     state.retryAt = SystemClock.uptimeMillis() + if (acknowledged) 0L else 2000L

@@ -13,6 +13,9 @@ object Preferences {
     /** 「密友功能」分类总开关：关闭时该分类下所有功能都不加载（各功能自身开关状态保留）。 */
     const val SECRET_FRIEND_MASTER_ENABLED = "secret_friend_master_enabled"
 
+    /** 「文章去广告」分类总开关：关闭时该分类下所有功能都不生效（各功能自身开关状态保留）。 */
+    const val ARTICLE_AD_MASTER_ENABLED = "article_ad_master_enabled"
+
     // Settings UI theming
     const val THEME_MODE = "settings_theme_mode"
     const val THEME_CUSTOM_COLOR = "settings_theme_custom_color"
@@ -36,6 +39,9 @@ object Preferences {
 
     // 「密友功能」分类总开关（默认开启）
     var secretFriendMasterEnabled by prefOption(SECRET_FRIEND_MASTER_ENABLED, true)
+
+    // 「文章去广告」分类总开关（默认关闭）
+    var articleAdMasterEnabled by prefOption(ARTICLE_AD_MASTER_ENABLED, false)
 
     // use this when Google fucked up itself again
 //    var useActivityInsteadOfDialog: Boolean
