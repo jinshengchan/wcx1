@@ -19,6 +19,9 @@ abstract class SwitchFeature : BaseFeature() {
     /** Default state when the user has never toggled this feature. */
     protected open val defaultEnabled: Boolean = false
 
+    /** Keep a preference-gated controller installed even while its effect is disabled. */
+    protected open val keepControllerEnabled: Boolean = false
+
     /** Whether this feature should load in the current process. Defaults to the main process only. */
     protected open val shouldLoadInCurrentProcess: Boolean
         get() = TargetProcesses.isInMain
@@ -44,10 +47,11 @@ abstract class SwitchFeature : BaseFeature() {
         if (!shouldLoadInCurrentProcess) return
         // 「密友功能」分类有总开关：关掉总开关时整个分类都不加载（各功能自身开关状态保留）。
         if (SECRET_FRIEND_CATEGORY in categories && !Preferences.secretFriendMasterEnabled) return
-        // 受「文章去广告」总开关管辖的功能：关掉总开关时不加载（自身开关状态保留）。
-        if (underArticleAdMaster && !Preferences.articleAdMasterEnabled) return
+        // Controllers must also start with the master off: existing host processes need
+        // to observe later preference changes and acknowledge page cleanup.
+        if (underArticleAdMaster && !Preferences.articleAdMasterEnabled && !keepControllerEnabled) return
         _isEnabled = configuredEnabled
-        if (shouldEnableOnStartup) enable()
+        if (keepControllerEnabled || shouldEnableOnStartup) enable()
     }
 
     /** Cached user preference (desired state). Distinct from [isActive], the runtime truth. */
@@ -57,6 +61,13 @@ abstract class SwitchFeature : BaseFeature() {
     var isEnabled
         get() = _isEnabled
         set(value) {
+            if (keepControllerEnabled) {
+                _isEnabled = value
+                // Idempotent, and also recovers an inactive controller without relying
+                // on a cached preference transition. Off never discards pending cleanup.
+                enable()
+                return
+            }
             if (_isEnabled == value) return
             _isEnabled = value
             if (value) {
@@ -82,3 +93,4 @@ abstract class SwitchFeature : BaseFeature() {
         toggleCompletionCallback?.run()
     }
 }
+

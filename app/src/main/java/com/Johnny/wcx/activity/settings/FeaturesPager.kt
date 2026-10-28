@@ -295,8 +295,9 @@ fun CategoryDetailScreen(
             // 「文章去广告」组：只动组内两个子功能，分类里其他功能不受影响。
             Preferences.articleAdMasterEnabled = next
             items.filterIsInstance<SwitchFeature>().filter { it.underArticleAdMaster }.forEach { feature ->
-                feature.isEnabled = next && feature.configuredEnabled
-                switchStates[feature.name] = next && feature.configuredEnabled
+                // The master gates effects; controllers and saved child choices remain.
+                feature.isEnabled = feature.configuredEnabled
+                switchStates[feature.name] = feature.configuredEnabled
             }
         }
     }
@@ -400,3 +401,4 @@ fun CategoryDetailScreen(
         item { Spacer(Modifier.height(CONTENT_BOTTOM_INSET)) }
     }
 }
+
