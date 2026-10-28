@@ -236,6 +236,11 @@ fun CategoryDetailScreen(
         items
     }
 
+    // 总开关行与列表合成一张卡（仅文章去广告组）：总开关占第 0 行，列表行顺延；
+    // 密友分类中间隔着诊断卡，保持各自成卡。
+    val mergeMasterIntoList = hasArticleAdMaster && !isSecretFriendCategory
+    val groupItemCount = visibleItems.size + if (mergeMasterIntoList) 1 else 0
+
     val activity = LocalComponentActivity.current
 
     // 点总开关行（开关本身除外）弹出「文章去广告」弹窗，两个子开关在弹窗里分别拨动。
@@ -315,7 +320,7 @@ fun CategoryDetailScreen(
                 Column(
                     modifier = Modifier
                         .padding(top = 12.dp)
-                        .groupedCardItem(0, 1),
+                        .groupedCardItem(0, if (mergeMasterIntoList) groupItemCount else 1),
                 ) {
                     Row(
                         modifier = Modifier
@@ -380,8 +385,8 @@ fun CategoryDetailScreen(
         itemsIndexed(visibleItems, key = { _, item -> item.name }) { index, item ->
             Column(
                 modifier = Modifier
-                    .then(if (index == 0) Modifier.padding(top = 12.dp) else Modifier)
-                    .groupedCardItem(index, visibleItems.size),
+                    .then(if (index == 0 && !mergeMasterIntoList) Modifier.padding(top = 12.dp) else Modifier)
+                    .groupedCardItem(index + if (mergeMasterIntoList) 1 else 0, groupItemCount),
             ) {
                 FeatureRow(
                     item = item,
