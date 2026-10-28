@@ -13,7 +13,7 @@ object RemoveLimitsDuringCalls : SwitchFeature(), IResolveDex {
     private const val TAG = "RemoveLimitsDuringCalls"
 
     override fun onEnable() {
-        listOf(
+        val targets = listOf(
             methodIsDuringCall,
             methodIsMultiTalking,
             methodIsCameraUsing,
@@ -25,21 +25,25 @@ object RemoveLimitsDuringCalls : SwitchFeature(), IResolveDex {
             methodCheckDeviceUsing,
             methodCheckAudioDeviceUsing,
             methodCheckSpeakerUsing,
-        ).forEach {
-            it.hookBefore {
-                try {
-                    // 所有方法均返回 boolean，仅当返回类型匹配时才设置 result = false
-                    if (method is java.lang.reflect.Method) {
-                        val returnType = (method as java.lang.reflect.Method).returnType
-                        if (returnType == Boolean::class.javaPrimitiveType || returnType == java.lang.Boolean::class.java) {
-                            result = false
-                        }
-                    }
-                } catch (e: Throwable) {
-                    // 兜底异常捕获，防止单条 Hook 异常导致微信主线程崩溃
-                }
+        ).mapNotNull { target ->
+            // Optional lookups can contain a placeholder or a stale cached descriptor.
+            // Resolve before installing hooks so one missing target does not discard the rest.
+            val method = runCatching { target.method }.getOrNull()
+            if (method == null ||
+                (method.returnType != Boolean::class.javaPrimitiveType &&
+                    method.returnType != java.lang.Boolean::class.java)
+            ) {
+                WeLogger.w(TAG, "skip unavailable/non-boolean target: ${target.key}")
+                null
+            } else method
+        }.distinct()
+        check(targets.isNotEmpty()) { "No compatible call restriction methods found" }
+        targets.forEach { target ->
+            target.hookBefore {
+                if (configuredEnabled) result = false
             }
         }
+        WeLogger.i(TAG, "installed ${targets.size} call restriction hook(s)")
     }
 
     // 8.0.77 通话栈加固: 全部 dexMethod 使用 allowFailure, 类被移除/混淆时降级为 placeholder,
@@ -61,7 +65,7 @@ object RemoveLimitsDuringCalls : SwitchFeature(), IResolveDex {
     }
     private val methodIsMultiTalking by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
+            returnType = "boolean"
             usingEqStrings("MicroMsg.DeviceOccupy", "isMultiTalking")
             paramCount = 1
         }
@@ -69,40 +73,40 @@ object RemoveLimitsDuringCalls : SwitchFeature(), IResolveDex {
 
     private val methodIsCameraUsing by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
+            returnType = "boolean"
             usingEqStrings("MicroMsg.DeviceOccupy", "isCameraUsing", "")
         }
     }
     private val methodIsCameraUsing2 by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
+            returnType = "boolean"
             usingEqStrings("MicroMsg.DeviceOccupy", "isCameraUsing", "isLiving %b isAnchor %b isAudioMicing %s isVideoMicing %s")
         }
     }
     private val methodIsVoiceUsing by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
+            returnType = "boolean"
             usingEqStrings("MicroMsg.DeviceOccupy", "isVoiceUsing")
             paramCount = 1
         }
     }
     private val methodIsVoiceUsing2 by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
+            returnType = "boolean"
             usingEqStrings("MicroMsg.DeviceOccupy", "isVoiceUsing")
             paramCount = 2
         }
     }
     private val methodCheckAppBrandVoiceUsing by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
+            returnType = "boolean"
             usingEqStrings("MicroMsg.DeviceOccupy", "checkAppBrandVoiceUsingAndShowToast isVoiceUsing:%b, isCameraUsing:%b")
             paramCount = 1
         }
     }
     private val methodCheckAppBrandVoiceUsing2 by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
+            returnType = "boolean"
             usingEqStrings("MicroMsg.DeviceOccupy", "checkAppBrandVoiceUsingAndShowToast isVoiceUsing:%b, isCameraUsing:%b")
             paramCount = 2
         }
@@ -112,23 +116,21 @@ object RemoveLimitsDuringCalls : SwitchFeature(), IResolveDex {
     // These cover methods beyond the core set above that some WeChat versions use.
     private val methodCheckDeviceUsing by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
             usingEqStrings("MicroMsg.DeviceOccupy", "checkDeviceUsing")
             returnType = "boolean"
         }
     }
     private val methodCheckAudioDeviceUsing by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
             usingEqStrings("MicroMsg.DeviceOccupy", "checkAudioDeviceUsing")
             returnType = "boolean"
         }
     }
     private val methodCheckSpeakerUsing by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
             usingEqStrings("MicroMsg.DeviceOccupy", "checkSpeakerUsing")
             returnType = "boolean"
         }
     }
 }
+
