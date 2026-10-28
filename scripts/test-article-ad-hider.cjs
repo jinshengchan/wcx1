@@ -97,3 +97,26 @@ switched.mutate();assert.ok(!switched.hidden(switchAd),'disabled observer must n
 assert.equal(switched.run().hidden,1);assert.equal(switched.styleCount(),1,'re-enable works');
 assert.equal(switched.stop(),'cleaned');assert.equal(switched.stop(),'cleaned','repeated off is idempotent');
 console.log('PASS: exported STOP_JS restores CSS/inline display, stops observer and allows off/on/off.');
+
+
+for (const path of ['/s/exampleToken', '/s/exampleToken/', '/s', '/mp/appmsg/show']) {
+  const page=fixture('mp.weixin.qq.com',path);
+  page.node('DIV','js_bottom_ad_area');
+  assert.equal(page.run().article,true,path);
+  page.stop();assert.equal(page.styleCount(),0);
+}
+for (const path of ['/search','/s/abc/extra','/__tmpl__/0.html']) {
+  assert.equal(fixture('mp.weixin.qq.com',path).run().article,false,path);
+}
+const orphan=fixture();const orphanAd=orphan.node('DIV','js_bottom_ad_area','','block');
+orphan.run();delete orphan.window.__wcxArticleAdV8;
+assert.equal(orphan.stop(),'cleaned');assert.equal(orphan.styleCount(),0);assert.ok(!orphan.hidden(orphanAd));
+const lostAliases=fixture();const lostAd=lostAliases.node('DIV','js_bottom_ad_area','','block');
+lostAliases.run();delete lostAliases.window.__wcxArticleAdV8;delete lostAliases.window.__wcxArticleAdCleanup;
+assert.equal(lostAliases.stop(),'cleaned');assert.equal(lostAliases.styleCount(),0);assert.ok(!lostAliases.hidden(lostAd));
+const legacy=fixture();legacy.node('STYLE','wcx-qe-hide');
+assert.equal(legacy.stop(),'reload-needed');assert.equal(legacy.stop(),'reload-needed');
+const normalHidden=fixture();const ownHidden=normalHidden.node('DIV','normal','','none');
+normalHidden.stop();assert.ok(normalHidden.hidden(ownHidden));
+for(let i=0;i<20;i++){orphan.run();orphan.pagehide();assert.equal(orphan.styleCount(),0);assert.ok(!orphan.hidden(orphanAd));}
+console.log('PASS: short article paths, orphan cleanup via registry/style owner, legacy uncertainty, untouched site styles, 20 reuse cycles.');
