@@ -23,11 +23,12 @@ import java.util.WeakHashMap
  */
 @Feature(
     name = "隐藏文章内广告卡",
-    categories = ["文章去广告"],
+    categories = ["公众号"],
     description = "页面层：隐藏正文、底部及留言广告；v8 跟随开关撤销 CSS 和监听，默认关闭"
 )
 object ArticleAdHider : SwitchFeature() {
     private const val TAG = "ArticleAdHider"
+    override val underArticleAdMaster: Boolean = true
     override val defaultEnabled: Boolean = false
     // The controller stays available even when filtering is off, to observe saved changes.
     override val shouldEnableOnStartup: Boolean = true

@@ -9,8 +9,10 @@ import com.Johnny.wcx.utils.WeLogger
 import org.json.JSONArray
 import org.json.JSONObject
 
-@Feature(name = "去除文章广告", categories = ["文章去广告"], description = "数据层：过滤文章接口中的广告数据；关闭后新请求不再过滤，已有页面需重新打开")
+@Feature(name = "去除文章广告", categories = ["公众号"], description = "数据层：过滤文章接口中的广告数据；关闭后新请求不再过滤，已有页面需重新打开")
 object RemoveArticleAds : SwitchFeature(), IWePacketInterceptor {
+
+    override val underArticleAdMaster: Boolean = true
 
     // Keep a lightweight listener registered in the host; every response reads the current
     // saved choice, so toggling from a different process cannot leave filtering enabled.
