@@ -135,7 +135,7 @@ fun FeaturesPager(onOpenCategory: (String) -> Unit) {
                     ) {
                         FeatureRow(
                             item = item,
-                            checked = switchStates[item.name] ?: WePrefs.getBoolOrFalse(item.name),
+                            checked = switchStates[item.name] ?: item.configuredEnabled,
                             onCheckedChange = { switchStates[item.name] = it },
                         )
                     }
@@ -204,7 +204,7 @@ fun CategoryDetailScreen(
     }
     val switchStates = remember(categoryName) {
         mutableStateMapOf<String, Boolean>().apply {
-            items.forEach { put(it.name, WePrefs.getBoolOrFalse(it.name)) }
+            items.forEach { put(it.name, (it as? SwitchFeature)?.configuredEnabled ?: false) }
         }
     }
 

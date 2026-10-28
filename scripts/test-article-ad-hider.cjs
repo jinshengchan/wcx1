@@ -34,7 +34,7 @@ function fixture(host = 'mp.weixin.qq.com', path = '/s') {
   const context = vm.createContext({window, location, document, URL, Map, JSON,
     MutationObserver:class {constructor(cb){this.cb=cb;observer=this;} observe(){this.active=true;} disconnect(){this.active=false;}},
     setTimeout(fn){tasks.push(fn);return tasks.length;},clearTimeout(){tasks=[];}});
-  return {node,window,location,styleCount:()=>nodes.filter(n=>n.tagName==='STYLE' && n.isConnected).length,run:()=>JSON.parse(vm.runInContext(script,context)),
+  return {node,window,location,styleCount:()=>nodes.filter(n=>n.tagName==='STYLE' && n.isConnected).length,run:()=>JSON.parse(vm.runInContext(script,context)),stop:()=>vm.runInContext(source.match(/internal const val STOP_JS = "([^"\n]+)"/)[1],context),
     mutate(){if(observer?.active)observer.cb();while(tasks.length)tasks.shift()();},
     hidden:el=>el.style.getPropertyValue('display')==='none',
     pagehide(){listeners.get('pagehide')?.();}};
@@ -51,14 +51,14 @@ assert.equal(f.run().hidden,2);assert.equal(f.run().css,true);
 assert.ok(f.hidden(ad) && f.hidden(footer));
 for(const el of [body,comments,ordinary,spoof,boundary])assert.ok(!f.hidden(el),'normal content must survive');
 assert.equal(f.styleCount(),1);
-const state = f.window.__wcxArticleAdV7;
-assert.equal(f.run().hidden,2);assert.equal(f.window.__wcxArticleAdV7,state,'one observer per document');assert.equal(f.styleCount(),1,'one stylesheet per article');
+const state = f.window.__wcxArticleAdV8;
+assert.equal(f.run().hidden,2);assert.equal(f.window.__wcxArticleAdV8,state,'one observer per document');assert.equal(f.styleCount(),1,'one stylesheet per article');
 const lazy = f.node('DIV','js_comment_ad_area');f.mutate();assert.ok(f.hidden(lazy));
 const lateSrc=f.node('IFRAME');f.mutate();assert.ok(!f.hidden(lateSrc));
 lateSrc.src='https://wxa.wxs.qq.com/tmpl/qe/base_tmpl.html';f.mutate();assert.ok(f.hidden(lateSrc));
 ad.style.setProperty('display','block');f.mutate();assert.ok(f.hidden(ad),'page style reset must be handled');
 assert.ok(!f.hidden(comments),'comment list must remain');
-f.pagehide();assert.equal(f.window.__wcxArticleAdV7,undefined);assert.equal(f.styleCount(),0,'stylesheet removed on stop');
+f.pagehide();assert.equal(f.window.__wcxArticleAdV8,undefined);assert.equal(f.styleCount(),0,'stylesheet removed on stop');
 assert.equal(footer.style.getPropertyValue('display'),'block','restore original styles');
 assert.ok(!f.hidden(ad));
 assert.equal(f.run().hidden,4,'back/forward document can reinstall');
@@ -89,3 +89,11 @@ assert.equal(preload.run().article,false);preload.location.pathname='/s';assert.
 console.log('PASS: log-confirmed comment row/footer wrappers, normal siblings, preload activation, reappearance counters, restore; body/footer/lazy comment ads; normal content and host boundaries; reuse, style resets, disable/navigation restoration.');
 
 console.log('PASS: CSS installed only in article context; listener/style/inline lifecycle exercised with DOM fixtures (not a rendering browser).');
+
+const switched=fixture();const switchAd=switched.node('DIV','js_bottom_ad_area','','block');
+assert.equal(switched.run().hidden,1);assert.equal(switched.styleCount(),1);
+assert.equal(switched.stop(),'cleaned');assert.equal(switched.styleCount(),0);assert.ok(!switched.hidden(switchAd));
+switched.mutate();assert.ok(!switched.hidden(switchAd),'disabled observer must not hide new nodes');
+assert.equal(switched.run().hidden,1);assert.equal(switched.styleCount(),1,'re-enable works');
+assert.equal(switched.stop(),'cleaned');assert.equal(switched.stop(),'cleaned','repeated off is idempotent');
+console.log('PASS: exported STOP_JS restores CSS/inline display, stops observer and allows off/on/off.');

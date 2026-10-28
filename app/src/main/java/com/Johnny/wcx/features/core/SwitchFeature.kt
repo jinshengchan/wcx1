@@ -20,6 +20,10 @@ abstract class SwitchFeature : BaseFeature() {
     protected open val shouldLoadInCurrentProcess: Boolean
         get() = TargetProcesses.isInMain
 
+    /** Saved user choice, including the feature-specific default (also used by settings UI). */
+    val configuredEnabled: Boolean
+        get() = WePrefs.getBoolOrDef(name, defaultEnabled)
+
     /** Whether the feature should be active at startup, given the cached preference. */
     protected open val shouldEnableOnStartup: Boolean
         get() = _isEnabled
@@ -28,7 +32,7 @@ abstract class SwitchFeature : BaseFeature() {
         if (!shouldLoadInCurrentProcess) return
         // 「密友功能」分类有总开关：关掉总开关时整个分类都不加载（各功能自身开关状态保留）。
         if (SECRET_FRIEND_CATEGORY in categories && !Preferences.secretFriendMasterEnabled) return
-        _isEnabled = WePrefs.getBoolOrDef(name, defaultEnabled)
+        _isEnabled = configuredEnabled
         if (shouldEnableOnStartup) enable()
     }
 
