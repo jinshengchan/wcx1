@@ -1,133 +1,154 @@
 package com.Johnny.wcx.features.items.voip
 
 import com.Johnny.wcx.dexkit.abc.IResolveDex
+import com.Johnny.wcx.dexkit.dsl.DexMethodDelegate
 import com.Johnny.wcx.dexkit.dsl.dexMethod
 import com.Johnny.wcx.features.core.Feature
 import com.Johnny.wcx.features.core.SwitchFeature
 import com.Johnny.wcx.utils.WeLogger
-import java.lang.reflect.Modifier
 
+/**
+ * 移除通话时聊天限制：把所有「设备占用检查」方法钉成 false。
+ *
+ * 旧实现用 `invoke 了 MultiTalkActionEvent 的静态无参 boolean 方法` 当作锚点，
+ * 再拿它的 declaringClass 去约束其余 11 个方法。微信 8.0.77 起多人通话模块被移除，
+ * 8.0.79 的 dex 里已经没有任何方法 invoke MultiTalkActionEvent（实测 classes15.dex），
+ * 锚点匹配失败 → 其余方法全部拿不到类 → 功能整体静默失效。
+ *
+ * 现在改成每个方法各自按「日志字符串 + 参数个数」独立定位（8.0.79 实测全部落在
+ * com.tencent.mm.voipmp.helper.DeviceOccupyHelper，混淆名 Lpq/b;），不再依赖任何锚点。
+ * 微信改类名/挪包都不影响，只有日志串变化才会失效——失效时日志会明确写出来。
+ */
 @Feature(name = "移除通话时聊天限制", categories = ["聊天", "音视频通话"], description = "绕过正在通话时聊天限制")
 object RemoveLimitsDuringCalls : SwitchFeature(), IResolveDex {
 
     private const val TAG = "RemoveLimitsDuringCalls"
+    private const val OC = "MicroMsg.DeviceOccupy"
 
     override fun onEnable() {
-        listOf(
-            methodIsDuringCall,
-            methodIsMultiTalking,
-            methodIsCameraUsing,
-            methodIsCameraUsing2,
-            methodIsVoiceUsing,
-            methodIsVoiceUsing2,
-            methodCheckAppBrandVoiceUsing,
-            methodCheckAppBrandVoiceUsing2,
-            methodCheckDeviceUsing,
-            methodCheckAudioDeviceUsing,
-            methodCheckSpeakerUsing,
-        ).forEach {
-            it.hookBefore {
-                try {
-                    // 所有方法均返回 boolean，仅当返回类型匹配时才设置 result = false
-                    if (method is java.lang.reflect.Method) {
-                        val returnType = (method as java.lang.reflect.Method).returnType
-                        if (returnType == Boolean::class.javaPrimitiveType || returnType == java.lang.Boolean::class.java) {
-                            result = false
-                        }
-                    }
-                } catch (e: Throwable) {
-                    // 兜底异常捕获，防止单条 Hook 异常导致微信主线程崩溃
-                }
+        val methods = targets().mapNotNull { (label, delegate) ->
+            val method = runCatching { delegate.method }.getOrNull()
+            if (method == null ||
+                (method.returnType != Boolean::class.javaPrimitiveType &&
+                    method.returnType != java.lang.Boolean::class.java)
+            ) {
+                WeLogger.w(TAG, "skip unavailable/non-boolean target: $label")
+                null
+            } else method
+        }.distinct()
+        check(methods.isNotEmpty()) { "No compatible call restriction methods found" }
+        methods.forEach { method ->
+            method.hookBefore {
+                if (configuredEnabled) result = false
             }
         }
+        WeLogger.i(TAG, "installed ${methods.size} call restriction hook(s)")
     }
 
-    // 8.0.77 通话栈加固: 全部 dexMethod 使用 allowFailure, 类被移除/混淆时降级为 placeholder,
-    // 避免 Dex 扫描阶段抛异常拖垮整个模块启动。
-    private val methodIsDuringCall by dexMethod(allowFailure = true) {
-        matcher {
-            declaredClass {
-                modifiers(Modifier.ABSTRACT)
-            }
+    /**
+     * 目标方法清单。字符串取自微信 8.0.79 实测（classes15.dex → DeviceOccupyHelper）。
+     * 参数个数一并作为约束，避免同一个串命中同族的另一个重载。
+     */
+    private fun targets(): List<Pair<String, DexMethodDelegate>> = listOf(
+        "isMultiTalking(1)" to methodIsMultiTalking1,
+        "isMultiTalking(2)" to methodIsMultiTalking2,
+        "isCameraUsing" to methodIsCameraUsing,
+        "isVoiceUsing(1)" to methodIsVoiceUsing1,
+        "isVoiceUsing(2)" to methodIsVoiceUsing2,
+        "checkAppBrandVoiceUsing" to methodCheckAppBrandVoiceUsing,
+        "checkAppBrandVoiceUsingAndShowToast" to methodCheckAppBrandVoiceUsing2,
+        "checkAppBrandCameraUsing" to methodCheckAppBrandCameraUsing,
+        "checkAppBrandCameraUsingAndShowToast" to methodCheckAppBrandCameraUsing2,
+        // 老版本微信（8.0.7x 早期）才有的几个占用检查，新版本已删除，允许失败。
+        "checkDeviceUsing" to methodCheckDeviceUsing,
+        "checkAudioDeviceUsing" to methodCheckAudioDeviceUsing,
+        "checkSpeakerUsing" to methodCheckSpeakerUsing,
+    )
 
-            modifiers(Modifier.STATIC)
-            paramCount = 0
-            returnType = "boolean"
-
-            addInvoke {
-                declaredClass = "com.tencent.mm.autogen.events.MultiTalkActionEvent"
-            }
-        }
-    }
-    private val methodIsMultiTalking by dexMethod(allowFailure = true) {
+    private val methodIsMultiTalking1 by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
-            usingEqStrings("MicroMsg.DeviceOccupy", "isMultiTalking")
+            usingEqStrings(OC, "isMultiTalking")
             paramCount = 1
+            returnType = "boolean"
+        }
+    }
+
+    private val methodIsMultiTalking2 by dexMethod(allowFailure = true) {
+        matcher {
+            usingEqStrings(OC, "isMultiTalking")
+            paramCount = 2
+            returnType = "boolean"
         }
     }
 
     private val methodIsCameraUsing by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
-            usingEqStrings("MicroMsg.DeviceOccupy", "isCameraUsing", "")
-        }
-    }
-    private val methodIsCameraUsing2 by dexMethod(allowFailure = true) {
-        matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
-            usingEqStrings("MicroMsg.DeviceOccupy", "isCameraUsing", "isLiving %b isAnchor %b isAudioMicing %s isVideoMicing %s")
-        }
-    }
-    private val methodIsVoiceUsing by dexMethod(allowFailure = true) {
-        matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
-            usingEqStrings("MicroMsg.DeviceOccupy", "isVoiceUsing")
-            paramCount = 1
-        }
-    }
-    private val methodIsVoiceUsing2 by dexMethod(allowFailure = true) {
-        matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
-            usingEqStrings("MicroMsg.DeviceOccupy", "isVoiceUsing")
-            paramCount = 2
-        }
-    }
-    private val methodCheckAppBrandVoiceUsing by dexMethod(allowFailure = true) {
-        matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
-            usingEqStrings("MicroMsg.DeviceOccupy", "checkAppBrandVoiceUsingAndShowToast isVoiceUsing:%b, isCameraUsing:%b")
-            paramCount = 1
-        }
-    }
-    private val methodCheckAppBrandVoiceUsing2 by dexMethod(allowFailure = true) {
-        matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
-            usingEqStrings("MicroMsg.DeviceOccupy", "checkAppBrandVoiceUsingAndShowToast isVoiceUsing:%b, isCameraUsing:%b")
-            paramCount = 2
+            usingEqStrings(OC, "isCameraUsing")
+            returnType = "boolean"
         }
     }
 
-    // Additional device occupancy checks that may block voice message playback during calls.
-    // These cover methods beyond the core set above that some WeChat versions use.
+    private val methodIsVoiceUsing1 by dexMethod(allowFailure = true) {
+        matcher {
+            usingEqStrings(OC, "isVoiceUsing")
+            paramCount = 1
+            returnType = "boolean"
+        }
+    }
+
+    private val methodIsVoiceUsing2 by dexMethod(allowFailure = true) {
+        matcher {
+            usingEqStrings(OC, "isVoiceUsing")
+            paramCount = 2
+            returnType = "boolean"
+        }
+    }
+
+    private val methodCheckAppBrandVoiceUsing by dexMethod(allowFailure = true) {
+        matcher {
+            usingEqStrings(OC, "checkAppBrandVoiceUsing isVoiceUsing:%b, isCameraUsing:%b")
+            returnType = "boolean"
+        }
+    }
+
+    private val methodCheckAppBrandVoiceUsing2 by dexMethod(allowFailure = true) {
+        matcher {
+            usingEqStrings(OC, "checkAppBrandVoiceUsingAndShowToast isVoiceUsing:%b, isCameraUsing:%b")
+            returnType = "boolean"
+        }
+    }
+
+    private val methodCheckAppBrandCameraUsing by dexMethod(allowFailure = true) {
+        matcher {
+            usingEqStrings(OC, "checkAppBrandCameraUsing isVoiceUsing:%b, isCameraUsing:%b")
+            returnType = "boolean"
+        }
+    }
+
+    private val methodCheckAppBrandCameraUsing2 by dexMethod(allowFailure = true) {
+        matcher {
+            usingEqStrings(OC, "checkAppBrandCameraUsingAndShowToast isVoiceUsing:%b, isCameraUsing:%b")
+            returnType = "boolean"
+        }
+    }
+
     private val methodCheckDeviceUsing by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
-            usingEqStrings("MicroMsg.DeviceOccupy", "checkDeviceUsing")
+            usingEqStrings(OC, "checkDeviceUsing")
             returnType = "boolean"
         }
     }
+
     private val methodCheckAudioDeviceUsing by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
-            usingEqStrings("MicroMsg.DeviceOccupy", "checkAudioDeviceUsing")
+            usingEqStrings(OC, "checkAudioDeviceUsing")
             returnType = "boolean"
         }
     }
+
     private val methodCheckSpeakerUsing by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass(methodIsDuringCall.method.declaringClass)
-            usingEqStrings("MicroMsg.DeviceOccupy", "checkSpeakerUsing")
+            usingEqStrings(OC, "checkSpeakerUsing")
             returnType = "boolean"
         }
     }
