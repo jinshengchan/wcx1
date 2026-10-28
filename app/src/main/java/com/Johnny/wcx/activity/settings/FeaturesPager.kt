@@ -209,7 +209,8 @@ fun CategoryDetailScreen(
     }
 
     val isSecretFriendCategory = categoryName == SwitchFeature.SECRET_FRIEND_CATEGORY
-    val isArticleAdCategory = categoryName == SwitchFeature.ARTICLE_AD_CATEGORY
+    // 「文章去广告」总开关组住在「公众号」分类里：只管辖组内两个功能，分类里其他功能不受影响。
+    val hasArticleAdMaster = items.any { (it as? SwitchFeature)?.underArticleAdMaster == true }
     var masterEnabled by remember(categoryName) {
         mutableStateOf(
             if (isSecretFriendCategory) Preferences.secretFriendMasterEnabled
@@ -231,15 +232,16 @@ fun CategoryDetailScreen(
                     next && WePrefs.getBoolOrFalse(feature.name)
                 }
             }
-        } else {
-            // 「文章去广告」分类：两个子功能按各自保存值恢复（默认关闭）。
-            Preferences.articleAdMasterEnabled = next
-            items.filterIsInstance<SwitchFeature>().forEach { feature ->
-                feature.isEnabled = next && feature.configuredEnabled
+            switchStates.keys.forEach { key ->
+                switchStates[key] = next && WePrefs.getBoolOrFalse(key)
             }
-        }
-        switchStates.keys.forEach { key ->
-            switchStates[key] = next && WePrefs.getBoolOrFalse(key)
+        } else {
+            // 「文章去广告」组：只动组内两个子功能，分类里其他功能不受影响。
+            Preferences.articleAdMasterEnabled = next
+            items.filterIsInstance<SwitchFeature>().filter { it.underArticleAdMaster }.forEach { feature ->
+                feature.isEnabled = next && feature.configuredEnabled
+                switchStates[feature.name] = next && feature.configuredEnabled
+            }
         }
     }
 
@@ -257,7 +259,7 @@ fun CategoryDetailScreen(
     ) {
         if (items.isEmpty()) return@MiuixListScaffold
 
-        if (isSecretFriendCategory || isArticleAdCategory) {
+        if (isSecretFriendCategory || hasArticleAdMaster) {
             item {
                 Column(
                     modifier = Modifier

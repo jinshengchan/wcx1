@@ -157,7 +157,6 @@ val FEATURE_CATEGORIES = listOf(
     "通知" to MaterialSymbols.Outlined.Notifications,
     "界面美化" to MaterialSymbols.Outlined.Imagesearch_roller,
     "公众号" to MaterialSymbols.Outlined.Newspaper,
-    "文章去广告" to MaterialSymbols.Outlined.Newspaper,
     "小程序" to MaterialSymbols.Outlined.Package_2,
     "视频号" to MaterialSymbols.Outlined.Movie,
     "个人资料" to MaterialSymbols.Outlined.Account_circle,
