@@ -1,15 +1,21 @@
 package com.Johnny.wcx.activity.settings
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.Switch as Material3Switch
+import androidx.compose.material3.Text as Material3Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
@@ -20,12 +26,16 @@ import com.composables.icons.materialsymbols.MaterialSymbols
 import com.composables.icons.materialsymbols.outlined.Arrow_back
 import com.composables.icons.materialsymbols.outlined.Close
 import com.composables.icons.materialsymbols.outlined.Search
+import com.composables.icons.materialsymbols.outlined.Settings
 import com.Johnny.wcx.features.core.FeaturesProvider
 import com.Johnny.wcx.features.core.SwitchFeature
 import com.Johnny.wcx.features.items.easter_egg.AprilFools
 import com.Johnny.wcx.features.items.easter_egg.isAprilFools
 import com.Johnny.wcx.features.items.secret_friend.SecretFriendManager
 import com.Johnny.wcx.preferences.WePrefs
+import com.Johnny.wcx.ui.content.AlertDialogContent
+import com.Johnny.wcx.ui.content.TextButton
+import com.Johnny.wcx.ui.utils.showComposeDialog
 import com.Johnny.wcx.utils.android.showToastSuspend
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -218,6 +228,47 @@ fun CategoryDetailScreen(
         )
     }
 
+    // 「文章去广告」组内两个子功能：只在弹窗里出现，不再平铺在分类列表里。
+    val governedItems = items.filterIsInstance<SwitchFeature>().filter { it.underArticleAdMaster }
+    val visibleItems = if (hasArticleAdMaster) {
+        items.filterNot { (it as? SwitchFeature)?.underArticleAdMaster == true }
+    } else {
+        items
+    }
+
+    val activity = LocalComponentActivity.current
+
+    // 点总开关行（开关本身除外）弹出「文章去广告」弹窗，两个子开关在弹窗里分别拨动。
+    // 与 Markdown 渲染弹窗同款：showComposeDialog + AlertDialogContent + Material3 行。
+    fun openArticleAdGroupDialog() {
+        showComposeDialog(activity) {
+            AlertDialogContent(
+                title = { Material3Text("文章去广告") },
+                text = {
+                    Column {
+                        governedItems.forEach { feature ->
+                            val checked = switchStates[feature.name] ?: feature.configuredEnabled
+                            ListItem(
+                                modifier = Modifier.clickable {
+                                    val requested = !checked
+                                    if (feature.onBeforeToggle(requested, activity)) {
+                                        WePrefs.putBool(feature.name, requested)
+                                        feature.isEnabled = requested
+                                        switchStates[feature.name] = requested
+                                    }
+                                },
+                                trailingContent = { Material3Switch(checked, null) },
+                                supportingContent = { Material3Text(feature.description) },
+                                headlineContent = { Material3Text(feature.name) },
+                            )
+                        }
+                    }
+                },
+                confirmButton = { TextButton(onDismiss) { Material3Text("关闭") } }
+            )
+        }
+    }
+
     // 总开关：切换后立即对该分类下所有开关生效（各功能自身开关状态保留）。
     fun applyMasterSwitch(next: Boolean) {
         masterEnabled = next
@@ -269,18 +320,37 @@ fun CategoryDetailScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .then(
+                                if (hasArticleAdMaster) Modifier.clickable { openArticleAdGroupDialog() }
+                                else Modifier
+                            )
                             .padding(horizontal = 16.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = if (isSecretFriendCategory) "密友功能总开关" else "文章去广告总开关",
+                                    fontSize = MiuixTheme.textStyles.headline1.fontSize,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MiuixTheme.colorScheme.onSurface,
+                                )
+                                if (hasArticleAdMaster) {
+                                    Spacer(Modifier.width(4.dp))
+                                    Icon(
+                                        imageVector = MaterialSymbols.Outlined.Settings,
+                                        contentDescription = "点开设置两个子开关",
+                                        modifier = Modifier.size(20.dp),
+                                        tint = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                                    )
+                                }
+                            }
                             Text(
-                                text = if (isSecretFriendCategory) "密友功能总开关" else "文章去广告总开关",
-                                fontSize = MiuixTheme.textStyles.headline1.fontSize,
-                                fontWeight = FontWeight.Medium,
-                                color = MiuixTheme.colorScheme.onSurface,
-                            )
-                            Text(
-                                text = "关闭后本分类下所有功能都不生效（各开关状态保留）",
+                                text = if (isSecretFriendCategory) {
+                                    "关闭后本分类下所有功能都不生效（各开关状态保留）"
+                                } else {
+                                    "关闭后两个文章去广告功能不生效（各开关状态保留）"
+                                },
                                 fontSize = MiuixTheme.textStyles.body2.fontSize,
                                 color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                             )
@@ -307,11 +377,11 @@ fun CategoryDetailScreen(
             }
         }
 
-        itemsIndexed(items, key = { _, item -> item.name }) { index, item ->
+        itemsIndexed(visibleItems, key = { _, item -> item.name }) { index, item ->
             Column(
                 modifier = Modifier
                     .then(if (index == 0) Modifier.padding(top = 12.dp) else Modifier)
-                    .groupedCardItem(index, items.size),
+                    .groupedCardItem(index, visibleItems.size),
             ) {
                 FeatureRow(
                     item = item,

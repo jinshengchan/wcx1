@@ -50,7 +50,7 @@ import com.Johnny.wcx.utils.WeLogger
  */
 @Feature(
     name = "文章广告探针",
-    categories = ["系统与隐私"],
+    categories = ["调试"],
     description = "诊断用：记录文章页广告 DOM 标记，不隐藏任何东西"
 )
 object ArticleAdProbe : SwitchFeature() {
