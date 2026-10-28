@@ -44,7 +44,7 @@ object ArticleAdHider : SwitchFeature() {
         return location.hostname === 'mp.weixin.qq.com' &&
             /^\/(?:s(?:\/[A-Za-z0-9_-]+)?\/?|mp\/appmsg\/show)$/.test(location.pathname);
     }
-    var previous = window.__wcxArticleAdCleanup || window[key];
+    var previous = window[key];
     if (!article()) {
         if (previous) previous.stop();
         return JSON.stringify({article:false});
@@ -58,7 +58,6 @@ object ArticleAdHider : SwitchFeature() {
         if (sheet && sheet.isConnected) return;
         sheet = document.createElement('style');
         sheet.id = styleId;
-        sheet.__wcxStop = state.stop;
         sheet.textContent = '#js_ad_area,#js_bottom_ad_area,#js_middle_ad_area,#js_top_ad_area,' +
             '#js_sponsor_ad_area,#js_comment_ad_area,#js_cmt_ad_area,' +
             '.mpda_bottom_container,.comment-ad-container,li.cidad_comment_constant_key,' +
@@ -139,11 +138,9 @@ object ArticleAdHider : SwitchFeature() {
             });
             hidden.clear();
             if (window[key] === state) delete window[key];
-            if (window.__wcxArticleAdCleanup === state) delete window.__wcxArticleAdCleanup;
         }
     };
     window[key] = state;
-    window.__wcxArticleAdCleanup = state;
     observer.observe(document.documentElement, {subtree:true,childList:true,attributes:true,attributeFilter:['src','id','style','class']});
     window.addEventListener('pagehide', state.stop);
     scan();
@@ -151,7 +148,7 @@ object ArticleAdHider : SwitchFeature() {
 })()
 """.trimIndent()
 
-    internal const val STOP_JS = "(function(){var uncertain=!!window.__wcxArticleAdNeedsReload;['__wcxArticleAdCleanup','__wcxArticleAdV6','__wcxArticleAdV7','__wcxArticleAdV8'].forEach(function(k){if(window[k])window[k].stop();});document.querySelectorAll('#wcx-qe-hide,#__wcx_article_ads_v6_style,#__wcx_article_ads_v7_style,#__wcx_article_ads_v8_style').forEach(function(s){if(typeof s.__wcxStop==='function'){s.__wcxStop();}else{uncertain=true;if(s.parentNode)s.parentNode.removeChild(s);}});if(uncertain){window.__wcxArticleAdNeedsReload=true;return 'reload-needed';}return 'cleaned';})()"
+    internal const val STOP_JS = "(function(){['__wcxArticleAdV6','__wcxArticleAdV7','__wcxArticleAdV8'].forEach(function(k){if(window[k])window[k].stop();});return 'cleaned';})()"
     private val handler = Handler(Looper.getMainLooper())
     // Accessed only on main thread, values never retain a WebView.
     private data class State(var request: Long = 0, var deadline: Long = 0, var failures: Int = 0,
@@ -319,18 +316,11 @@ object ArticleAdHider : SwitchFeature() {
                     val current = reference.get() ?: return@post
                     if (!running || epoch != generation || captured[current] !== state || state.request != request) return@post
                     state.deadline = 0
-                    val outcome = runCatching { JSONTokener(result ?: "null").nextValue() }.getOrNull()
-                    val acknowledged = outcome == "cleaned"
-                    val needsReload = outcome == "reload-needed"
+                    val acknowledged = runCatching { JSONTokener(result ?: "null").nextValue() == "cleaned" }.getOrDefault(false)
                     state.cleaned = acknowledged && !isMasterGroupEnabled
                     state.lastTotal = -1
                     state.lastReapplied = -1
-                    state.retryAt = SystemClock.uptimeMillis() + when {
-                        acknowledged -> 0L
-                        needsReload -> 30_000L // Never auto-reload or force-show unowned page content.
-                        else -> 2000L
-                    }
-                    if (needsReload && state.failures++ == 0) WeLogger.i(TAG, "legacy article styles need a fresh document; no automatic reload")
+                    state.retryAt = SystemClock.uptimeMillis() + if (acknowledged) 0L else 2000L
                     if (state.cleaned) WeLogger.i(TAG, "v8 disabled cleanup acknowledged class=${current.javaClass.name}")
                 }
             })

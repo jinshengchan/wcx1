@@ -108,15 +108,8 @@ for (const path of ['/s/exampleToken', '/s/exampleToken/', '/s', '/mp/appmsg/sho
 for (const path of ['/search','/s/abc/extra','/__tmpl__/0.html']) {
   assert.equal(fixture('mp.weixin.qq.com',path).run().article,false,path);
 }
-const orphan=fixture();const orphanAd=orphan.node('DIV','js_bottom_ad_area','','block');
-orphan.run();delete orphan.window.__wcxArticleAdV8;
-assert.equal(orphan.stop(),'cleaned');assert.equal(orphan.styleCount(),0);assert.ok(!orphan.hidden(orphanAd));
-const lostAliases=fixture();const lostAd=lostAliases.node('DIV','js_bottom_ad_area','','block');
-lostAliases.run();delete lostAliases.window.__wcxArticleAdV8;delete lostAliases.window.__wcxArticleAdCleanup;
-assert.equal(lostAliases.stop(),'cleaned');assert.equal(lostAliases.styleCount(),0);assert.ok(!lostAliases.hidden(lostAd));
-const legacy=fixture();legacy.node('STYLE','wcx-qe-hide');
-assert.equal(legacy.stop(),'reload-needed');assert.equal(legacy.stop(),'reload-needed');
 const normalHidden=fixture();const ownHidden=normalHidden.node('DIV','normal','','none');
 normalHidden.stop();assert.ok(normalHidden.hidden(ownHidden));
-for(let i=0;i<20;i++){orphan.run();orphan.pagehide();assert.equal(orphan.styleCount(),0);assert.ok(!orphan.hidden(orphanAd));}
-console.log('PASS: short article paths, orphan cleanup via registry/style owner, legacy uncertainty, untouched site styles, 20 reuse cycles.');
+const reused=fixture();const reusedAd=reused.node('DIV','js_bottom_ad_area','','block');
+for(let i=0;i<20;i++){reused.run();reused.pagehide();assert.equal(reused.styleCount(),0);assert.ok(!reused.hidden(reusedAd));}
+console.log('PASS: short article paths, untouched site styles, 20 reuse cycles.');
