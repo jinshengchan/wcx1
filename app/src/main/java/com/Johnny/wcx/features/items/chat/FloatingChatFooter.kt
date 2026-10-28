@@ -74,6 +74,8 @@ object FloatingChatFooter : ClickableFeature(), IResolveDex {
 
     private data class LayoutTrace(val signatures: MutableMap<String, String> = mutableMapOf(), var count: Int = 0)
     private val layoutTraces = WeakHashMap<ChatFooter, LayoutTrace>()
+    private data class BottomGapState(val baseMargin: Int, val adjustedMargin: Int)
+    private val bottomGapStates = WeakHashMap<ChatFooter, BottomGapState>()
 
     override fun onEnable() {
         layoutTraces.clear()
@@ -162,7 +164,7 @@ object FloatingChatFooter : ClickableFeature(), IResolveDex {
         val signature = "size=${footer.width}x${footer.height} screenY=${location[1]} " +
             "visible=$hasVisibleRect:${visible.top}..${visible.bottom} windowBottom=${frame.bottom} " +
             "parentH=${(footer.parent as? View)?.height} margin=${lp?.leftMargin},${lp?.rightMargin},${lp?.bottomMargin} " +
-            "paddingBottom=${footer.paddingBottom} children=[$children]"
+            "paddingBottom=${footer.paddingBottom} outlineBottom=${outlineHeight(footer)} children=[$children]"
         // Separate refresh from layout so the trace confirms whether the gap hook ran.
         val key = source.substringBefore(' ')
         if (signature == trace.signatures[key]) return
@@ -174,8 +176,24 @@ object FloatingChatFooter : ClickableFeature(), IResolveDex {
     private val floatingOutlineProvider = object : ViewOutlineProvider() {
         override fun getOutline(view: View, outline: Outline) {
             val r = view.resources.displayMetrics.density * cornerRadiusDp
-            outline.setRoundRect(0, 0, view.width, view.height.coerceAtLeast(1), r)
+            outline.setRoundRect(0, 0, view.width, outlineHeight(view), r)
         }
+    }
+
+    private fun baseBottomMargin(footer: ChatFooter): Int {
+        val current = (footer.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin ?: return 0
+        val previous = bottomGapStates[footer]
+        return if (previous != null && current == previous.adjustedMargin) previous.baseMargin else current
+    }
+
+    private fun outlineHeight(view: View): Int {
+        val fullHeight = view.height.coerceAtLeast(1)
+        val baseMargin = (view as? ChatFooter)?.let { baseBottomMargin(it) } ?: 0
+        // The hidden bottom panel remains measured: in the device trace 1228 - 1059
+        // leaves a 169px input row. Our added 33px gap must remain outside the outline.
+        // When the panel opens and the host margin becomes zero, retain its full height.
+        val visibleHeight = fullHeight + minOf(0, baseMargin)
+        return if (visibleHeight in 1..fullHeight) visibleHeight else fullHeight
     }
 
     /** Sets the outline provider, corner clipping, and elevation — all drawing properties
@@ -208,19 +226,24 @@ object FloatingChatFooter : ClickableFeature(), IResolveDex {
      * rides flush against the IME top. We add [bottomGapDp] to lift it slightly so the
      * bottom rounded corners are visible above the keyboard surface.
      *
-     * Guard: skip when bottomMargin > 0 — WeChat is not managing the position here.
+     * Use the host margin before our last adjustment; repeated callbacks must not stack gaps.
+     * Skip positive host margins, which belong to a different positioning mode.
      */
     private fun applyBottomGap(footer: ChatFooter) {
-        val gapDp = bottomGapDp
-        if (gapDp == 0) return
         val lp = footer.layoutParams as? ViewGroup.MarginLayoutParams ?: return
-        if (lp.bottomMargin > 0) return
-        val gapPx = (gapDp * footer.resources.displayMetrics.density).toInt()
-        val adjusted = lp.bottomMargin + gapPx
+        val baseMargin = baseBottomMargin(footer)
+        if (baseMargin > 0) {
+            bottomGapStates.remove(footer)
+            return
+        }
+        val gapPx = (bottomGapDp * footer.resources.displayMetrics.density).toInt()
+        val adjusted = baseMargin + gapPx
+        bottomGapStates[footer] = BottomGapState(baseMargin, adjusted)
         if (lp.bottomMargin != adjusted) {
             lp.bottomMargin = adjusted
             footer.requestLayout()
         }
+        footer.invalidateOutline()
     }
 
     /** Walks the view hierarchy of [activity] to find the ChatFooter instance. */

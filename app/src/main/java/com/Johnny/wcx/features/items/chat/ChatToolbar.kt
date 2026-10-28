@@ -3,10 +3,10 @@ package com.Johnny.wcx.features.items.chat
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.view.View
 import android.view.ViewGroup
 import android.widget.AdapterView
-import android.widget.FrameLayout
 import android.widget.GridView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -106,7 +106,6 @@ import com.Johnny.wcx.ui.utils.iterable
 import com.Johnny.wcx.ui.utils.setLifecycleOwner
 import com.Johnny.wcx.ui.utils.showComposeDialog
 import com.Johnny.wcx.utils.WeLogger
-import com.Johnny.wcx.utils.android.constructor
 import com.Johnny.wcx.utils.now
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -114,6 +113,7 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import java.lang.ref.WeakReference
+import java.util.WeakHashMap
 import java.util.UUID
 import kotlin.time.Duration.Companion.seconds
 
@@ -306,82 +306,112 @@ object ChatToolbar : ClickableFeature(), IResolveDex {
             }
         }
 
-        ChatFooter::class.constructor.hookAfter {
-            val chatFooter = thisObject as FrameLayout
-            val activity = chatFooter.context as Activity
+        val footerClass = ChatFooter::class.reflekt()
+        val attach = footerClass.firstMethodOrNull { name = "onAttachedToWindow"; superclass() }
+        val layout = footerClass.firstMethodOrNull { name = "onLayout"; superclass() }
+        check(attach != null || layout != null) { "ChatFooter lifecycle methods unavailable" }
+        attach?.hookAfter {
+            (thisObject as? ChatFooter)?.let { scheduleToolbar(it) }
+        }
+        layout?.hookAfter {
+            (thisObject as? ChatFooter)?.let { scheduleToolbar(it) }
+        }
+    }
 
-            val lifecycleOwner = LifecycleOwnerProvider.getOrCreate(activity)
+    private const val TOOLBAR_VIEW_TAG = "wcx.chat.toolbar"
+    private val pendingToolbars = WeakHashMap<ChatFooter, Boolean>()
 
-            chatFooter.setLifecycleOwner(lifecycleOwner)
-            val linearLayout = chatFooter.findViewByChildIndexes<LinearLayout>(0, 1)!!
-            linearLayout.setLifecycleOwner(lifecycleOwner)
-            if (linearLayout.findViewWhich<View> { it is ComposeView } != null) return@hookAfter
-            activity.window.decorView.setLifecycleOwner(lifecycleOwner)
+    private fun scheduleToolbar(footer: ChatFooter) {
+        if (!configuredEnabled || pendingToolbars.containsKey(footer)) return
+        if (footer.findViewWhich<View> { it.tag == TOOLBAR_VIEW_TAG } != null) return
+        pendingToolbars[footer] = true
+        if (!footer.post {
+            pendingToolbars.remove(footer)
+            if (configuredEnabled && footer.isAttachedToWindow) installToolbar(footer)
+        }) pendingToolbars.remove(footer)
+    }
 
-            linearLayout.addView(ComposeView(activity).apply {
-                setLifecycleOwner(lifecycleOwner)
+    private fun installToolbar(chatFooter: ChatFooter) {
+        var context: Context = chatFooter.context
+        val seen = mutableSetOf<Context>()
+        while (context is ContextWrapper && context !is Activity) {
+            if (!seen.add(context)) return
+            context = context.baseContext
+        }
+        val activity = context as? Activity ?: return
+        // Keep the existing insertion point, but wait if inflation is incomplete.
+        val linearLayout = chatFooter.findViewByChildIndexes<View>(0, 1) as? LinearLayout ?: return
+        if (linearLayout.findViewWhich<View> { it.tag == TOOLBAR_VIEW_TAG } != null) return
+        val lifecycleOwner = LifecycleOwnerProvider.getOrCreate(activity)
+        chatFooter.setLifecycleOwner(lifecycleOwner)
+        linearLayout.setLifecycleOwner(lifecycleOwner)
+        activity.window.decorView.setLifecycleOwner(lifecycleOwner)
 
-                setContent {
-                    InjectedUiTheme {
-                        val tools by toolsState.collectAsStateWithLifecycle()
-                        val itemsOrder = remember { itemsOrder }
-                        val enabledItems = remember { enabledItems }
-                        val displayMode = remember { ToolbarDisplayMode.fromPreference(displayModeValue) }
+        linearLayout.addView(ComposeView(activity).apply {
+            tag = TOOLBAR_VIEW_TAG
+            setLifecycleOwner(lifecycleOwner)
 
-                        val sortedVisibleItems = remember(tools) {
-                            if (tools.isEmpty()) return@remember emptyList()
+            setContent {
+                InjectedUiTheme {
+                    val tools by toolsState.collectAsStateWithLifecycle()
+                    val itemsOrder = remember { itemsOrder }
+                    val enabledItems = remember { enabledItems }
+                    val displayMode = remember { ToolbarDisplayMode.fromPreference(displayModeValue) }
 
-                            val firstTool = tools[0].second
-                            val orderList = normalizeOrder(itemsOrder.split(",").filter { it.isNotEmpty() })
-                            val list = mutableListOf<Pair<String, () -> Unit>>()
+                    val sortedVisibleItems = remember(tools) {
+                        if (tools.isEmpty()) return@remember emptyList()
 
-                            list.add(QUICK_REPLY_NAME to {
-                                showQuickReplyPicker(activity)
-                            })
+                        val firstTool = tools[0].second
+                        val orderList = normalizeOrder(itemsOrder.split(",").filter { it.isNotEmpty() })
+                        val list = mutableListOf<Pair<String, () -> Unit>>()
 
-                            list.add("相册" to {
-                                firstTool.onClickListener.onItemClick(firstTool.gridView.get()!!, firstTool.itemView.get()!!, 0, 0)
-                            })
-                            list.add("系统拍摄" to {
-                                firstTool.onLongClickListener.onItemLongClick(null, null, 0, 0)
-                            })
+                        list.add(QUICK_REPLY_NAME to {
+                            showQuickReplyPicker(activity)
+                        })
 
-                            tools.forEach { (name, menuItem) ->
-                                if (name in NAME_TO_ICON_MAP && name != "相册" && name != "系统拍摄") {
-                                    val gridView = menuItem.gridView.get() ?: return@forEach
-                                    val itemView = menuItem.itemView.get() ?: return@forEach
-                                    list.add(name to {
-                                        menuItem.onClickListener.onItemClick(
-                                            gridView,
-                                            itemView,
-                                            menuItem.indexInGrid + 1,
-                                            0
-                                        )
-                                    })
-                                }
+                        list.add("相册" to {
+                            firstTool.onClickListener.onItemClick(firstTool.gridView.get()!!, firstTool.itemView.get()!!, 0, 0)
+                        })
+                        list.add("系统拍摄" to {
+                            firstTool.onLongClickListener.onItemLongClick(null, null, 0, 0)
+                        })
+
+                        tools.forEach { (name, menuItem) ->
+                            if (name in NAME_TO_ICON_MAP && name != "相册" && name != "系统拍摄") {
+                                val gridView = menuItem.gridView.get() ?: return@forEach
+                                val itemView = menuItem.itemView.get() ?: return@forEach
+                                list.add(name to {
+                                    menuItem.onClickListener.onItemClick(
+                                        gridView,
+                                        itemView,
+                                        menuItem.indexInGrid + 1,
+                                        0
+                                    )
+                                })
                             }
-
-                            list.distinctBy { it.first }
-                                .filter { it.first in enabledItems }
-                                .sortedBy { item ->
-                                    val idx = orderList.indexOf(item.first)
-                                    if (idx == -1) Int.MAX_VALUE else idx
-                                }
                         }
 
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp),
-                        ) {
-                            items(sortedVisibleItems, key = { it.first }) { (name, onClick) ->
-                                val icon = iconFor(name)
-                                FeatureChip(name, icon, displayMode, onClick)
+                        list.distinctBy { it.first }
+                            .filter { it.first in enabledItems }
+                            .sortedBy { item ->
+                                val idx = orderList.indexOf(item.first)
+                                if (idx == -1) Int.MAX_VALUE else idx
                             }
+                    }
+
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                    ) {
+                        items(sortedVisibleItems, key = { it.first }) { (name, onClick) ->
+                            val icon = iconFor(name)
+                            FeatureChip(name, icon, displayMode, onClick)
                         }
                     }
                 }
-            }, 0)
-        }
+            }
+        }, 0)
+        WeLogger.i(TAG, "toolbar attached after ChatFooter layout")
     }
 
     override fun onDisable() {
@@ -869,3 +899,4 @@ private fun FeatureChip(
         }) else null,
     )
 }
+
