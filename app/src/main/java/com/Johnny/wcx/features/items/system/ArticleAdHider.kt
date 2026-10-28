@@ -31,7 +31,7 @@ object ArticleAdHider : SwitchFeature() {
     override val underArticleAdMaster: Boolean = true
     override val defaultEnabled: Boolean = false
     // The controller stays available even when filtering is off, to observe saved changes.
-    override val shouldEnableOnStartup: Boolean = true
+    override val keepControllerEnabled: Boolean = true
     override val shouldLoadInCurrentProcess: Boolean = true
 
     // Exported by tests directly from this literal: this is the exact script sent to WeChat.
@@ -162,10 +162,11 @@ object ArticleAdHider : SwitchFeature() {
         override fun run() {
             if (!running) return
             val desired = isMasterGroupEnabled
-            _isEnabled = desired
             if (lastDesired != desired) {
                 lastDesired = desired
-                if (!desired) captured.values.forEach { state ->
+                // A new desired state supersedes both pending injection and cleanup.
+                // In particular, re-enable must not inherit a failed cleanup's backoff.
+                captured.values.forEach { state ->
                     state.request = ++nextRequest
                     state.deadline = 0
                     state.retryAt = 0
@@ -176,24 +177,6 @@ object ArticleAdHider : SwitchFeature() {
             captured.entries.toList().forEach { (view, state) -> evaluate(view, state) }
             handler.postDelayed(this, 500L)
         }
-    }
-
-    override fun onBeforeToggle(newState: Boolean, context: android.content.Context): Boolean {
-        com.Johnny.wcx.preferences.WePrefs.putBool(name, newState)
-        _isEnabled = newState
-        // Keep the controller/hooks installed; filtering and cleanup read the saved switch.
-        handler.post {
-            if (running) captured.entries.toList().forEach { (view, state) ->
-                state.retryAt = 0
-                if (!newState) {
-                    state.request = ++nextRequest
-                    state.deadline = 0
-                    state.cleaned = false
-                }
-                evaluate(view, state)
-            }
-        }
-        return true
     }
 
     override fun onEnable() {
@@ -359,3 +342,4 @@ object ArticleAdHider : SwitchFeature() {
         else handler.post { stopOnMain() }
     }
 }
+

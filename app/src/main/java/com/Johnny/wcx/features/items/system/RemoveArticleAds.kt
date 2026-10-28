@@ -16,13 +16,7 @@ object RemoveArticleAds : SwitchFeature(), IWePacketInterceptor {
 
     // Keep a lightweight listener registered in the host; every response reads the current
     // saved choice, so toggling from a different process cannot leave filtering enabled.
-    override val shouldEnableOnStartup: Boolean = true
-
-    override fun onBeforeToggle(newState: Boolean, context: android.content.Context): Boolean {
-        com.Johnny.wcx.preferences.WePrefs.putBool(name, newState)
-        _isEnabled = newState // UI must not tear down the cross-process control listener.
-        return true
-    }
+    override val keepControllerEnabled: Boolean = true
 
     private const val TAG = "RemoveArticleAds"
 
@@ -101,3 +95,4 @@ object RemoveArticleAds : SwitchFeature(), IWePacketInterceptor {
         return null
     }
 }
+
