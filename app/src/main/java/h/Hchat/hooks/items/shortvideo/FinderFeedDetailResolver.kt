@@ -1,5 +1,6 @@
 package h.Hchat.hooks.items.shortvideo
 
+import com.Johnny.wcx.utils.HostInfo
 import android.os.Looper
 import de.robv.android.xposed.XC_MethodHook
 import h.Hchat.dexkit.DexMethodCache
@@ -20,7 +21,8 @@ import java.util.concurrent.TimeUnit
 
 internal class FinderFeedDetailResolver private constructor(
     val runtimeKey: String,
-    private val requestConstructor: Constructor<*>
+    private val requestConstructor: Constructor<*>,
+    private val cgiSendMethod: Method?
 ) {
     private val cache = ConcurrentHashMap<String, CachedFeed>()
 
@@ -30,6 +32,11 @@ internal class FinderFeedDetailResolver private constructor(
             HLog.e("$TAG 不能在主线程等待视频号详情: objectId=$objectId")
             return null
         }
+        // Keep the main-thread guard outside the lock: never block the UI behind a download.
+        return synchronized(this) { resolveOffMain(objectId, objectNonceId, commentScene) }
+    }
+
+    private fun resolveOffMain(objectId: String, objectNonceId: String, commentScene: Int): Any? {
         val cacheKey = "$objectId|$objectNonceId"
         cache[cacheKey]?.takeIf { System.currentTimeMillis() - it.savedAt < CACHE_TTL_MS }?.let {
             return it.finderObject
@@ -40,19 +47,21 @@ internal class FinderFeedDetailResolver private constructor(
             HLog.e("$TAG 视频号 objectId 无效: $objectId")
             return null
         }
-        val scene = KavaReflector.newInstance(
-            requestConstructor,
-            feedId,
-            objectNonceId,
-            commentScene.takeIf { it > 0 } ?: DEFAULT_COMMENT_SCENE,
-            System.identityHashCode(this)
-        ) ?: run {
+        val args = if (cgiSendMethod != null) {
+            modernRequestArguments(feedId, objectNonceId, commentScene)
+        } else arrayOf<Any?>(feedId, objectNonceId,
+            commentScene.takeIf { it > 0 } ?: DEFAULT_COMMENT_SCENE, System.identityHashCode(this))
+        val scene = KavaReflector.newInstance(requestConstructor, *args) ?: run {
             HLog.e("$TAG 创建视频号详情请求失败: objectId=$objectId")
             return null
         }
         val request = PendingRequest(feedId)
         pending[scene] = request
-        val sent = runCatching { WeChatApis.network()?.sendRequest(scene) == true }
+        // Use the host Cgi entry for 8.0.80; it is not a NetScene queue object.
+        val sent = runCatching {
+            if (cgiSendMethod != null) cgiSendMethod.invoke(scene) != null
+            else WeChatApis.network()?.sendRequest(scene) == true
+        }
             .onFailure { request.failure = it }
             .getOrDefault(false)
         if (!sent) {
@@ -91,8 +100,8 @@ internal class FinderFeedDetailResolver private constructor(
     companion object {
         private const val TAG = "[Hchat:FinderDetail]"
         private const val PREFS_NAME = "Hchat_finder_feed_detail_cache"
-        private const val CACHE_CONSTRUCTOR = "request_constructor_v2"
-        private const val CACHE_CALLBACK = "request_callback_v2"
+        private const val CACHE_CONSTRUCTOR = "request_constructor_v3"
+        private const val CACHE_CALLBACK = "request_callback_v3"
         private const val CGI_URI = "/cgi-bin/micromsg-bin/findergetcommentdetail"
         private const val FINDER_OBJECT_CLASS = "com.tencent.mm.protocal.protobuf.FinderObject"
         private const val FEED_OBJECT_FIELD_INDEX = 2
@@ -102,6 +111,44 @@ internal class FinderFeedDetailResolver private constructor(
         private const val CACHE_TTL_MS = 10 * 60_000L
         private val pending = ConcurrentHashMap<Any, PendingRequest>()
         private val hookedCallbacks = Collections.newSetFromMap(ConcurrentHashMap<Method, Boolean>())
+
+        // Exact layout verified against WeChat 8.0.80 (3220), th2.g4.
+        // Do not reuse this default-argument mask for an unverified host version/layout.
+        private val modernRequestTypes = listOf(
+            "long", "java.lang.String", "int", "int", "java.lang.String", "boolean",
+            "com.tencent.mm.protobuf.g", "com.tencent.mm.plugin.finder.storage.yn0",
+            "long", "java.lang.String", "boolean", "boolean", "java.lang.String",
+            "gd5.z03", "int", "gd5.r92", "boolean", "gd5.ho6", "com.tencent.mm.protobuf.g",
+            "java.lang.String", "gd5.bb4", "java.lang.String", "int", "int", "java.lang.String",
+            "java.lang.Integer", "com.tencent.mm.protobuf.g", "gd5.c33", "boolean",
+            "java.lang.String", "gd5.jq2", "gd5.rq2", "int", "kotlin.jvm.internal.j"
+        )
+
+        private fun isModernRequest(constructor: Constructor<*>): Boolean =
+            HostInfo.versionName == "8.0.80" && HostInfo.versionCode == 3220L &&
+                constructor.parameterTypes.map { it.name } == modernRequestTypes
+
+        private fun modernRequestArguments(feedId: Long, nonce: String, commentScene: Int): Array<Any?> {
+            val args = modernRequestTypes.map<String, Any?> { type ->
+                when (type) { "long" -> 0L; "int" -> 0; "boolean" -> false; else -> null }
+            }.toTypedArray()
+            args[0] = feedId
+            args[1] = nonce
+            args[2] = commentScene.takeIf { it > 0 } ?: DEFAULT_COMMENT_SCENE
+            args[3] = 2 // Native identity-scene input (qz2.k.M7 / xa1.t2 factories).
+            args[4] = "" // feedUsername, required non-null.
+            args[5] = true // need fetch object.
+            args[12] = "" // encryptedObjectId, required non-null.
+            // Native l2.Ej uses this Kotlin mask; all other optional values use host defaults.
+            args[32] = -12352
+            return args
+        }
+
+        private fun locateCgiSendMethod(owner: Class<*>): Method? =
+            KavaReflector.declaredMethods(owner).singleOrNull {
+                it.name == "k" && it.parameterCount == 0 && it.returnType.name == "f06.g" &&
+                    !java.lang.reflect.Modifier.isStatic(it.modifiers)
+            }?.apply { isAccessible = true }
 
         fun locate(context: FeatureContext): FinderFeedDetailResolver? {
             val hostContext = context.hostContext()
@@ -127,10 +174,13 @@ internal class FinderFeedDetailResolver private constructor(
             }
             val resolvedConstructor = constructor ?: return null
             val resolvedCallback = callback ?: return null
+            val cgiSendMethod = if (isModernRequest(resolvedConstructor)) {
+                locateCgiSendMethod(resolvedConstructor.declaringClass) ?: return null
+            } else null
             if (!installCallbackHook(resolvedCallback)) return null
             DexMethodCache.saveConstructor(prefs, runtimeKey, CACHE_CONSTRUCTOR, resolvedConstructor)
             DexMethodCache.save(prefs, runtimeKey, CACHE_CALLBACK, resolvedCallback)
-            return FinderFeedDetailResolver(runtimeKey, resolvedConstructor)
+            return FinderFeedDetailResolver(runtimeKey, resolvedConstructor, cgiSendMethod)
         }
 
         private fun locateCallbackMethod(owner: Class<*>): Method? {
@@ -159,7 +209,7 @@ internal class FinderFeedDetailResolver private constructor(
         }
 
         private fun isRequestConstructor(constructor: Constructor<*>): Boolean {
-            return constructor.parameterTypes.contentEquals(
+            return isModernRequest(constructor) || constructor.parameterTypes.contentEquals(
                 arrayOf(
                     java.lang.Long.TYPE,
                     String::class.java,
@@ -171,6 +221,13 @@ internal class FinderFeedDetailResolver private constructor(
 
         private fun isCallbackMethod(method: Method, owner: Class<*>): Boolean {
             val types = method.parameterTypes
+            if (HostInfo.versionName == "8.0.80" && HostInfo.versionCode == 3220L &&
+                KavaReflector.declaredConstructors(owner).any(::isModernRequest)) {
+                return method.declaringClass == owner && method.name == "A" &&
+                    method.returnType == Void.TYPE && types.map { it.name } == listOf(
+                        "int", "int", "java.lang.String", "com.tencent.mm.protobuf.f", "com.tencent.mm.modelbase.n1"
+                    )
+            }
             return method.declaringClass == owner &&
                 method.returnType == Void.TYPE &&
                 types.size == 6 &&
@@ -182,20 +239,22 @@ internal class FinderFeedDetailResolver private constructor(
                 types[5] == ByteArray::class.java
         }
 
+        @Synchronized
         private fun installCallbackHook(method: Method): Boolean {
-            if (!hookedCallbacks.add(method)) return true
-            return runCatching {
-                HookRegistry.get().hook(method, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val scene = param.thisObject ?: return
-                        val request = pending.remove(scene) ?: return
-                        val errType = (param.args.getOrNull(1) as? Number)?.toInt() ?: -1
-                        val errCode = (param.args.getOrNull(2) as? Number)?.toInt() ?: -1
+            if (hookedCallbacks.contains(method)) return true
+            HookRegistry.get().hook(method, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val scene = param.thisObject ?: return
+                    // Never process unrelated native requests or modify their results.
+                    val request = pending.remove(scene) ?: return
+                    try {
+                        val modern = method.parameterCount == 5
+                        val errType = (param.args.getOrNull(if (modern) 0 else 1) as? Number)?.toInt() ?: -1
+                        val errCode = (param.args.getOrNull(if (modern) 1 else 2) as? Number)?.toInt() ?: -1
                         if (errType == 0 && errCode == 0) {
                             request.finderObject = extractFinderObject(
-                                scene,
-                                param.args.getOrNull(4),
-                                param.args.getOrNull(5) as? ByteArray,
+                                scene, param.args.getOrNull(if (modern) 3 else 4),
+                                if (modern) null else param.args.getOrNull(5) as? ByteArray,
                                 request.feedId
                             )
                             if (request.finderObject == null) {
@@ -206,15 +265,15 @@ internal class FinderFeedDetailResolver private constructor(
                                 "Finder detail request failed: errType=$errType errCode=$errCode"
                             )
                         }
+                    } catch (error: Exception) {
+                        request.failure = error
+                    } finally {
                         request.completed.countDown()
                     }
-                })
-                true
-            }.getOrElse {
-                hookedCallbacks.remove(method)
-                HLog.e("$TAG Hook视频号详情响应失败: ${it.message}", it)
-                false
-            }
+                }
+            })
+            hookedCallbacks.add(method)
+            return true
         }
 
         private fun extractFinderObject(
