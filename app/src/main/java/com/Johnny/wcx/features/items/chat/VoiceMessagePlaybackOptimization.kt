@@ -12,7 +12,6 @@ import androidx.compose.ui.unit.dp
 import dev.ujhhgtg.reflekt.reflekt
 
 import com.Johnny.wcx.dexkit.abc.IResolveDex
-import com.Johnny.wcx.dexkit.dsl.dexClass
 import com.Johnny.wcx.dexkit.dsl.dexMethod
 import com.Johnny.wcx.features.core.ClickableFeature
 import com.Johnny.wcx.features.core.Feature
@@ -26,6 +25,8 @@ import com.Johnny.wcx.ui.content.m3.RadioButtonWidget
 import com.Johnny.wcx.ui.content.m3.SegmentedColumn
 import com.Johnny.wcx.ui.utils.showComposeDialog
 import com.Johnny.wcx.utils.reflection.bool
+import com.Johnny.wcx.utils.WeLogger
+import java.lang.reflect.Modifier
 
 /**
  * 语音消息播放逻辑优化。
@@ -47,7 +48,7 @@ import com.Johnny.wcx.utils.reflection.bool
  *   (switchSpeaker 内部对 MediaPlayer 保存 currentPosition 后 seekTo, Speex/Silk 仅重建
  *   AudioTrack 流类型), 跳过从头重播与 2 秒回退, 播放进度原样继承。
  *
- * 所有锚点均为跨版本稳定字符串, 按项目约定不加 allowFailure。
+ * 锚点按版本可选；启用时验证必要目标，运行时结构不明确则保留宿主行为。
  */
 @Feature(
     name = "语音消息播放逻辑优化",
@@ -65,20 +66,10 @@ object VoiceMessagePlaybackOptimization : ClickableFeature(), IResolveDex {
     private var playbackMode by prefOption("voice_playback_mode", MODE_INHERIT_PROGRESS)
 
     /**
-     * AutoPlay 语音播放控制器: 日志锚点 `MicroMsg.AutoPlay` + 传感器回调内的
-     * `onSensorEvent, isON:` 组合定位, 各版本唯一。
-     */
-    private val classAutoPlay by dexClass {
-        matcher {
-            usingEqStrings("MicroMsg.AutoPlay", "onSensorEvent, isON:")
-        }
-    }
-
-    /**
      * AutoPlay 的距离传感器回调 (boolean: false=贴近耳朵 true=离开耳朵)。
      * 方法名各版本不同, 用方法体内日志常量 `onSensorEvent, isON:` 锚定。
      */
-    private val methodSensorCallback by dexMethod {
+    private val methodSensorCallback by dexMethod(allowFailure = true) {
         matcher {
             declaredClass {
                 usingEqStrings("MicroMsg.AutoPlay", "onSensorEvent, isON:")
@@ -90,18 +81,19 @@ object VoiceMessagePlaybackOptimization : ClickableFeature(), IResolveDex {
     }
 
     /** 切换任务入口 `onTimerExpired()`: 无参 boolean 返回, 方法名跨版本稳定。 */
-    private val methodSwitchTask by dexMethod {
+    private val methodSwitchTask by dexMethod(allowFailure = true) {
         matcher {
             declaredClass {
                 usingEqStrings("speaker off")
             }
+            name = "onTimerExpired"
             paramCount = 0
             returnType("boolean")
         }
     }
 
     /** AutoPlay.setSpeakerOn(boolean) (8.0.65-74 G / 8.0.76 H): 记录当前扬声器状态。 */
-    private val methodSetSpeakerOn by dexMethod {
+    private val methodSetSpeakerOn by dexMethod(allowFailure = true) {
         matcher {
             declaredClass {
                 usingEqStrings("MicroMsg.AutoPlay")
@@ -112,7 +104,7 @@ object VoiceMessagePlaybackOptimization : ClickableFeature(), IResolveDex {
     }
 
     /** AutoPlay.switchSpeaker() (8.0.65-74 K / 8.0.76 L): 无参切换, 内部继承播放位置。 */
-    private val methodSwitchSpeaker by dexMethod {
+    private val methodSwitchSpeaker by dexMethod(allowFailure = true) {
         matcher {
             declaredClass {
                 usingEqStrings("MicroMsg.AutoPlay")
@@ -122,30 +114,68 @@ object VoiceMessagePlaybackOptimization : ClickableFeature(), IResolveDex {
         }
     }
 
-    override fun onEnable() {
-        // 完全禁用: 传感器事件直接丢弃, AutoPlay 不会进入任何切换逻辑。
-        methodSensorCallback.hookBefore {
-            if (playbackMode == MODE_DISABLE) result = null
-        }
+    private var diagnosticCount = 0
+    private fun diagnostic(message: String) {
+        if (diagnosticCount++ < 20) WeLogger.i("VoicePlayback", message)
+    }
 
-        // 切换任务: 禁用模式下兜底丢弃; 继承进度模式下替换为「仅切换 + 保留进度」。
-        methodSwitchTask.hookBefore {
-            when (playbackMode) {
-                MODE_DISABLE -> result = false
-                MODE_INHERIT_PROGRESS -> {
-                    val task = thisObject!!
-                    val autoPlay = task.reflekt()
-                        .firstField { type = classAutoPlay.clazz }
-                        .get()
-                    val switchingToEarpiece = task.reflekt()
-                        .firstField { type = bool }
-                        .get() as Boolean
-                    methodSetSpeakerOn.method.invoke(autoPlay, switchingToEarpiece)
-                    methodSwitchSpeaker.method.invoke(autoPlay)
-                    result = false
+    override fun onEnable() {
+        diagnosticCount = 0
+        val sensor = runCatching { methodSensorCallback.method }.getOrNull()?.takeIf {
+            it.parameterTypes.contentEquals(arrayOf(Boolean::class.javaPrimitiveType)) &&
+                it.returnType == Void.TYPE && !Modifier.isStatic(it.modifiers)
+        }
+        val taskMethod = runCatching { methodSwitchTask.method }.getOrNull()?.takeIf {
+            it.name == "onTimerExpired" && it.parameterCount == 0 &&
+                it.returnType == Boolean::class.javaPrimitiveType && !Modifier.isStatic(it.modifiers)
+        }
+        val setSpeaker = runCatching { methodSetSpeakerOn.method }.getOrNull()?.takeIf {
+            it.parameterTypes.contentEquals(arrayOf(Boolean::class.javaPrimitiveType)) && !Modifier.isStatic(it.modifiers)
+        }
+        val switchSpeaker = runCatching { methodSwitchSpeaker.method }.getOrNull()?.takeIf {
+            it.parameterCount == 0 && !Modifier.isStatic(it.modifiers)
+        }
+        if (playbackMode == MODE_INHERIT_PROGRESS) {
+            check(taskMethod != null && setSpeaker != null && switchSpeaker != null) {
+                "Playback inheritance unavailable: compatible task/speaker methods not resolved"
+            }
+        } else check(sensor != null || taskMethod != null) { "Voice sensor/task unavailable" }
+
+        sensor?.hookBefore {
+            if (configuredEnabled && playbackMode == MODE_DISABLE) result = null
+        }
+        taskMethod?.hookBefore {
+            if (!configuredEnabled) return@hookBefore
+            if (playbackMode == MODE_DISABLE) {
+                result = false
+                return@hookBefore
+            }
+            if (playbackMode != MODE_INHERIT_PROGRESS || setSpeaker == null || switchSpeaker == null) return@hookBefore
+            val task = thisObject ?: return@hookBefore
+            // Never choose the first boolean or controller field when several fit.
+            val fields = generateSequence(task.javaClass) { it.superclass }
+                .flatMap { it.declaredFields.asSequence() }
+                .filterNot { Modifier.isStatic(it.modifiers) }.toList()
+            try {
+                val controllers = fields.mapNotNull { field ->
+                    field.isAccessible = true
+                    field.get(task)?.takeIf { setSpeaker.declaringClass.isInstance(it) && switchSpeaker.declaringClass.isInstance(it) }
                 }
+                val directions = fields.filter { it.type == Boolean::class.javaPrimitiveType }
+                if (controllers.size != 1 || directions.size != 1) {
+                    diagnostic("ambiguous controller/direction fields; host playback retained")
+                    return@hookBefore
+                }
+                val direction = directions.single().apply { isAccessible = true }.getBoolean(task)
+                setSpeaker.invoke(controllers.single(), direction)
+                switchSpeaker.invoke(controllers.single())
+                result = false
+                diagnostic("speaker switched with host position-preserving method")
+            } catch (ex: Exception) {
+                diagnostic("switch failed: ${(ex.cause ?: ex).javaClass.simpleName}; host playback retained")
             }
         }
+        diagnostic("hooks installed: sensor=${sensor != null} task=${taskMethod != null} inherit=${setSpeaker != null && switchSpeaker != null}")
     }
 
     override fun onClick(context: ComponentActivity) {
@@ -189,3 +219,4 @@ object VoiceMessagePlaybackOptimization : ClickableFeature(), IResolveDex {
         }
     }
 }
+
