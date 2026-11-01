@@ -23,6 +23,7 @@ object AutoSpeechToText : SwitchFeature(),
     )
     private val processedMessages = LruCache<Long, ConversionState>()
     private var diagnosticCount = 0
+    private val diagnosedComponents = mutableSetOf<Class<*>>()
 
     private fun diagnostic(stage: String) {
         if (diagnosticCount++ < 20) WeLogger.i("AutoSpeechToText", stage)
@@ -30,6 +31,7 @@ object AutoSpeechToText : SwitchFeature(),
 
     override fun onEnable() {
         diagnosticCount = 0
+        diagnosedComponents.clear()
         WeChatMessageViewApi.addListener(this)
         diagnostic("listener registered; conversion attempts limited to 2 per cached message")
     }
@@ -78,6 +80,17 @@ object AutoSpeechToText : SwitchFeature(),
                 return
             }
             stage = "request-conversion"
+            if (diagnosedComponents.size < 4 && diagnosedComponents.add(api.javaClass)) {
+                val candidates = generateSequence(api.javaClass) { it.superclass }.take(4)
+                    .flatMap { it.declaredMethods.asSequence() }
+                    .filter { it.returnType == Void.TYPE && it.parameterCount in 1..8 &&
+                        it.parameterTypes.first().isAssignableFrom(msgInfo.instance.javaClass) }
+                    .take(8).map { method ->
+                        "${method.declaringClass.name}#${method.name}(" +
+                            method.parameterTypes.joinToString { it.name } + ")"
+                    }.toList()
+                diagnostic("conversion component=${api.javaClass.name}; expected=(MsgInfo,boolean,int,int); candidates=$candidates")
+            }
             if (!configuredEnabled) return
             state.attempts++
             api.reflekt().firstMethod {
@@ -93,3 +106,4 @@ object AutoSpeechToText : SwitchFeature(),
         }
     }
 }
+

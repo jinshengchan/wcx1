@@ -34,7 +34,7 @@ import com.Johnny.wcx.features.core.BaseFeature
 import com.Johnny.wcx.utils.WeLogger
 import com.Johnny.wcx.utils.android.copyToClipboard
 import com.Johnny.wcx.utils.android.showToast
-import com.Johnny.wcx.utils.reflection.DexKit
+import com.Johnny.wcx.utils.reflection.withDexKit
 import com.Johnny.wcx.utils.restartHost
 import com.Johnny.wcx.utils.unreachable
 import kotlinx.coroutines.CoroutineScope
@@ -157,11 +157,9 @@ fun DexResolver(
                     .map { item ->
                         async(Dispatchers.IO) {
                             dexScanSemaphore.withPermit {
-                                scanItem(
-                                    item,
-                                    DexKit,
-                                    progressChannel
-                                )
+                                withDexKit { bridge ->
+                                    scanItem(item, bridge, progressChannel)
+                                }
                             }
                         }
                     }
@@ -439,3 +437,4 @@ private fun buildErrorReport(failedResults: List<ScanResult.Failed>) = buildStri
         append("\n\n")
     }
 }
+
