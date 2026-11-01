@@ -656,7 +656,7 @@ object PipVoip : SwitchFeature(), IResolveDex {
             }
             val pluginConstructor = runCatching {
                 if (classFlutterVoipPluginImpl.isPlaceholder) null
-                else classFlutterVoipPluginImpl.clazz.kotlin.reflekt().firstConstructorOrNull()
+                else classFlutterVoipPluginImpl.clazz.kotlin.reflekt().firstConstructorOrNull {}
             }.getOrNull()
             pluginConstructor?.hookAfter { voipPluginInstance = thisObject }
             wechatClassOrNull(WE_CHAT_VOIPMP_RECORDER)?.kotlin?.reflekt()?.firstMethodOrNull {
