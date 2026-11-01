@@ -89,14 +89,26 @@ object AutoSpeechToText : SwitchFeature(),
                         "${method.declaringClass.name}#${method.name}(" +
                             method.parameterTypes.joinToString { it.name } + ")"
                     }.toList()
-                diagnostic("conversion component=${api.javaClass.name}; expected=(MsgInfo,boolean,int,int); candidates=$candidates")
+                diagnostic("conversion component=${api.javaClass.name}; expected=(MsgInfo,boolean,int,int[,int]); candidates=$candidates")
             }
             if (!configuredEnabled) return
-            state.attempts++
-            api.reflekt().firstMethod {
+            val legacyConverter = api.reflekt().firstMethodOrNull {
                 parameters(WeMessageApi.classMsgInfo.clazz, Boolean::class, Int::class, Int::class)
-                returnType = Void::class.javaPrimitiveType
-            }.invoke(msgInfo.instance, false, -1, 0)
+                returnType = Void.TYPE
+            }
+            if (legacyConverter != null) {
+                state.attempts++
+                legacyConverter.invoke(msgInfo.instance, false, -1, 0)
+            } else {
+                // 8.0.80 (3220): gp.w0 forwards the extra int to ExtTranslateVoiceEvent.
+                // Its native queued-conversion caller ep.run passes 0 for this argument.
+                val converter = api.reflekt().firstMethod {
+                    parameters(WeMessageApi.classMsgInfo.clazz, Boolean::class, Int::class, Int::class, Int::class)
+                    returnType = Void.TYPE
+                }
+                state.attempts++
+                converter.invoke(msgInfo.instance, false, -1, 0, 0)
+            }
             // A void return only acknowledges submission, not asynchronous completion.
             diagnostic("conversion submitted; waiting for host result")
         } catch (ex: Exception) {

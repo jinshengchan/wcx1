@@ -83,9 +83,8 @@ object VoiceMessagePlaybackOptimization : ClickableFeature(), IResolveDex {
     /** 切换任务入口 `onTimerExpired()`: 无参 boolean 返回, 方法名跨版本稳定。 */
     private val methodSwitchTask by dexMethod(allowFailure = true) {
         matcher {
-            declaredClass {
-                usingEqStrings("speaker off")
-            }
+            // Match the timer body itself, not any method in a class with this log.
+            usingEqStrings("MicroMsg.AutoPlay", "speaker off")
             name = "onTimerExpired"
             paramCount = 0
             returnType("boolean")
@@ -100,6 +99,7 @@ object VoiceMessagePlaybackOptimization : ClickableFeature(), IResolveDex {
             }
             usingEqStrings("speakerOn has been set %s")
             paramTypes(bool)
+            returnType("void")
         }
     }
 
@@ -111,6 +111,7 @@ object VoiceMessagePlaybackOptimization : ClickableFeature(), IResolveDex {
             }
             usingEqStrings("switchSpeaker, isSpeakerOn: %b, isPlaying: %b")
             paramCount = 0
+            returnType("void")
         }
     }
 
