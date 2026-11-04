@@ -1,12 +1,9 @@
 package com.Johnny.wcx.features.items.system
 
 import android.content.Context
-import android.widget.Button
+import android.view.View
 import androidx.compose.material3.Text
-import androidx.core.view.isGone
 import androidx.core.view.isVisible
-import dev.ujhhgtg.reflekt.reflekt
-import dev.ujhhgtg.reflekt.utils.toClass
 import com.Johnny.wcx.dexkit.abc.IResolveDex
 import com.Johnny.wcx.dexkit.dsl.dexMethod
 import com.Johnny.wcx.features.core.Feature
@@ -15,71 +12,58 @@ import com.Johnny.wcx.ui.content.AlertDialogContent
 import com.Johnny.wcx.ui.content.Button
 import com.Johnny.wcx.ui.content.TextButton
 import com.Johnny.wcx.ui.utils.showComposeDialog
+import com.Johnny.wcx.utils.WeLogger
+import org.luckypray.dexkit.query.enums.MatchType
+import java.lang.reflect.Modifier
 
 @Feature(name = "强制平板模式", categories = ["系统与隐私"], description = "让微信将当前设备识别为平板")
 object ForceTabletMode : SwitchFeature(), IResolveDex {
 
+    // 8.0.80: UIUtils.C() wraps the cached tablet-environment helper b(...).
+    // Match the wrapper: forcing only a model whitelist or the uncached helper
+    // leaves callers seeing the host's previously cached false result.
     private val methodIsTablet by dexMethod {
         matcher {
-            usingEqStrings("Lenovo TB-9707F", "eebbk")
-        }
-    }
-    private val methodIsTablet2 by dexMethod {
-        matcher {
-            usingEqStrings("MicroMsg.UIUtils", "isRoyoleFoldableDevice!!!")
+            paramCount = 0
+            returnType("boolean")
+            invokeMethods {
+                add {
+                    usingEqStrings("inTabletEnv, isFoldableDevice, return false")
+                    returnType("boolean")
+                }
+                matchType = MatchType.Contains
+            }
         }
     }
     private val methodOtherDeviceLoginButtonIsVisible by dexMethod {
         matcher {
             usingEqStrings("loginAsOtherDeviceBtn")
+            returnType("void")
         }
     }
 
     override fun onEnable() {
-        methodIsTablet.hookBefore {
-            try {
-                // 仅当原方法返回 boolean 时才设置 result = true，避免对非 boolean 方法（如 getInstance）造成 ClassCastException
-                if (method is java.lang.reflect.Method) {
-                val returnType = (method as java.lang.reflect.Method).returnType
-                if (returnType == Boolean::class.javaPrimitiveType || returnType == java.lang.Boolean::class.java) {
-                    result = true
-                }
-            }
-            } catch (e: Throwable) {
-                // 兜底异常捕获
-            }
+        val tablet = methodIsTablet.method
+        val loginEntry = methodOtherDeviceLoginButtonIsVisible.method
+        check(tablet.returnType == Boolean::class.javaPrimitiveType &&
+            tablet.parameterCount == 0 && Modifier.isStatic(tablet.modifiers)) {
+            "Tablet environment target has an incompatible signature"
+        }
+        check(loginEntry.returnType == Void.TYPE && loginEntry.parameterCount > 0 &&
+            View::class.java.isAssignableFrom(loginEntry.parameterTypes[0])) {
+            "Other-device login entry has an incompatible signature"
         }
 
-        methodIsTablet2.hookBefore {
-            try {
-                if (method is java.lang.reflect.Method) {
-                val returnType = (method as java.lang.reflect.Method).returnType
-                if (returnType == Boolean::class.javaPrimitiveType || returnType == java.lang.Boolean::class.java) {
-                    result = true
-                }
-            }
-            } catch (e: Throwable) {
-                // 兜底异常捕获
-            }
+        tablet.hookBefore {
+            if (configuredEnabled) result = true
         }
-
-        methodOtherDeviceLoginButtonIsVisible.hookBefore {
-            try {
-                val view = args[0] as? Button? ?: return@hookBefore
-                if (view.isGone) view.isVisible = true
-            } catch (e: Throwable) {
-                // 兜底异常捕获
-            }
+        loginEntry.hookAfter {
+            if (!configuredEnabled) return@hookAfter
+            val view = args.firstOrNull() as? View ?: return@hookAfter
+            view.isVisible = true
         }
-
-        "com.tencent.mm.plugin.account.ui.LoginHistoryUI".toClass().reflekt().firstMethod("initView").hookAfter {
-            // 不同微信版本的字段布局可能不同，firstField 可能匹配不到或返回 null。
-            // 原实现对 get() 直接 !! 强转，一旦为空即抛 NPE 并可能拖垮宿主主进程。
-            val btn = runCatching {
-                thisObject.reflekt().firstField { type = Button::class }.get() as? Button
-            }.getOrNull() ?: return@hookAfter
-            btn.isVisible = true
-        }
+        WeLogger.i("ForceTabletMode", "hooks installed: tablet=${tablet.declaringClass.name}#${tablet.name}, " +
+            "loginEntry=${loginEntry.declaringClass.name}#${loginEntry.name}")
     }
 
     override fun onBeforeToggle(newState: Boolean, context: Context): Boolean {

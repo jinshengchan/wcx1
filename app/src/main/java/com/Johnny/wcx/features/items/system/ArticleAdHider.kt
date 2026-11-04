@@ -18,7 +18,7 @@ import java.util.WeakHashMap
 
 /** Test branch v8: article-scoped CSS plus inline DOM filtering, no blocking scan thread.
  * Each WebView has an independent callback deadline; stale pages cannot delay a live article.
- * The existing qe iframe rule is retained as an experimental rule, restricted to article pages.
+ * The existing qe rule and log-confirmed qg template are restricted to article pages.
  * Explicit ad slots cover body/footer/comment ads; no parent/text-based blanket deletion.
  */
 @Feature(
@@ -45,6 +45,8 @@ object ArticleAdHider : SwitchFeature() {
             /^\/(?:s(?:\/[A-Za-z0-9_-]+)?\/?|mp\/appmsg\/show)$/.test(location.pathname);
     }
     var previous = window[key];
+    // Replace an older v8 observer too: it still carries the qe-only rules.
+    if (previous && previous.revision !== 'qg1') { previous.stop(); previous = null; }
     if (!article()) {
         if (previous) previous.stop();
         return JSON.stringify({article:false});
@@ -63,7 +65,13 @@ object ArticleAdHider : SwitchFeature() {
             '.mpda_bottom_container,.comment-ad-container,li.cidad_comment_constant_key,' +
             'iframe[src^="https://wxa.wxs.qq.com/tmpl/qe/"],' +
             'iframe[src^="http://wxa.wxs.qq.com/tmpl/qe/"],' +
-            'iframe[src^="//wxa.wxs.qq.com/tmpl/qe/"]{display:none!important;}';
+            'iframe[src^="//wxa.wxs.qq.com/tmpl/qe/"],' +
+            'iframe[src="https://wxa.wxs.qq.com/tmpl/qg/base_tmpl.html"],' +
+            'iframe[src^="https://wxa.wxs.qq.com/tmpl/qg/base_tmpl.html?"],' +
+            'iframe[src="http://wxa.wxs.qq.com/tmpl/qg/base_tmpl.html"],' +
+            'iframe[src^="http://wxa.wxs.qq.com/tmpl/qg/base_tmpl.html?"],' +
+            'iframe[src="//wxa.wxs.qq.com/tmpl/qg/base_tmpl.html"],' +
+            'iframe[src^="//wxa.wxs.qq.com/tmpl/qg/base_tmpl.html?"]{display:none!important;}';
         (document.head || document.documentElement).appendChild(sheet);
     }
     var slots = '#js_ad_area,#js_bottom_ad_area,#js_middle_ad_area,#js_top_ad_area,#js_sponsor_ad_area,#js_comment_ad_area,#js_cmt_ad_area';
@@ -102,8 +110,14 @@ object ArticleAdHider : SwitchFeature() {
         document.querySelectorAll('iframe[src]').forEach(function (el) {
             try {
                 var u = new URL(el.getAttribute('src'), location.href);
-                if (u.hostname === 'wxa.wxs.qq.com' && /^\/tmpl\/qe\//.test(u.pathname)) {
-                    hide(el, 'qe-test');
+                var qe = /^\/tmpl\/qe\//.test(u.pathname);
+                var qg = u.pathname === '/tmpl/qg/base_tmpl.html';
+                if (u.hostname === 'wxa.wxs.qq.com' && (qe || qg)) {
+                    hide(el, qg ? 'qg-ad' : 'qe-test');
+                    // Device log: body ads are direct iframe children of MPCPC.
+                    // Never collapse js_content or any arbitrary ancestor.
+                    var body = el.parentElement;
+                    if (qg && body && body.tagName === 'MPCPC') hide(body, 'body-ad');
                     // Confirmed by 2026-10-25 device log: collapse only specific ad wrappers.
                     var bottom = el.closest('.mpda_bottom_container');
                     if (bottom) hide(bottom, 'bottom-ad');
@@ -121,6 +135,7 @@ object ArticleAdHider : SwitchFeature() {
     // that yields another rendering opportunity and makes the ad flash before being hidden.
     var observer = new MutationObserver(scan);
     var state = {
+        revision:'qg1',
         scan:scan,
         report:function () {
             var result = JSON.stringify({article:true,hidden:total,reapplied:reapplied,css:!!(sheet && sheet.isConnected),changed:changed});

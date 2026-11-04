@@ -33,25 +33,59 @@ private object DexKitHolder {
     private var bridge: DexKitBridge? = null
     private var idleJob: Job? = null
 
-    fun get(): DexKitBridge {
-        runBlocking {
+    private var users = 0
+    private var idleGeneration = 0L
+
+    private fun scheduleCloseLocked() {
+        idleJob?.cancel()
+        val ticket = ++idleGeneration
+        if (users != 0) return
+        idleJob = scope.launch {
+            delay(IDLE_TIMEOUT)
             mutex.withLock {
-                if (bridge == null) {
-                    bridge = DexKitBridge.create(HostInfo.appInfo.sourceDir)
-                }
-                idleJob?.cancel()
-                idleJob = scope.launch {
-                    delay(IDLE_TIMEOUT)
-                    mutex.withLock {
-                        WeLogger.d("DexKitHolder", "timeout reached, closing DexKit")
-                        bridge?.close()
-                        bridge = null
-                        idleJob = null
-                    }
+                if (users == 0 && ticket == idleGeneration) {
+                    bridge?.close()
+                    bridge = null
+                    idleJob = null
                 }
             }
         }
-        return bridge!!
+    }
+
+    fun get(): DexKitBridge = runBlocking {
+        mutex.withLock {
+            val current = bridge ?: DexKitBridge.create(HostInfo.appInfo.sourceDir).also { bridge = it }
+            scheduleCloseLocked()
+            current
+        }
+    }
+
+    fun acquire(): DexKitBridge = runBlocking {
+        mutex.withLock {
+            val current = bridge ?: DexKitBridge.create(HostInfo.appInfo.sourceDir).also { bridge = it }
+            idleJob?.cancel()
+            idleGeneration++
+            users++
+            current
+        }
+    }
+
+    fun release() = runBlocking {
+        mutex.withLock {
+            check(users > 0)
+            users--
+            if (users == 0) scheduleCloseLocked()
+        }
+    }
+}
+
+/** Protect the whole scan, including suspensions, from the shared holder's idle close. */
+suspend fun <T> withDexKit(block: suspend (DexKitBridge) -> T): T {
+    val bridge = DexKitHolder.acquire()
+    try {
+        return block(bridge)
+    } finally {
+        DexKitHolder.release()
     }
 }
 

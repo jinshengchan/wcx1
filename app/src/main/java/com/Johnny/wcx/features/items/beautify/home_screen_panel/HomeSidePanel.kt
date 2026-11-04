@@ -250,19 +250,47 @@ object HomeSidePanel : SwitchFeature() {
 
     /** 静默反射查找微信钱包缓存符号；8.0.65~8.0.71 有效，8.0.76 有变化时返回 null（仅跳过余额）。 */
     private fun resolveWalletSymbolsReflexively(): WalletSymbols? = runCatching {
-        val cacheClass = Class.forName("com.tencent.mm.wallet_core.model.m1")
-        val read = cacheClass.declaredMethods.firstOrNull {
-            it.name == "i" && it.parameterCount == 2 && it.returnType == Any::class.java
+        val cacheCandidates = arrayOf(
+            "com.tencent.mm.wallet_core.model.j1",
+            "com.tencent.mm.wallet_core.model.m1",
+        )
+        var cacheClass: Class<*>? = null
+        var readMethod: java.lang.reflect.Method? = null
+        var writeMethod: java.lang.reflect.Method? = null
+        for (name in cacheCandidates) {
+            val c = runCatching { Class.forName(name) }.getOrNull() ?: continue
+            val r = c.declaredMethods.firstOrNull {
+                it.name == "i" && it.parameterCount == 2 && it.returnType == Any::class.java
+            }
+            val w = c.declaredMethods.firstOrNull {
+                it.name == "j" && it.parameterCount == 2 && it.returnType == Void.TYPE
+            }
+            if (r != null && w != null) {
+                cacheClass = c
+                readMethod = r
+                writeMethod = w
+                break
+            }
         }
-        val write = cacheClass.declaredMethods.firstOrNull {
-            it.name == "j" && it.parameterCount == 2 && it.returnType == Void.TYPE
+        val cache = cacheClass
+        val read = readMethod
+        val write = writeMethod
+        if (cache == null || read == null || write == null) {
+            WeLogger.w(TAG, "wallet cache class not found in candidates")
+            return@runCatching null
         }
-        if (read == null || write == null) return@runCatching null
-        val payPlugin = Class.forName("com.tencent.mm.plugin.wxpay.g")
-        val hasCacheAccessor = payPlugin.declaredMethods.any { it.returnType == cacheClass }
-        if (!hasCacheAccessor) return@runCatching null
-        WalletSymbols(read, write, payPlugin)
-    }.getOrNull()
+
+        val pay = runCatching { Class.forName("com.tencent.mm.plugin.wxpay.g") }.getOrNull()
+        if (pay == null || pay.declaredMethods.none { it.returnType == cache }) {
+            WeLogger.w(TAG, "wallet pay plugin class not resolved")
+            return@runCatching null
+        }
+        WeLogger.i(TAG, "wallet symbols resolved: cache=" + cache.name + ", pay=" + pay.name)
+        WalletSymbols(read, write, pay)
+    }.getOrElse {
+        WeLogger.w(TAG, "resolveWalletSymbolsReflexively failed: " + (it.message ?: ""))
+        null
+    }
 
     internal fun uninstallPanel() {
         sessions.values.mapNotNull { it.get() }.forEach { it.detach() }

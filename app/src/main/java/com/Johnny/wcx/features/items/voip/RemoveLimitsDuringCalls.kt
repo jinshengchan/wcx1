@@ -26,15 +26,16 @@ object RemoveLimitsDuringCalls : SwitchFeature(), IResolveDex {
     private const val OC = "MicroMsg.DeviceOccupy"
 
     override fun onEnable() {
-        val methods = targets().mapNotNull { (label, delegate) ->
-            val method = runCatching { delegate.method }.getOrNull()
-            if (method == null ||
-                (method.returnType != Boolean::class.javaPrimitiveType &&
-                    method.returnType != java.lang.Boolean::class.java)
-            ) {
-                WeLogger.w(TAG, "skip unavailable/non-boolean target: $label")
-                null
-            } else method
+        val methods = targets().flatMap { (label, delegate) ->
+            val candidates = delegate.candidateMethods().ifEmpty {
+                runCatching { listOf(delegate.method) }.getOrDefault(emptyList())
+            }
+            val valid = candidates.filter {
+                it.returnType == Boolean::class.javaPrimitiveType ||
+                    it.returnType == java.lang.Boolean::class.java
+            }
+            if (valid.isEmpty()) WeLogger.w(TAG, "skip unavailable/non-boolean target: $label")
+            valid
         }.distinct()
         check(methods.isNotEmpty()) { "No compatible call restriction methods found" }
         methods.forEach { method ->
@@ -81,7 +82,7 @@ object RemoveLimitsDuringCalls : SwitchFeature(), IResolveDex {
         }
     }
 
-    private val methodIsCameraUsing by dexMethod(allowFailure = true) {
+    private val methodIsCameraUsing by dexMethod(allowMultiple = true, allowFailure = true) {
         matcher {
             usingEqStrings(OC, "isCameraUsing")
             returnType = "boolean"
@@ -111,7 +112,7 @@ object RemoveLimitsDuringCalls : SwitchFeature(), IResolveDex {
         }
     }
 
-    private val methodCheckAppBrandVoiceUsing2 by dexMethod(allowFailure = true) {
+    private val methodCheckAppBrandVoiceUsing2 by dexMethod(allowMultiple = true, allowFailure = true) {
         matcher {
             usingEqStrings(OC, "checkAppBrandVoiceUsingAndShowToast isVoiceUsing:%b, isCameraUsing:%b")
             returnType = "boolean"
@@ -125,7 +126,7 @@ object RemoveLimitsDuringCalls : SwitchFeature(), IResolveDex {
         }
     }
 
-    private val methodCheckAppBrandCameraUsing2 by dexMethod(allowFailure = true) {
+    private val methodCheckAppBrandCameraUsing2 by dexMethod(allowMultiple = true, allowFailure = true) {
         matcher {
             usingEqStrings(OC, "checkAppBrandCameraUsingAndShowToast isVoiceUsing:%b, isCameraUsing:%b")
             returnType = "boolean"
