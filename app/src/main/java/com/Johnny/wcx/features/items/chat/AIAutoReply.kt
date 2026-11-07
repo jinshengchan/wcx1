@@ -159,8 +159,8 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
         else ModelFetchResult.Success(ids)
     } catch (e: CancellationException) {
         throw e
-    } catch (_: Exception) {
-        ModelFetchResult.Error("读取失败，请检查 API 地址、密钥及服务配额")
+    } catch (e: Exception) {
+        ModelFetchResult.Error(SmartReplyClient.errorText(e))
     }
 
     enum class TriggerMode(val value: Int, val description: String) {
@@ -823,8 +823,8 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
                 }
             } catch (e: CancellationException) {
                 throw e
-            } catch (_: Exception) {
-                addDebugLog("请求失败或已取消，请检查 API 配置；不会自动重试")
+            } catch (e: Exception) {
+                addDebugLog(SmartReplyClient.errorText(e))
             }
         }
     }

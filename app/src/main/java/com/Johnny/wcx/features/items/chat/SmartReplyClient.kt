@@ -15,6 +15,11 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import java.io.IOException
+import java.io.InterruptedIOException
+import java.net.UnknownHostException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import javax.net.ssl.SSLException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -24,6 +29,23 @@ import kotlin.coroutines.resumeWithException
 /** Shared transport for explicitly enabled reply features. Never retry, follow redirects or log credentials / chat content. */
 internal object SmartReplyClient {
     class Failure(message: String) : IOException(message)
+    /** Only fixed descriptions and exception type names; never include exception.message. */
+    fun errorText(error: Throwable): String {
+        if (error is Failure) return error.message ?: "请求失败 [API]"
+        val causes = generateSequence(error) { it.cause }.take(6).toList()
+        return when {
+            causes.any { it is UnknownHostException } -> "域名解析失败，请检查 API 域名与网络 [DNS]"
+            causes.any { it is SSLException } -> "HTTPS 证书或握手失败，请检查服务证书及代理设置 [TLS]"
+            causes.any { it is SocketTimeoutException || it is InterruptedIOException } -> "连接或响应超时，请稍后手动重试 [TIMEOUT]"
+            causes.any { it is ConnectException } -> "无法连接 API 服务，请检查地址、端口及网络 [CONNECT]"
+            causes.any { it.javaClass.simpleName == "NetworkOnMainThreadException" } -> "请求触发主线程网络限制 [THREAD]"
+            error is kotlinx.serialization.SerializationException -> "API 响应不是预期的 JSON 格式，请核对接口是否兼容 [JSON]"
+            error is IllegalArgumentException -> "请求参数或返回结构无效，请核对地址、密钥格式及模型 [FORMAT]"
+            error is IOException -> "网络传输中断，请检查连接后手动重试 [IO]"
+            else -> "处理失败 [${error.javaClass.simpleName.take(64)}]"
+        }
+    }
+
     private class Attempt { val sent = AtomicBoolean(false) }
     private val http by lazy {
         OkHttpClient.Builder()
@@ -76,7 +98,7 @@ internal object SmartReplyClient {
             override fun onFailure(call: Call, e: IOException) {
                 calls.remove(call)
                 if (continuation.isActive) continuation.resumeWithException(
-                    if (e is Failure) e else IOException("网络请求失败或超时，请检查 API 配置"),
+                    if (e is Failure) e else Failure(errorText(e)),
                 )
             }
 

@@ -285,9 +285,9 @@ object SmartLongPressReply : ClickableFeature(),
             throw e
         } catch (e: Exception) {
             // Never expose the provider's response, request URL, key, or chat text in logs.
-            GenerateResult(emptyList(), if (e is SmartReplyClient.Failure)
-                e.message ?: "API 配置或响应异常"
-                else "请求失败，请检查网络、API 配置和服务配额")
+            val detail = SmartReplyClient.errorText(e)
+            WeLogger.w(TAG, "generation failed: $detail")
+            GenerateResult(emptyList(), detail)
         }
     }
 
@@ -399,9 +399,9 @@ object SmartLongPressReply : ClickableFeature(),
                                         }
                                     } catch (e: CancellationException) {
                                         throw e
-                                    } catch (_: Exception) {
+                                    } catch (e: Exception) {
                                         if (url == requestedUrl && key == requestedKey) {
-                                            modelsError = "读取失败，请检查地址、密钥和服务是否支持 /models"
+                                            modelsError = SmartReplyClient.errorText(e)
                                         }
                                     } finally {
                                         modelsLoading = false
