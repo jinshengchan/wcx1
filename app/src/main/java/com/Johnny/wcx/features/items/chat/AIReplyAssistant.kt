@@ -71,12 +71,29 @@ object AIReplyAssistant : ClickableFeature() {
         Text("使用模型配置")
         val selected = if (mode == ReplyProfiles.Mode.MANUAL) state.manual else state.auto
         if (selected.isEmpty() && !state.damaged) Text("未选择配置，此模式不会请求 AI；请选择或新增配置。")
+        val chosen = state.providers.firstOrNull { it.id == selected }
+        val currentModel = (if (mode == ReplyProfiles.Mode.MANUAL) state.manualModel else state.autoModel)
+            .ifEmpty { chosen?.model.orEmpty() }
         state.providers.forEach { p ->
             ListItem(modifier = Modifier.clickable {
                 ReplyProfiles.bind(mode, p.id)
                 if (mode == ReplyProfiles.Mode.AUTO) AIAutoReply.cancelPending()
                 changed()
-            }, headlineContent = { Text("${if (p.id == selected) "✓ " else ""}${p.name} · ${p.model}") })
+            }, headlineContent = { Text("${if (p.id == selected) "✓ " else ""}${p.name} · ${if (p.id == selected) currentModel else p.model}") })
+        }
+        if (chosen != null) {
+            var expanded by remember(selected) { mutableStateOf(false) }
+            val options = (listOf(chosen.model) + chosen.models).filter(String::isNotBlank).distinct()
+            TextButton(onClick = { expanded = true }) { Text("当前模型：$currentModel ▾") }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                options.forEach { model -> DropdownMenuItem(text = { Text(model) }, onClick = {
+                    ReplyProfiles.selectModel(mode, model)
+                    if (mode == ReplyProfiles.Mode.AUTO) AIAutoReply.cancelPending()
+                    else SmartReplyClient.cancel(SmartReplyClient.Owner.MANUAL)
+                    expanded = false; changed()
+                }) }
+            }
+            if (chosen.models.isEmpty()) Text("编辑此配置，读取并保存模型列表后，可在这里选择；也可手动填写模型。")
         }
     }
 
@@ -137,7 +154,7 @@ object AIReplyAssistant : ClickableFeature() {
             var model by remember { mutableStateOf(profile?.model ?: "deepseek-flash") }
             var loading by remember { mutableStateOf(false) }
             var error by remember { mutableStateOf<String?>(null) }
-            var models by remember { mutableStateOf<List<String>>(emptyList()) }
+            var models by remember { mutableStateOf(profile?.models.orEmpty()) }
             val usage = listOfNotNull(
                 "长按回复".takeIf { profile != null && state.manual == profile.id },
                 "自动回复".takeIf { profile != null && state.auto == profile.id },
@@ -145,11 +162,11 @@ object AIReplyAssistant : ClickableFeature() {
             AlertDialogContent(
                 title = { Text("模型配置") },
                 text = { DefaultColumn(scrollable = true) {
-                    Text("当前用于：$usage。保存后同时影响使用此配置的模式。")
+                    Text("当前用于：$usage。API 和密钥修改会影响这些模式；模型可在各模式中单独选择。")
                     OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("配置名称") }, singleLine = true)
                     OutlinedTextField(value = url, onValueChange = { url = it; models = emptyList(); error = null }, label = { Text("HTTPS API 地址") }, singleLine = true)
                     OutlinedTextField(value = key, onValueChange = { key = it; models = emptyList(); error = null }, label = { Text("API Key") }, visualTransformation = PasswordVisualTransformation(), singleLine = true)
-                    OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("模型名称") }, singleLine = true)
+                    OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("默认模型名称") }, singleLine = true)
                     TextButton(enabled = !loading && key.isNotBlank(), onClick = {
                         loading = true; error = null
                         val requestedUrl = url; val requestedKey = key.trim()
@@ -172,11 +189,11 @@ object AIReplyAssistant : ClickableFeature() {
                         confirmDelete(context, profile) { changed(); onDismiss() }
                     }) { Text("删除此配置") }
                     error?.let { Text(it) }
-                    Text("打开设置、保存和切换配置均不发送测试请求。密钥仅保存在本机模块配置中。")
+                    Text("保存后，可在「使用模型配置」中为两种回复分别选择列表中的模型。打开、保存和切换配置不发送测试请求。")
                 } },
                 confirmButton = { TextButton(onClick = {
                     try {
-                        ReplyProfiles.save(profile?.id, name, url, key, model)
+                        ReplyProfiles.save(profile?.id, name, url, key, model, models)
                         AIAutoReply.cancelPending()
                         changed(); onDismiss()
                     } catch (e: Exception) {
