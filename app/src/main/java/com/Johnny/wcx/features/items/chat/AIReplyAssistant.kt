@@ -18,7 +18,7 @@ import kotlinx.coroutines.launch
 import okhttp3.Request
 
 @Feature(name = "AI 回复助手", categories = ["聊天"],
-    description = "长按智能回复、AI 自动回复：独立开关，统一模型配置、候选风格及自动回复规则")
+    description = "长按智能回复、AI 自动回复及关键词规则：独立开关，统一模型配置与规则入口")
 object AIReplyAssistant : ClickableFeature() {
     override val noSwitchWidget = true
 
@@ -51,7 +51,7 @@ object AIReplyAssistant : ClickableFeature() {
                                 toggle(AIAutoReply, it); autoOn = AIAutoReply.configuredEnabled
                             }) })
                         ProfileChoices(ReplyProfiles.Mode.AUTO, state) { revision++ }
-                        TextButton(onClick = { AIAutoReply.onClick(context) }) { Text("私聊、群聊、触发条件及回复规则") }
+                        TextButton(onClick = { showReplyRules(context) }) { Text("私聊、群聊及回复规则") }
                         Text("模型配置")
                         state.providers.forEach { provider ->
                             TextButton(onClick = { editProfile(context, provider, state) { revision++ } }) {
@@ -70,12 +70,61 @@ object AIReplyAssistant : ClickableFeature() {
     private fun ProfileChoices(mode: ReplyProfiles.Mode, state: ReplyProfiles.State, changed: () -> Unit) {
         Text("使用模型配置")
         val selected = if (mode == ReplyProfiles.Mode.MANUAL) state.manual else state.auto
+        if (selected.isEmpty() && !state.damaged) Text("未选择配置，此模式不会请求 AI；请选择或新增配置。")
         state.providers.forEach { p ->
             ListItem(modifier = Modifier.clickable {
                 ReplyProfiles.bind(mode, p.id)
                 if (mode == ReplyProfiles.Mode.AUTO) AIAutoReply.cancelPending()
                 changed()
             }, headlineContent = { Text("${if (p.id == selected) "✓ " else ""}${p.name} · ${p.model}") })
+        }
+    }
+
+    private fun showReplyRules(context: ComponentActivity) {
+        showComposeDialog(context) {
+            var keywordOn by remember { mutableStateOf(KeywordAutoReply.configuredEnabled) }
+            AlertDialogContent(
+                title = { Text("私聊、群聊及回复规则") },
+                text = { DefaultColumn(scrollable = true) {
+                    TextButton(onClick = { AIAutoReply.onClick(context) }) { Text("AI 自动回复规则") }
+                    Text("AI 的名单、触发条件、提示词及上下文设置。")
+                    ListItem(headlineContent = { Text("关键词自动回复") },
+                        supportingContent = { Text("独立开关，不调用 AI；关键词和 AI 同时命中时可能分别回复。") },
+                        trailingContent = { Switch(checked = keywordOn, onCheckedChange = {
+                            if (KeywordAutoReply.onBeforeToggle(it, context)) KeywordAutoReply.applyToggle(it)
+                            keywordOn = KeywordAutoReply.configuredEnabled
+                        }) })
+                    TextButton(onClick = { KeywordAutoReply.onClick(context) }) { Text("私聊、群聊关键词及自定义回复") }
+                    Text("关键词开关立即生效，私聊和群聊规则在关键词设置页保存。")
+                } },
+                confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+            )
+        }
+    }
+
+    private fun confirmDelete(context: ComponentActivity, profile: ReplyProfiles.Provider, deleted: () -> Unit) {
+        showComposeDialog(context) {
+            var error by remember { mutableStateOf<String?>(null) }
+            val state = remember { ReplyProfiles.read() }
+            val usage = listOfNotNull("长按回复".takeIf { state.manual == profile.id },
+                "自动回复".takeIf { state.auto == profile.id }).joinToString("、").ifEmpty { "暂未使用" }
+            AlertDialogContent(
+                title = { Text("删除模型配置") },
+                text = { DefaultColumn(scrollable = true) {
+                    Text("删除「${profile.name}」？当前用于：$usage。")
+                    Text("删除后，使用此配置的模式将停止请求，需手动选择其他配置；不会自动切换模型。旧版迁移备份仍保留。")
+                    error?.let { Text(it) }
+                } },
+                confirmButton = { TextButton(onClick = {
+                    try {
+                        val affected = ReplyProfiles.delete(profile.id)
+                        if (ReplyProfiles.Mode.AUTO in affected) AIAutoReply.cancelPending()
+                        if (ReplyProfiles.Mode.MANUAL in affected) SmartReplyClient.cancel(SmartReplyClient.Owner.MANUAL)
+                        deleted(); onDismiss()
+                    } catch (_: Exception) { error = "配置已变化或删除失败，请重新打开检查" }
+                }) { Text("确认删除") } },
+                dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+            )
         }
     }
 
@@ -119,6 +168,9 @@ object AIReplyAssistant : ClickableFeature() {
                         }
                     }) { Text(if (loading) "读取中…" else "读取可用模型") }
                     models.forEach { id -> TextButton(onClick = { model = id }) { Text(id) } }
+                    if (profile != null) TextButton(onClick = {
+                        confirmDelete(context, profile) { changed(); onDismiss() }
+                    }) { Text("删除此配置") }
                     error?.let { Text(it) }
                     Text("打开设置、保存和切换配置均不发送测试请求。密钥仅保存在本机模块配置中。")
                 } },

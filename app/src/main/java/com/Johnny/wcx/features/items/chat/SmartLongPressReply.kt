@@ -153,6 +153,10 @@ object SmartLongPressReply : ClickableFeature(),
                     generating.set(false)
                 }
                 loading = false
+                if (ReplyProfiles.provider(ReplyProfiles.Mode.MANUAL) != provider) {
+                    error = "模型配置已变化，请重新生成"
+                    return@LaunchedEffect
+                }
                 if (result.error != null) {
                     error = result.error
                 } else {
@@ -183,6 +187,11 @@ object SmartLongPressReply : ClickableFeature(),
                                         modifier = Modifier.clickable {
                                             if (!configuredEnabled) {
                                                 showToast(context, "功能已关闭")
+                                                onDismiss()
+                                                return@clickable
+                                            }
+                                            if (ReplyProfiles.provider(ReplyProfiles.Mode.MANUAL) != provider) {
+                                                showToast(context, "模型配置已变化，请重新生成")
                                                 onDismiss()
                                                 return@clickable
                                             }

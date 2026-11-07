@@ -205,7 +205,7 @@ fun FeaturesPager(onOpenCategory: (String) -> Unit) {
 // ---------------------------------------------------------------------------
 
 /** 分类列表里不展示的功能（各自有独立入口）。 */
-private val AI_REPLY_CHILDREN = setOf("长按智能回复", "AI 自动回复")
+private val AI_REPLY_CHILDREN = setOf("长按智能回复", "AI 自动回复", "关键词自动回复")
 private val CATEGORY_HIDDEN_ITEMS = setOf("主题工坊", "美化首页底部导航栏") + AI_REPLY_CHILDREN
 
 @Composable

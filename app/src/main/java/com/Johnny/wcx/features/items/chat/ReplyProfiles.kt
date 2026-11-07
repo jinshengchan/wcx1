@@ -38,8 +38,9 @@ internal object ReplyProfiles {
             }
             val manual = obj["manual"]!!.jsonPrimitive.content
             val auto = obj["auto"]!!.jsonPrimitive.content
-            check(providers.isNotEmpty() && providers.map { it.id }.distinct().size == providers.size)
-            check(providers.any { it.id == manual } && providers.any { it.id == auto })
+            check(providers.all { it.id.isNotBlank() } && providers.map { it.id }.distinct().size == providers.size)
+            check((manual.isEmpty() || providers.any { it.id == manual }) &&
+                (auto.isEmpty() || providers.any { it.id == auto }))
             State(providers, manual, auto)
         } catch (_: Exception) {
             // Fail closed; do not replace damaged/future-version data or silently fall back to an old key.
@@ -50,7 +51,7 @@ internal object ReplyProfiles {
     fun provider(mode: Mode): Provider {
         val state = read()
         val id = if (mode == Mode.MANUAL) state.manual else state.auto
-        return state.providers.firstOrNull { it.id == id } ?: Provider("", "配置不可用", "", "", "")
+        return state.providers.firstOrNull { it.id == id } ?: Provider("", if (state.damaged) "配置不可用" else "未选择模型配置", "", "", "")
     }
 
     @Synchronized fun bind(mode: Mode, id: String) {
@@ -70,6 +71,20 @@ internal object ReplyProfiles {
         require(id != null || state.providers.size < 8) { "最多保留 8 份配置" }
         val p = Provider(id ?: UUID.randomUUID().toString(), name.trim(), url.trim(), key.trim(), model.trim())
         write(state.copy(providers = if (id == null) state.providers + p else state.providers.map { if (it.id == id) p else it }))
+    }
+
+    /** Remove the profile and its bindings in one write; never choose a replacement implicitly. */
+    @Synchronized fun delete(id: String): Set<Mode> {
+        val state = read()
+        require(!state.damaged && state.providers.any { it.id == id }) { "配置已变化，请重新打开" }
+        val affected = buildSet {
+            if (state.manual == id) add(Mode.MANUAL)
+            if (state.auto == id) add(Mode.AUTO)
+        }
+        write(state.copy(providers = state.providers.filterNot { it.id == id },
+            manual = if (Mode.MANUAL in affected) "" else state.manual,
+            auto = if (Mode.AUTO in affected) "" else state.auto))
+        return affected
     }
 
     private fun write(state: State) {
