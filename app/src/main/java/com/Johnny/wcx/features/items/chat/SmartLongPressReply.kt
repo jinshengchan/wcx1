@@ -12,6 +12,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.CircularProgressIndicator
@@ -19,6 +24,9 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -27,8 +35,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.unit.dp
 import com.composables.icons.materialsymbols.MaterialSymbols
 import com.composables.icons.materialsymbols.outlined.Send
+import com.composables.icons.materialsymbols.outlined.Arrow_drop_down
 import com.Johnny.wcx.features.api.core.WeMessageApi
 import com.Johnny.wcx.features.api.core.models.MessageInfo
 import com.Johnny.wcx.features.api.ui.WeChatMessageContextMenuApi
@@ -354,10 +366,19 @@ object SmartLongPressReply : ClickableFeature(),
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
                         )
-                        Text(
-                            "联系上下文: ${if (contextOn) "开" else "关"}（携带该消息之前最近 ${contextCnt.toIntOrNull()?.coerceIn(1, 20) ?: 6} 条, 点击切换）",
-                            fontSize = androidx.compose.material3.MaterialTheme.typography.bodySmall.fontSize,
-                            modifier = Modifier.clickable { contextOn = !contextOn },
+                        ListItem(
+                            modifier = Modifier.toggleable(
+                                value = contextOn,
+                                role = Role.Switch,
+                                onValueChange = { contextOn = it },
+                            ),
+                            headlineContent = { Text("联系上下文") },
+                            supportingContent = {
+                                Text(if (contextOn)
+                                    "已开启：携带该消息之前最近 ${contextCnt.toIntOrNull()?.coerceIn(1, 20) ?: 6} 条文本"
+                                    else "已关闭：仅发送当前选择的消息")
+                            },
+                            trailingContent = { Switch(checked = contextOn, onCheckedChange = null) },
                         )
                         if (contextOn) {
                             OutlinedTextField(
@@ -368,19 +389,30 @@ object SmartLongPressReply : ClickableFeature(),
                                 modifier = Modifier.fillMaxWidth(),
                             )
                         }
-                        Text(
-                            "回复风格: ${styleDisplayName(style, customName)}",
-                            modifier = Modifier.clickable { styleMenu = true },
-                        )
-                        DropdownMenu(expanded = styleMenu, onDismissRequest = { styleMenu = false }) {
-                            styleNames.forEachIndexed { index, name ->
-                                DropdownMenuItem(
-                                    text = { Text(if (index == 6 && name == "自定义") customName.ifBlank { "自定义" } else name) },
-                                    onClick = {
-                                        style = index
-                                        styleMenu = false
-                                    },
-                                )
+                        Box(Modifier.fillMaxWidth()) {
+                            OutlinedButton(
+                                onClick = { styleMenu = true },
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text("回复风格：${styleDisplayName(style, customName)}", modifier = Modifier.weight(1f))
+                                    Icon(MaterialSymbols.Outlined.Arrow_drop_down, contentDescription = null)
+                                }
+                            }
+                            DropdownMenu(expanded = styleMenu, onDismissRequest = { styleMenu = false }) {
+                                styleNames.forEachIndexed { index, name ->
+                                    DropdownMenuItem(
+                                        text = { Text(if (index == 6 && name == "自定义") customName.ifBlank { "自定义" } else name) },
+                                        onClick = {
+                                            style = index
+                                            styleMenu = false
+                                        },
+                                    )
+                                }
                             }
                         }
                         if (style == 6) {
