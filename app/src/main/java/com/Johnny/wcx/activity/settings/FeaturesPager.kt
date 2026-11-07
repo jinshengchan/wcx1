@@ -27,6 +27,7 @@ import com.composables.icons.materialsymbols.outlined.Arrow_back
 import com.composables.icons.materialsymbols.outlined.Close
 import com.composables.icons.materialsymbols.outlined.Search
 import com.composables.icons.materialsymbols.outlined.Settings
+import com.Johnny.wcx.features.items.chat.AIReplyAssistant
 import com.Johnny.wcx.features.core.FeaturesProvider
 import com.Johnny.wcx.features.core.SwitchFeature
 import com.Johnny.wcx.features.items.easter_egg.AprilFools
@@ -82,7 +83,7 @@ fun FeaturesPager(onOpenCategory: (String) -> Unit) {
         else searchableItems.filter {
             it.name.contains(query, ignoreCase = true) ||
                     it.description.contains(query, ignoreCase = true)
-        }
+        }.map { if (it.name in AI_REPLY_CHILDREN) AIReplyAssistant else it }.distinctBy { it.name }
     }
     val switchStates = remember { mutableStateMapOf<String, Boolean>() }
 
@@ -204,7 +205,8 @@ fun FeaturesPager(onOpenCategory: (String) -> Unit) {
 // ---------------------------------------------------------------------------
 
 /** 分类列表里不展示的功能（各自有独立入口）。 */
-private val CATEGORY_HIDDEN_ITEMS = setOf("主题工坊", "美化首页底部导航栏")
+private val AI_REPLY_CHILDREN = setOf("长按智能回复", "AI 自动回复")
+private val CATEGORY_HIDDEN_ITEMS = setOf("主题工坊", "美化首页底部导航栏") + AI_REPLY_CHILDREN
 
 @Composable
 fun CategoryDetailScreen(

@@ -25,14 +25,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.composables.icons.materialsymbols.MaterialSymbols
 import com.composables.icons.materialsymbols.outlined.Send
 import com.Johnny.wcx.features.api.core.WeMessageApi
-import com.Johnny.wcx.features.api.core.WeDatabaseApi
 import com.Johnny.wcx.features.api.core.models.MessageInfo
 import com.Johnny.wcx.features.api.ui.WeChatMessageContextMenuApi
 import com.Johnny.wcx.features.core.ClickableFeature
@@ -46,10 +43,8 @@ import com.Johnny.wcx.ui.utils.SendIcon
 import com.Johnny.wcx.ui.utils.showComposeDialog
 import com.Johnny.wcx.utils.WeLogger
 import com.Johnny.wcx.utils.android.showToast
-import com.Johnny.wcx.utils.strings.stripWxId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -72,9 +67,6 @@ object SmartLongPressReply : ClickableFeature(),
     private val generating = AtomicBoolean(false)
 
     // ── 配置项 ──────────────────────────────────────────────────────────────
-    private var apiUrl by prefOption("smart_reply_api_url", "https://api.deepseek.com/chat/completions")
-    private var apiKey by prefOption("smart_reply_api_key", "")
-    private var model by prefOption("smart_reply_model", "deepseek-flash")
     private var count by prefOption("smart_reply_count", 3)
     private var styleIndex by prefOption("smart_reply_style", 0)
     private var contextEnabled by prefOption("smart_reply_context", false)
@@ -131,7 +123,8 @@ object SmartLongPressReply : ClickableFeature(),
         val source = WeakReference(view)
         val input = WeakReference(findInput(chattingContext.activity.window.decorView))
         // Snapshot preferences and selected message before background work.
-        val config = ReplyConfig(apiUrl, apiKey.trim(), model.trim(), count.coerceIn(1, 6),
+        val provider = ReplyProfiles.provider(ReplyProfiles.Mode.MANUAL)
+        val config = ReplyConfig(provider.url, provider.key, provider.model, count.coerceIn(1, 6),
             contextEnabled, contextCount.coerceIn(1, 20),
             if (styleIndex == 6) customStylePrompt.ifBlank { "自然得体的回复" }
             else stylePrompts[styleIndex.coerceIn(0, stylePrompts.lastIndex)])
@@ -180,7 +173,7 @@ object SmartLongPressReply : ClickableFeature(),
                         error != null -> {
                             DefaultColumn(scrollable = true) {
                                 Text("生成失败: $error")
-                                Text("请在「长按智能回复」设置页配置 API 地址 / API Key / 模型")
+                                Text("请在「AI 回复助手」中检查当前模型配置")
                             }
                         }
                         replies.isNotEmpty() -> {
@@ -329,20 +322,10 @@ object SmartLongPressReply : ClickableFeature(),
         }
     }
 
-    private suspend fun fetchModels(url: String, key: String): List<String> {
-        val request = Request.Builder().url(SmartReplyClient.endpoint(url, models = true))
-            .header("Authorization", "Bearer ${key.trim()}").build()
-        return SmartReplyClient.parseModelIds(SmartReplyClient.request(request, SmartReplyClient.Owner.MODELS))
-    }
-
     // ── 设置对话框 ──────────────────────────────────────────────────────────
 
     private fun showConfigDialog(context: Context) {
         showComposeDialog(context) {
-            val scope = rememberCoroutineScope()
-            var url by remember { mutableStateOf(apiUrl) }
-            var key by remember { mutableStateOf(apiKey) }
-            var mdl by remember { mutableStateOf(model) }
             var cnt by remember { mutableStateOf(count.toString()) }
             var style by remember { mutableStateOf(styleIndex) }
             var styleMenu by remember { mutableStateOf(false) }
@@ -350,76 +333,11 @@ object SmartLongPressReply : ClickableFeature(),
             var customPrompt by remember { mutableStateOf(customStylePrompt) }
             var contextOn by remember { mutableStateOf(contextEnabled) }
             var contextCnt by remember { mutableStateOf(contextCount.toString()) }
-            var modelsLoading by remember { mutableStateOf(false) }
-            var modelsError by remember { mutableStateOf<String?>(null) }
-            var models by remember { mutableStateOf<List<String>>(emptyList()) }
-
             AlertDialogContent(
                 title = { Text("长按智能回复 设置") },
                 text = {
                     DefaultColumn(scrollable = true) {
-                        OutlinedTextField(
-                            value = url,
-                            onValueChange = { url = it; models = emptyList(); modelsError = null },
-                            label = { Text("API 地址") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        OutlinedTextField(
-                            value = key,
-                            onValueChange = { key = it; models = emptyList(); modelsError = null },
-                            label = { Text("API Key") },
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        OutlinedTextField(
-                            value = mdl,
-                            onValueChange = { mdl = it },
-                            label = { Text("模型") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        Button(
-                            onClick = {
-                                if (key.isBlank()) {
-                                    modelsError = "请先填写 API Key 再读取模型"
-                                    return@Button
-                                }
-                                modelsLoading = true
-                                modelsError = null
-                                val requestedUrl = url
-                                val requestedKey = key
-                                scope.launch {
-                                    try {
-                                        val available = fetchModels(requestedUrl, requestedKey)
-                                        if (url == requestedUrl && key == requestedKey) {
-                                            models = available
-                                            if (available.isEmpty()) modelsError = "服务未返回可用模型，可手动填写模型名"
-                                        }
-                                    } catch (e: CancellationException) {
-                                        throw e
-                                    } catch (e: Exception) {
-                                        if (url == requestedUrl && key == requestedKey) {
-                                            modelsError = SmartReplyClient.errorText(e)
-                                        }
-                                    } finally {
-                                        modelsLoading = false
-                                    }
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !modelsLoading,
-                        ) {
-                            Text(if (modelsLoading) "读取中…" else "读取可用模型")
-                        }
-                        modelsError?.let { Text(it, color = androidx.compose.material3.MaterialTheme.colorScheme.error) }
-                        models.forEach { model ->
-                            ListItem(
-                                modifier = Modifier.clickable { mdl = model },
-                                headlineContent = { Text("${if (model == mdl) "✓ " else ""}$model") },
-                            )
-                        }
+                        Text("模型配置请在「AI 回复助手」中选择和编辑。")
                         OutlinedTextField(
                             value = cnt,
                             onValueChange = { cnt = it.filter { c -> c.isDigit() } },
@@ -473,9 +391,7 @@ object SmartLongPressReply : ClickableFeature(),
                             )
                         }
                         Text(
-                            "提示: 地址可填完整 /chat/completions 地址 (默认 DeepSeek); " +
-                                "兼容 OpenAI 接口的任意服务 (OpenAI/智谱/月之暗面/硅基流动等) 均可。\n" +
-                                "风格选「自定义」可填写自己的风格名与系统提示词。\n" +
+                            "风格选「自定义」可填写自己的风格名与系统提示词。\n" +
                                 "点击生成会将所选文本发送至你配置的 API；开启上下文还会发送该消息之前的记录。" +
                                 "候选回复仅填入空输入框，由你确认发送；不会自动发送。"
                         )
@@ -483,9 +399,6 @@ object SmartLongPressReply : ClickableFeature(),
                 },
                 confirmButton = {
                     TextButton(onClick = {
-                        apiUrl = url.trim()
-                        apiKey = key.trim()
-                        model = mdl.trim()
                         count = cnt.toIntOrNull()?.coerceIn(1, 6) ?: 3
                         styleIndex = style.coerceIn(0, styleNames.lastIndex)
                         customStyleName = customName.trim()

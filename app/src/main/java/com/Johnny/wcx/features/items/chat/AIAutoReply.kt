@@ -31,7 +31,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,7 +58,6 @@ import com.composables.icons.materialsymbols.MaterialSymbols
 import com.composables.icons.materialsymbols.outlined.More_vert
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
@@ -74,7 +72,6 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Collections
@@ -89,9 +86,6 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
 
     private const val TAG = "AIAutoReply"
 
-    private var apiUrl by prefOption("ai_reply_api_url", "https://api.deepseek.com/chat/completions")
-    private var apiKey by prefOption("ai_reply_api_key", "")
-    private var model by prefOption("ai_reply_model", "deepseek-flash")
     private var contextEnabled by prefOption("ai_reply_context", false)
     private var systemPrompt by prefOption(
         "ai_reply_system_prompt",
@@ -133,11 +127,6 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    private sealed class ModelFetchResult {
-        data class Success(val models: List<String>) : ModelFetchResult()
-        data class Error(val message: String) : ModelFetchResult()
-    }
-
     // ── 屏幕状态与用户干预检测 ──────────────────────────────────────────────────
     /**
      * 检查当前屏幕是否亮起。熄屏时不应该自动回复，避免暴露对话内容。
@@ -149,18 +138,6 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
             val pm = app.getSystemService(Context.POWER_SERVICE) as? PowerManager
             pm?.isInteractive == true
         } catch (_: Throwable) { false }
-    }
-
-    private suspend fun fetchModelList(apiUrl: String, apiKey: String): ModelFetchResult = try {
-        val request = Request.Builder().url(SmartReplyClient.endpoint(apiUrl, models = true))
-            .header("Authorization", "Bearer ${apiKey.trim()}").build()
-        val ids = SmartReplyClient.parseModelIds(SmartReplyClient.request(request, SmartReplyClient.Owner.MODELS))
-        if (ids.isEmpty()) ModelFetchResult.Error("接口未返回可用模型，可手动填写")
-        else ModelFetchResult.Success(ids)
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        ModelFetchResult.Error(SmartReplyClient.errorText(e))
     }
 
     enum class TriggerMode(val value: Int, val description: String) {
@@ -181,6 +158,12 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
         WeDatabaseListenerApi.addListener(this)
     }
 
+    internal fun cancelPending() {
+        tasks.disable()
+        SmartReplyClient.cancel(SmartReplyClient.Owner.AUTO)
+        if (configuredEnabled) tasks.enable()
+    }
+
     override fun onDisable() {
         tasks.disable()
         SmartReplyClient.cancel(SmartReplyClient.Owner.AUTO)
@@ -191,9 +174,6 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
     override fun onClick(context: ComponentActivity) {
         showComposeDialog(context) {
             var localContext by remember { mutableStateOf(contextEnabled) }
-            var localApiUrl by remember { mutableStateOf(apiUrl) }
-            var localApiKey by remember { mutableStateOf(apiKey) }
-            var localModel by remember { mutableStateOf(model) }
             var localPrompt by remember { mutableStateOf(systemPrompt) }
             var localEnablePrivate by remember { mutableStateOf(enableForPrivate) }
             var localEnableGroup by remember { mutableStateOf(enableForGroup) }
@@ -208,40 +188,6 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
             var localPrivateChatMode by remember { mutableStateOf(privateChatMode) }
             var localAllowStranger by remember { mutableStateOf(allowStrangerPrivateReply) }
             var showDebugLog by remember { mutableStateOf(false) }
-            var fetchedModels by remember { mutableStateOf(listOf<String>()) }
-            var fetchingModels by remember { mutableStateOf(false) }
-            var modelFetchError by remember { mutableStateOf<String?>(null) }
-
-            val scope = rememberCoroutineScope()
-
-            fun doFetchModels(url: String, key: String) {
-                val u = url.trim()
-                val k = key.trim()
-                if (u.isBlank() || k.isBlank()) return
-                fetchingModels = true
-                modelFetchError = null
-                scope.launch(Dispatchers.IO) {
-                    val result = fetchModelList(u, k)
-                    withContext(Dispatchers.Main) {
-                        fetchingModels = false
-                        if (localApiUrl.trim() != u || localApiKey.trim() != k) return@withContext
-                        when (result) {
-                            is ModelFetchResult.Success -> {
-                                fetchedModels = result.models
-                                if (localModel.isBlank() && result.models.isNotEmpty()) {
-                                    localModel = result.models.first()
-                                }
-                                showToast("已获取 ${result.models.size} 个可用模型")
-                            }
-                            is ModelFetchResult.Error -> {
-                                modelFetchError = result.message
-                                showToast(result.message)
-                            }
-                        }
-                    }
-                }
-            }
-
             val delayPresets = remember {
                 listOf(
                     0 to "立即",
@@ -312,73 +258,7 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
                     },
                     text = {
                         DefaultColumn(Modifier.padding(vertical = 8.dp), scrollable = true) {
-                            Text("API 配置", style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                "启用后会将符合规则的文本发送到你配置的 API；模型列表只在点击拉取时请求。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            OutlinedTextField(
-                                value = localApiUrl,
-                                onValueChange = { localApiUrl = it },
-                                label = { Text("API 地址") },
-                                supportingText = { Text("请填写 HTTPS 地址，可填完整 /chat/completions 地址或 /v1 基址") },
-                                singleLine = true
-                            )
-                            OutlinedTextField(
-                                value = localApiKey,
-                                onValueChange = { localApiKey = it },
-                                label = { Text("API Key") },
-                                visualTransformation = PasswordVisualTransformation(),
-                                supportingText = { Text("自动去除首尾空格和不可见字符") },
-                                singleLine = true
-                            )
-                            OutlinedTextField(
-                                value = localModel,
-                                onValueChange = { localModel = it },
-                                label = { Text("模型名称") },
-                                singleLine = true
-                            )
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                TextButton(
-                                    onClick = { doFetchModels(localApiUrl, localApiKey) },
-                                    enabled = !fetchingModels && localApiUrl.isNotBlank() && localApiKey.isNotBlank()
-                                ) {
-                                    Text(if (fetchingModels) "拉取中…" else "拉取可用模型")
-                                }
-                                if (fetchingModels) {
-                                    Text("正在请求模型列表…", style = MaterialTheme.typography.bodySmall)
-                                }
-                            }
-                            modelFetchError?.let { err ->
-                                Text(
-                                    err,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error
-                                )
-                            }
-                            if (fetchedModels.isNotEmpty()) {
-                                Text(
-                                    "可用模型（点击选择）",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                FlowRow(
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    fetchedModels.forEach { m ->
-                                        FilterChip(
-                                            selected = localModel == m,
-                                            onClick = { localModel = m },
-                                            label = { Text(m) }
-                                        )
-                                    }
-                                }
-                            }
+                            Text("模型配置请在「AI 回复助手」中选择和编辑。")
                             OutlinedTextField(
                                 value = localPrompt,
                                 onValueChange = { localPrompt = it },
@@ -535,9 +415,6 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
                             tasks.disable()
                             if (configuredEnabled) tasks.enable()
                             contextEnabled = localContext
-                            apiUrl = localApiUrl.trim()
-                            apiKey = localApiKey.trim()
-                            model = localModel
                             systemPrompt = localPrompt
                             enableForPrivate = localEnablePrivate
                             enableForGroup = localEnableGroup
@@ -751,7 +628,10 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
     private data class ApiConfig(val url: String, val key: String, val model: String, val prompt: String,
         val prefix: String, val context: Boolean)
 
-    private fun config() = ApiConfig(apiUrl.trim(), apiKey.trim(), model.trim(), systemPrompt, replyPrefix, contextEnabled)
+    private fun config(): ApiConfig {
+        val provider = ReplyProfiles.provider(ReplyProfiles.Mode.AUTO)
+        return ApiConfig(provider.url, provider.key, provider.model, systemPrompt, replyPrefix, contextEnabled)
+    }
 
     private fun fresh(msg: MessageInfo): Boolean {
         val time = msg.createTime
