@@ -20,6 +20,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -97,7 +98,7 @@ object SmartLongPressReply : ClickableFeature(),
 
     override fun onDisable() {
         WeChatMessageContextMenuApi.removeProvider(this)
-        SmartReplyClient.cancelAll()
+        SmartReplyClient.cancel(SmartReplyClient.Owner.MANUAL)
     }
 
     override fun onClick(context: ComponentActivity) {
@@ -136,6 +137,8 @@ object SmartLongPressReply : ClickableFeature(),
             else stylePrompts[styleIndex.coerceIn(0, stylePrompts.lastIndex)])
         val selected = SelectedMessage(msgInfo.id, msgInfo.createTime, msgInfo.talker, msgInfo.actualContent)
         showComposeDialog(context) {
+            val endManual = remember { AIAutoReply.beginManual(selected.talker) }
+            DisposableEffect(Unit) { onDispose { endManual() } }
             var loading by remember { mutableStateOf(true) }
             var error by remember { mutableStateOf<String?>(null) }
             var replies by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -291,23 +294,7 @@ object SmartLongPressReply : ClickableFeature(),
     private fun loadContext(selected: SelectedMessage, limit: Int): List<Pair<String, String>> {
         if (selected.id <= 0 || selected.time <= 0 || selected.talker.isBlank()) return emptyList()
         return try {
-            // Bound parameters and an exact time/id boundary: repeated text and old messages are safe.
-            WeDatabaseApi.rawQuery(
-                """SELECT content, isSend FROM message
-                   WHERE talker = ? AND type = 1
-                     AND (createTime < ? OR (createTime = ? AND msgId < ?))
-                   ORDER BY createTime DESC, msgId DESC LIMIT ?""".trimIndent(),
-                arrayOf<Any>(selected.talker, selected.time, selected.time, selected.id, limit),
-            ).use { cursor ->
-                val messages = mutableListOf<Pair<String, String>>()
-                while (cursor.moveToNext()) {
-                    var text = cursor.getString(0).orEmpty()
-                    if (selected.talker.endsWith("@chatroom")) text = text.stripWxId()
-                    if (text.isNotBlank()) messages +=
-                        (if (cursor.getInt(1) != 0) "assistant" else "user") to text.take(1000)
-                }
-                messages.asReversed()
-            }
+            ReplyContext.load(selected.talker, selected.id, selected.time, limit)
         } catch (_: Exception) {
             WeLogger.w(TAG, "chat context unavailable; using only the selected message")
             emptyList()
@@ -345,7 +332,7 @@ object SmartLongPressReply : ClickableFeature(),
     private suspend fun fetchModels(url: String, key: String): List<String> {
         val request = Request.Builder().url(SmartReplyClient.endpoint(url, models = true))
             .header("Authorization", "Bearer ${key.trim()}").build()
-        return SmartReplyClient.parseModelIds(SmartReplyClient.request(request))
+        return SmartReplyClient.parseModelIds(SmartReplyClient.request(request, SmartReplyClient.Owner.MODELS))
     }
 
     // ── 设置对话框 ──────────────────────────────────────────────────────────

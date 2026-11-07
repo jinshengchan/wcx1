@@ -1448,14 +1448,19 @@ object WeMessageApi : ApiFeature(), IResolveDex {
         return false
     }
 
-    fun sendText(toUser: String, text: String): Boolean {
+    fun sendText(toUser: String, text: String): Boolean = sendTextInternal(toUser, text, true)
+
+    internal fun sendAiReply(toUser: String, text: String): Boolean = sendTextInternal(toUser, text, false)
+
+    private fun sendTextInternal(toUser: String, text: String, logContent: Boolean): Boolean {
         return try {
-            WeLogger.i(TAG, "sending text message: $text")
+            if (logContent) WeLogger.i(TAG, "sending text message: $text")
             val sendMsgObject = methodGetSendMsgObject.method.invoke(null) ?: return false
             val msgObj = newSendMsgSceneInstance(classNetSceneSendMsg.clazz, toUser, text) ?: return false
             methodPostToQueue.method.invoke(sendMsgObject, msgObj) as? Boolean ?: false
         } catch (e: Exception) {
-            WeLogger.e(TAG, "failed to send text message", e)
+            if (logContent) WeLogger.e(TAG, "failed to send text message", e)
+            else WeLogger.w(TAG, "AI reply enqueue failed; content omitted")
             false
         }
     }

@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-/** Manual requests only. Never retry, follow redirects or log credentials / chat content. */
+/** Shared transport for explicitly enabled reply features. Never retry, follow redirects or log credentials / chat content. */
 internal object SmartReplyClient {
     class Failure(message: String) : IOException(message)
     private class Attempt { val sent = AtomicBoolean(false) }
@@ -44,9 +44,10 @@ internal object SmartReplyClient {
             }
             .build()
     }
-    private val calls = ConcurrentHashMap.newKeySet<Call>()
+    enum class Owner { MANUAL, AUTO, MODELS }
+    private val calls = ConcurrentHashMap<Call, Owner>()
 
-    fun cancelAll() = calls.forEach { it.cancel() }
+    fun cancel(owner: Owner) = calls.forEach { (call, caller) -> if (caller == owner) call.cancel() }
 
     fun endpoint(raw: String, models: Boolean = false): HttpUrl {
         val text = raw.trim().let { if ("://" in it) it else "https://$it" }
@@ -67,9 +68,9 @@ internal object SmartReplyClient {
         return url.newBuilder().encodedPath(base + if (models) "/models" else "/chat/completions").build()
     }
 
-    suspend fun request(request: Request): String = suspendCancellableCoroutine { continuation ->
+    suspend fun request(request: Request, owner: Owner = Owner.MANUAL): String = suspendCancellableCoroutine { continuation ->
         val call = http.newCall(request.newBuilder().tag(Attempt::class.java, Attempt()).build())
-        calls.add(call)
+        calls[call] = owner
         continuation.invokeOnCancellation { call.cancel(); calls.remove(call) }
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
