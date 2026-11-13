@@ -260,9 +260,22 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
                 continue
             }
 
-            // allowMultiple 的委托（如 methodFeatureAvatarSimple1）会把同签名的方法全部返回，
-            // 统一遍历候选逐个 hook，避免只挂上第一个导致部分入口漏改头像。
-            val targets = delegate.candidateMethods()
+            // 缓存只保存描述符，重启后 loadDescriptor 会清空 candidates；不能因此跳过所有 Hook。
+            // 多候选入口从已解析的头像类按同一签名恢复，普通入口使用缓存中的单个方法。
+            val targets = delegate.candidateMethods().ifEmpty {
+                if (name == "methodFeatureAvatarSimple1") {
+                    runCatching {
+                        classAvatarDrawable.clazz.declaredMethods.filter { method ->
+                            method.returnType == Void.TYPE &&
+                                method.parameterTypes.contentEquals(
+                                    arrayOf(ImageView::class.java, String::class.java)
+                                )
+                        }
+                    }.getOrDefault(emptyList())
+                } else {
+                    listOfNotNull(runCatching { delegate.method }.getOrNull())
+                }
+            }
             if (targets.isEmpty()) {
                 WeLogger.w(TAG, "skipping hook $name: no candidate method resolved")
                 continue
