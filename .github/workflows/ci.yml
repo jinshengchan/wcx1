@@ -122,7 +122,6 @@ jobs:
           cargo xtask build --native-only
 
       - name: Prepare keystore
-        if: github.event_name != 'pull_request'
         run: |
           KS_FILE="$RUNNER_TEMP/wekit-keystore.jks"
           CRED_FILE="$RUNNER_TEMP/keystore-creds.env"
@@ -175,7 +174,6 @@ jobs:
           exit 1
 
       - name: Build Release (Signed)
-        if: github.event_name != 'pull_request'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WEKIT_KEYSTORE_FILE: ${{ runner.temp }}/wekit-keystore.jks
@@ -186,12 +184,6 @@ jobs:
           export WEKIT_KEY_PASSWORD="$KEY_PASS"
           ./gradlew assembleRelease --warning-mode all --stacktrace
 
-      - name: Build Release (Unsigned)
-        if: github.event_name == 'pull_request'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./gradlew assembleRelease --warning-mode all --stacktrace
-
       - name: Collect APKs
         run: |
           mkdir -p dist/apk
@@ -200,7 +192,6 @@ jobs:
           ls -1 dist/apk
 
       - name: Verify APK signatures (fixed keystore)
-        if: github.event_name != 'pull_request'
         run: |
           # 用户要求：发布的 APK 必须使用仓库固定签名。用固定 keystore 反查证书 SHA-256，
           # 与每个产物 APK 的签名逐一比对，不一致立即失败，杜绝临时/未知签名流出。
