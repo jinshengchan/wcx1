@@ -184,18 +184,18 @@ jobs:
           export WEKIT_KEYSTORE_PASSWORD="$KS_PASS"
           export WEKIT_KEY_ALIAS="$KEY_ALIAS"
           export WEKIT_KEY_PASSWORD="$KEY_PASS"
-          ./gradlew assembleRelease --warning-mode all --stacktrace
+          ./gradlew assembleRelease -Pandroid.injected.build.abi=arm64-v8a --warning-mode all --stacktrace
 
       - name: Build Release (Unsigned)
         if: github.event_name == 'pull_request'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./gradlew assembleRelease --warning-mode all --stacktrace
+        run: ./gradlew assembleRelease -Pandroid.injected.build.abi=arm64-v8a --warning-mode all --stacktrace
 
       - name: Collect APKs
         run: |
           mkdir -p dist/apk
-          find app/build/outputs/apk -type f -name '*.apk' -exec cp -v {} dist/apk/ \;
+          find app/build/outputs/apk -type f -name '*-arm64-v8a-*.apk' -exec cp -v {} dist/apk/ \;
           echo "Collected APKs:"
           ls -1 dist/apk
 
@@ -233,6 +233,16 @@ jobs:
           fi
           echo "All APK signatures match the fixed keystore."
 
+      - name: Rename APKs with version and ABI
+        run: |
+          # 只发 v8a：产物文件名带版本与架构（wcx-v347-standard-v8a.apk）；
+          # Release 里的文件名保持原样（app-...-release.apk），内置更新器按原名精确匹配。
+          mkdir -p dist/named
+          for flavor in standard legacy; do
+            cp -v "dist/apk/app-${flavor}-arm64-v8a-release.apk" "dist/named/wcx-${{ steps.version.outputs.tag }}-${flavor}-v8a.apk"
+          done
+          echo "Renamed APKs:"
+          ls -1 dist/named
 
       - name: Collect mappings
         run: |
@@ -247,7 +257,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: wcx-${{ steps.version.outputs.tag }}-apk
-          path: dist/apk/*.apk
+          path: dist/named/*.apk
 
       - name: Upload Release Obfuscation Mapping
         uses: actions/upload-artifact@v7
@@ -274,6 +284,13 @@ jobs:
         with:
           name: wcx-${{ needs.build.outputs.tag }}-apk
           path: artifacts
+
+      - name: Restore original APK filenames for release
+        run: |
+          # artifact 里是改名后的文件；发版前恢复原名，内置更新器按原名精确匹配。
+          mv -v "artifacts/wcx-${{ needs.build.outputs.tag }}-standard-v8a.apk" artifacts/app-standard-arm64-v8a-release.apk
+          mv -v "artifacts/wcx-${{ needs.build.outputs.tag }}-legacy-v8a.apk" artifacts/app-legacy-arm64-v8a-release.apk
+          ls -1 artifacts
 
       - name: Generate version info
         id: version
