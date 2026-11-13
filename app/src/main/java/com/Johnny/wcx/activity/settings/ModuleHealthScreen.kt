@@ -45,6 +45,7 @@ import com.Johnny.wcx.preferences.WePrefs
 import com.Johnny.wcx.utils.android.showToast
 import com.Johnny.wcx.utils.crash.ExitReasonRecorder
 import com.Johnny.wcx.utils.MainThreadWatchdog
+import com.Johnny.wcx.utils.WeLogger
 import com.Johnny.wcx.utils.crash.ProcessTimeline
 import com.Johnny.wcx.BuildConfig
 import com.Johnny.wcx.utils.reflection.ClassLoaders
@@ -662,6 +663,7 @@ private fun showReportDialog(context: Context, title: String, items: List<Health
 
 private fun moduleHealthSteps(context: Context): List<HealthStep> = listOf(
     HealthStep("功能清单与分类启用概况") { featureOverview() },
+    HealthStep("最近错误") { recentProblemSection() },
     HealthStep("微信公共 API 层") { wechatApiLayer(context) },
     HealthStep("脚本运行时") { scriptRuntime(context) },
     HealthStep("Hook 安装任务与就绪阶段") { hookTasks() },
@@ -669,6 +671,33 @@ private fun moduleHealthSteps(context: Context): List<HealthStep> = listOf(
     HealthStep("密友功能") { secretFriendSection() },
     HealthStep("退出原因与主线程卡顿") { lastExitItems(context) },
 )
+
+/** 只汇总当前进程能读取的日志；历史报错是排查线索，不等于此刻功能失效。 */
+private fun recentProblemSection(): List<HealthItem> {
+    val section = "最近错误"
+    val digest = runCatching { WeLogger.digest(12) }.getOrElse {
+        return listOf(HealthItem("运行日志", section, "读取失败", false, "当前进程的运行日志无法读取。"))
+    }
+    if (digest.fileName == null) {
+        return listOf(HealthItem("运行日志", section, "暂无记录", true,
+            "当前进程尚无日志；这里无法判断微信进程里的功能是否生效。"))
+    }
+    val detail = buildString {
+        append("来源：").append(digest.fileName)
+        append("（当前进程日志尾部，最多读取 256 KiB）\n")
+        append("历史错误仅供定位，不能证明该功能此刻仍然失效。微信进程问题请查看其运行日志。\n\n")
+        digest.problems.forEach { problem ->
+            append("· ").append(problem.header).append('\n')
+            problem.detail.take(4).forEach { append("  ").append(it).append('\n') }
+        }
+    }
+    return listOf(HealthItem(
+        "运行日志", section,
+        "尾部错误 ${digest.errorCount}，警告 ${digest.warnCount}",
+        true, // 历史日志不是当前故障，不计入自检失败项。
+        detail,
+    ))
+}
 
 /**
  * 「上次进程退出原因」——用来区分是系统内存回收、崩溃、ANR 还是用户强行停止。

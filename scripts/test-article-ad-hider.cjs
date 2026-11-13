@@ -34,7 +34,9 @@ function fixture(host = 'mp.weixin.qq.com', path = '/s') {
   const context = vm.createContext({window, location, document, URL, Map, JSON,
     MutationObserver:class {constructor(cb){this.cb=cb;observer=this;} observe(){this.active=true;} disconnect(){this.active=false;}},
     setTimeout(fn){tasks.push(fn);return tasks.length;},clearTimeout(){tasks=[];}});
-  return {node,window,location,styleCount:()=>nodes.filter(n=>n.tagName==='STYLE' && n.isConnected).length,run:()=>JSON.parse(vm.runInContext(script,context)),stop:()=>vm.runInContext(source.match(/internal const val STOP_JS = "([^"\n]+)"/)[1],context),
+  return {node,window,location,styleCount:()=>nodes.filter(n=>n.tagName==='STYLE' && n.isConnected).length,
+    styleText:()=>nodes.filter(n=>n.tagName==='STYLE' && n.isConnected).map(n=>n.textContent).join(''),
+    run:()=>JSON.parse(vm.runInContext(script,context)),stop:()=>vm.runInContext(source.match(/internal const val STOP_JS = "([^"\n]+)"/)[1],context),
     mutate(){if(observer?.active)observer.cb();while(tasks.length)tasks.shift()();},
     hidden:el=>el.style.getPropertyValue('display')==='none',
     pagehide(){listeners.get('pagehide')?.();}};
@@ -46,13 +48,14 @@ const ordinary = f.node('IFRAME','','https://example.com/widget');
 const spoof = f.node('IFRAME','','https://example.com/?url=wxa.wxs.qq.com/tmpl/qe/base_tmpl.html');
 const boundary = f.node('IFRAME','','https://wxa.wxs.qq.com.evil.test/tmpl/qe/base_tmpl.html');
 const ad = f.node('IFRAME','','https://wxa.wxs.qq.com/tmpl/qe/base_tmpl.html');
+const qg = f.node('IFRAME','','https://wxa.wxs.qq.com/tmpl/qg/base_tmpl.html');
 const footer = f.node('DIV','js_bottom_ad_area','','block');
-assert.equal(f.run().hidden,2);assert.equal(f.run().css,true);
-assert.ok(f.hidden(ad) && f.hidden(footer));
+assert.equal(f.run().hidden,3);assert.equal(f.run().css,true);
+assert.ok(f.hidden(ad) && f.hidden(qg) && f.hidden(footer));
 for(const el of [body,comments,ordinary,spoof,boundary])assert.ok(!f.hidden(el),'normal content must survive');
 assert.equal(f.styleCount(),1);
 const state = f.window.__wcxArticleAdV8;
-assert.equal(f.run().hidden,2);assert.equal(f.window.__wcxArticleAdV8,state,'one observer per document');assert.equal(f.styleCount(),1,'one stylesheet per article');
+assert.equal(f.run().hidden,3);assert.equal(f.window.__wcxArticleAdV8,state,'one observer per document');assert.equal(f.styleCount(),1,'one stylesheet per article');
 const lazy = f.node('DIV','js_comment_ad_area');f.mutate();assert.ok(f.hidden(lazy));
 const lateSrc=f.node('IFRAME');f.mutate();assert.ok(!f.hidden(lateSrc));
 lateSrc.src='https://wxa.wxs.qq.com/tmpl/qe/base_tmpl.html';f.mutate();assert.ok(f.hidden(lateSrc));
@@ -61,7 +64,7 @@ assert.ok(!f.hidden(comments),'comment list must remain');
 f.pagehide();assert.equal(f.window.__wcxArticleAdV8,undefined);assert.equal(f.styleCount(),0,'stylesheet removed on stop');
 assert.equal(footer.style.getPropertyValue('display'),'block','restore original styles');
 assert.ok(!f.hidden(ad));
-assert.equal(f.run().hidden,4,'back/forward document can reinstall');
+assert.equal(f.run().hidden,5,'back/forward document can reinstall');
 f.location.pathname='/search';assert.equal(f.run().article,false);assert.ok(!f.hidden(lazy));
 for(const [host,path] of [['example.com','/s'],['mp.weixin.qq.com','/__tmpl__/0.html'],['mp.weixin.qq.com','/search']]) {
   const x=fixture(host,path),n=x.node('DIV','js_bottom_ad_area');assert.equal(x.run().article,false);assert.ok(!x.hidden(n));
@@ -87,6 +90,28 @@ g.pagehide();assert.ok(!g.hidden(bottom));
 const preload=fixture('mp.weixin.qq.com','/__tmpl__/0.html');const nextAd=preload.node('DIV','js_bottom_ad_area');
 assert.equal(preload.run().article,false);preload.location.pathname='/s';assert.equal(preload.run().hidden,1);assert.ok(preload.hidden(nextAd));
 console.log('PASS: log-confirmed comment row/footer wrappers, normal siblings, preload activation, reappearance counters, restore; body/footer/lazy comment ads; normal content and host boundaries; reuse, style resets, disable/navigation restoration.');
+
+// November device log: qh replaces qg in the same body, bottom and comment wrappers.
+const qhPage=fixture();
+const qhContent=qhPage.node('DIV','js_content');
+const qhBody=qhPage.node('MPCPC');qhBody.parentElement=qhContent;
+const qhBodyFrame=qhPage.node('IFRAME','','https://wxa.wxs.qq.com/tmpl/qh/base_tmpl.html?slot=body');qhBodyFrame.parentElement=qhBody;
+const qhFooter=qhPage.node('DIV');qhFooter.className='mpda_bottom_container';
+const qhFooterFrame=qhPage.node('IFRAME','','//wxa.wxs.qq.com/tmpl/qh/base_tmpl.html');qhFooterFrame.parentElement=qhFooter;
+const qhRow=qhPage.node('LI');qhRow.className='cidad_comment_constant_key';
+const qhComment=qhPage.node('DIV');qhComment.className='comment-ad-container';qhComment.parentElement=qhRow;
+const qhCommentFrame=qhPage.node('IFRAME','','https://wxa.wxs.qq.com/tmpl/qh/base_tmpl.html');qhCommentFrame.parentElement=qhComment;
+const qhOrdinary=qhPage.node('IFRAME','','https://example.com/tmpl/qh/base_tmpl.html');qhOrdinary.parentElement=qhContent;
+assert.equal(qhPage.run().hidden,7);
+assert.ok(qhPage.styleText().includes('iframe[src="https://wxa.wxs.qq.com/tmpl/qh/base_tmpl.html"]'));
+for(const el of [qhBody,qhBodyFrame,qhFooter,qhFooterFrame,qhRow,qhComment,qhCommentFrame])assert.ok(qhPage.hidden(el));
+for(const el of [qhContent,qhOrdinary])assert.ok(!qhPage.hidden(el),'article content and other hosts must survive');
+qhPage.stop();for(const el of [qhBody,qhFooter,qhRow])assert.ok(!qhPage.hidden(el),'qh wrappers restore when disabled');
+const upgraded=fixture();let stoppedOld=0;
+upgraded.window.__wcxArticleAdV8={revision:'qg1',stop(){stoppedOld++;delete upgraded.window.__wcxArticleAdV8;}};
+const upgradedAd=upgraded.node('IFRAME','','https://wxa.wxs.qq.com/tmpl/qh/base_tmpl.html');
+assert.equal(upgraded.run().hidden,1);assert.equal(stoppedOld,1);assert.ok(upgraded.hidden(upgradedAd));
+console.log('PASS: device-log qh body/footer/comment ads; ordinary content and off restoration.');
 
 console.log('PASS: CSS installed only in article context; listener/style/inline lifecycle exercised with DOM fixtures (not a rendering browser).');
 

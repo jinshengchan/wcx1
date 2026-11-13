@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.view.View
 import android.view.ViewGroup
-import android.widget.AdapterView
 import android.widget.GridView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -59,7 +58,6 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
-import androidx.core.view.children
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.composables.icons.materialsymbols.MaterialSymbols
 import com.composables.icons.materialsymbols.outlined.Account_box
@@ -102,7 +100,6 @@ import com.Johnny.wcx.ui.utils.InjectedUiTheme
 import com.Johnny.wcx.ui.utils.LifecycleOwnerProvider
 import com.Johnny.wcx.ui.utils.findViewByChildIndexes
 import com.Johnny.wcx.ui.utils.findViewWhich
-import com.Johnny.wcx.ui.utils.iterable
 import com.Johnny.wcx.ui.utils.setLifecycleOwner
 import com.Johnny.wcx.ui.utils.showComposeDialog
 import com.Johnny.wcx.utils.WeLogger
@@ -174,12 +171,38 @@ object ChatToolbar : ClickableFeature(), IResolveDex {
 
     private data class MenuItem(
         val name: String,
-        val onClickListener: AdapterView.OnItemClickListener,
-        val onLongClickListener: AdapterView.OnItemLongClickListener,
         val gridView: WeakReference<GridView>,
-        val itemView: WeakReference<View>,
         val indexInGrid: Int
-    )
+    ) {
+        private fun currentItem(): Pair<GridView, View>? {
+            val grid = gridView.get() ?: return null
+            val adapter = grid.adapter ?: return null
+            if (indexInGrid !in 0 until adapter.count) return null
+            val attached = grid.getChildAt(indexInGrid - grid.firstVisiblePosition)
+            val item = attached ?: runCatching { adapter.getView(indexInGrid, null, grid) }.getOrNull()
+            return item?.let { grid to it }
+        }
+
+        fun click() {
+            runCatching {
+                val (grid, item) = currentItem() ?: return
+                if (ChatToolbar.toolNameOf(item) != name) return
+                val id = grid.adapter?.getItemId(indexInGrid) ?: return
+                grid.performItemClick(item, indexInGrid, id)
+            }
+                .onFailure { WeLogger.e(ChatToolbar.TAG, "触发工具项失败：$name", it) }
+        }
+
+        fun longClick() {
+            runCatching {
+                val (grid, item) = currentItem() ?: return
+                if (ChatToolbar.toolNameOf(item) != name) return
+                val id = grid.adapter?.getItemId(indexInGrid) ?: return
+                grid.onItemLongClickListener?.onItemLongClick(grid, item, indexInGrid, id)
+            }
+                .onFailure { WeLogger.e(ChatToolbar.TAG, "长按工具项失败：$name", it) }
+        }
+    }
 
     private data class QuickReplyDraft(
         val id: String = UUID.randomUUID().toString(),
@@ -232,7 +255,31 @@ object ChatToolbar : ClickableFeature(), IResolveDex {
         WeMessageApi.sendText(WeCurrentConversationApi.value, text)
     }
 
-    private var lastToolListUpdateTime = now()
+    private var lastToolListUpdateTime = now() - 2.seconds
+
+    private fun collectGrids(root: View): List<GridView> {
+        val grids = mutableListOf<GridView>()
+        fun walk(view: View) {
+            if (view is GridView) {
+                grids += view
+            } else if (view is ViewGroup) {
+                for (i in 0 until view.childCount) walk(view.getChildAt(i))
+            }
+        }
+        walk(root)
+        return grids
+    }
+
+    private fun toolNameOf(item: View): String? {
+        val tag = item.tag
+        val tagged = if (tag == null) null else runCatching {
+            (tag.reflekt().firstField { type = TextView::class }.get() as? TextView)?.text?.toString()
+        }.getOrNull()
+        if (!tagged.isNullOrBlank()) return tagged
+        return (item as? ViewGroup)?.findViewWhich<TextView> { view ->
+            (view as? TextView)?.text?.isNotBlank() == true
+        }?.text?.toString()?.takeIf { it.isNotBlank() }
+    }
 
     override fun onEnable() {
         methodAppPanelInitAppGrid.apply {
@@ -267,42 +314,27 @@ object ChatToolbar : ClickableFeature(), IResolveDex {
             hookAfter {
                 val now = now()
                 if (now - lastToolListUpdateTime < 2.seconds) return@hookAfter
-
-                val tools = mutableListOf<Pair<String, MenuItem>>()
-
-                val appPanel = args[0] as LinearLayout
-                val grids = appPanel.findViewByChildIndexes<ViewGroup>(0, 0, 0)!!
-                    .children.map { view -> view as GridView }
-
-                grids.forEach { grid ->
-                    val onClickListener = grid.reflekt()
-                        .firstField { type = AdapterView.OnItemClickListener::class }.get()!! as AdapterView.OnItemClickListener
-                    val onLongClickListener = grid.reflekt()
-                        .firstField { type = AdapterView.OnItemLongClickListener::class }.get()!! as AdapterView.OnItemLongClickListener
-                    val listAdapter = grid.adapter
-
-                    listAdapter.iterable(grid).forEachIndexed { index, itemView ->
-                        val name = (itemView.tag.reflekt()
-                            .firstField { type = TextView::class }
-                            .get()!! as TextView).text.toString()
-                        tools.add(
-                            name to MenuItem(
-                                name,
-                                onClickListener,
-                                onLongClickListener,
-                                WeakReference(grid),
-                                WeakReference(itemView),
-                                index
-                            )
-                        )
+                lastToolListUpdateTime = now
+                // 微信的面板层级会调整；单个工具项解析失败不能让整个列表消失。
+                runCatching {
+                    val appPanel = args[0] as? View ?: return@runCatching
+                    val grids = collectGrids(appPanel)
+                    val tools = grids.flatMap { grid ->
+                        val adapter = grid.adapter ?: return@flatMap emptyList()
+                        (0 until adapter.count).mapNotNull { index ->
+                            val item = grid.getChildAt(index - grid.firstVisiblePosition)
+                                ?: runCatching { adapter.getView(index, null, grid) }.getOrNull()
+                            val name = item?.let(::toolNameOf) ?: return@mapNotNull null
+                            name to MenuItem(name, WeakReference(grid), index)
+                        }
                     }
+                    toolsState.value = tools
+                    if (tools.isEmpty()) WeLogger.w(TAG, "未采集到工具项（GridView=${grids.size}）")
+                    else WeLogger.d(TAG, "采集到 ${tools.size} 个工具项")
+                }.onFailure {
+                    toolsState.value = emptyList()
+                    WeLogger.e(TAG, "采集聊天工具项失败", it)
                 }
-
-                WeLogger.d(TAG, "populated tool list with ${tools.size} items")
-                toolsState.value = tools
-
-                // rate limit this since this method is called REALLY frequently
-                lastToolListUpdateTime = now()
             }
         }
 
@@ -361,7 +393,7 @@ object ChatToolbar : ClickableFeature(), IResolveDex {
                     val sortedVisibleItems = remember(tools) {
                         if (tools.isEmpty()) return@remember emptyList()
 
-                        val firstTool = tools[0].second
+                        val albumTool = tools.firstOrNull { it.first == "相册" }?.second
                         val orderList = normalizeOrder(itemsOrder.split(",").filter { it.isNotEmpty() })
                         val list = mutableListOf<Pair<String, () -> Unit>>()
 
@@ -369,25 +401,14 @@ object ChatToolbar : ClickableFeature(), IResolveDex {
                             showQuickReplyPicker(activity)
                         })
 
-                        list.add("相册" to {
-                            firstTool.onClickListener.onItemClick(firstTool.gridView.get()!!, firstTool.itemView.get()!!, 0, 0)
-                        })
-                        list.add("系统拍摄" to {
-                            firstTool.onLongClickListener.onItemLongClick(null, null, 0, 0)
-                        })
+                        if (albumTool != null) {
+                            list.add("相册" to { albumTool.click() })
+                            list.add("系统拍摄" to { albumTool.longClick() })
+                        }
 
                         tools.forEach { (name, menuItem) ->
                             if (name in NAME_TO_ICON_MAP && name != "相册" && name != "系统拍摄") {
-                                val gridView = menuItem.gridView.get() ?: return@forEach
-                                val itemView = menuItem.itemView.get() ?: return@forEach
-                                list.add(name to {
-                                    menuItem.onClickListener.onItemClick(
-                                        gridView,
-                                        itemView,
-                                        menuItem.indexInGrid + 1,
-                                        0
-                                    )
-                                })
+                                list.add(name to { menuItem.click() })
                             }
                         }
 
