@@ -785,8 +785,8 @@ object BatchDeleteMoments : ClickableFeature(), IResolveDex {
     private val running = AtomicBoolean(false)
     @Volatile private var cancelRequested = false
 
-    /** 正在删除的 snsId：用于把 onGYNetEnd 返回的结果关联到对应条目。 */
-    private val deletingSnsIds = ConcurrentHashMap.newKeySet<Long>()
+    /** 仅跟踪本功能发送的请求；回包不一定包含 snsId。 */
+    private val pendingScenes = ConcurrentHashMap<Any, Long>()
 
     /** 删除结果：snsId -> retcode（0 成功）。 */
     private val deleteResults = ConcurrentHashMap<Long, Int>()
@@ -842,19 +842,15 @@ object BatchDeleteMoments : ClickableFeature(), IResolveDex {
         hookOpResult()
     }
 
-    /** 监听删除结果：从 onGYNetEnd 的 JSON 里取 retcode。 */
+    /** 按 NetScene 实例关联结果，不能依赖服务端回包带回 snsId。 */
     private fun hookOpResult() {
         methodOpOnGYNetEnd.hookAfter {
-            val json = args.getOrNull(2) as? JSONObject ?: return@hookAfter
-            val retCode = json.optInt("retcode", -1)
-            // snsId 可能以 snsId / objectId 字段返回，两种都尝试
-            val snsId = json.optLong("snsId", 0L).takeIf { it != 0L }
-                ?: json.optLong("objectId", 0L).takeIf { it != 0L }
-            WeLogger.i(TAG, "NetSceneSnsObjectOp result: retcode=$retCode snsId=$snsId")
-
-            if (snsId != null && deletingSnsIds.contains(snsId)) {
-                deleteResults[snsId] = retCode
-            }
+            val snsId = pendingScenes.remove(thisObject) ?: return@hookAfter
+            val json = args.getOrNull(2) as? JSONObject
+            val errType = args.getOrNull(0) as? Int
+            val retCode = if (errType == 0) json?.optInt("retcode", -1) ?: -1 else -1
+            WeLogger.i(TAG, "NetSceneSnsObjectOp result: errType=$errType retcode=$retCode snsId=$snsId")
+            deleteResults[snsId] = retCode
         }
     }
 
@@ -1218,10 +1214,12 @@ object BatchDeleteMoments : ClickableFeature(), IResolveDex {
             var success = 0
             var failed = 0
             var cancelled = false
+            var consecutiveFailures = 0
             try {
                 val ctor = findSnsOpConstructor(classSnsObjectOp.clazz)
                 if (ctor == null) {
-                    failed = queue.size
+                    cancelled = true
+                    onProgress(0, queue.size, "未找到删除请求构造器，未发送任何请求")
                     return@thread
                 }
 
@@ -1238,7 +1236,8 @@ object BatchDeleteMoments : ClickableFeature(), IResolveDex {
                         onProgress(1, queue.size, "参数已识别（opType=$probed），开始批量删除")
                     } else {
                         WeLogger.e(TAG, "opType 自动探测失败，全部候选均未成功")
-                        failed = queue.size
+                        cancelled = true
+                        onProgress(0, queue.size, "首条删除结果无法确认，已停止；请核对原朋友圈")
                         return@thread
                     }
                 }
@@ -1262,25 +1261,36 @@ object BatchDeleteMoments : ClickableFeature(), IResolveDex {
                     }
 
                     val ok = deleteOne(ctor, item.snsId)
-                    if (ok) {
+                    if (ok == true) {
                         success++
+                        consecutiveFailures = 0
                         bumpTodayCount(1)
                     } else {
                         failed++
+                        consecutiveFailures++
                     }
-                    onProgress(index + 1, queue.size, "${item.createTimeText} ${if (ok) "已删除" else "失败"}")
+                    onProgress(index + 1, queue.size, "${item.createTimeText} ${if (ok == true) "已删除" else "失败"}")
+                    // 连续失败可能是回包无法关联、参数失效或服务端风控；不要继续发送余下请求。
+                    if (ok == null || consecutiveFailures >= 2) {
+                        cancelled = true
+                        cancelRequested = true
+                        onProgress(index + 1, queue.size,
+                            if (ok == null) "结果不明，已自动中止；请核对原朋友圈"
+                            else "连续失败，已自动中止；请核对日志和原朋友圈")
+                    }
                 }
             } catch (t: Throwable) {
+                cancelled = true
                 WeLogger.e(TAG, "批量删除异常中止", t)
             } finally {
-                deletingSnsIds.clear()
+                pendingScenes.clear()
                 running.set(false)
                 onFinished(
                     DeleteReport(
                         total = queue.size,
                         success = success,
                         failed = failed,
-                        skipped = items.size - queue.size,
+                        skipped = items.size - success - failed,
                         cancelled = cancelled,
                     )
                 )
@@ -1293,24 +1303,28 @@ object BatchDeleteMoments : ClickableFeature(), IResolveDex {
     private fun probeOpType(ctor: Constructor<*>, snsId: Long): Int {
         for (candidate in intArrayOf(1, 2, 3)) {
             deleteResults.clear()
-            deletingSnsIds.add(snsId)
+            var scene: Any? = null
             val sent = runCatching {
-                WeNetSceneApi.sendNetScene(ctor.newInstance(snsId, candidate))
+                scene = ctor.newInstance(snsId, candidate)
+                pendingScenes[scene!!] = snsId
+                WeNetSceneApi.sendNetScene(scene!!)
                 true
             }.getOrElse {
                 WeLogger.w(TAG, "opType=$candidate 发送失败", it)
                 false
             }
             if (!sent) {
-                deletingSnsIds.remove(snsId)
+                scene?.let { pendingScenes.remove(it) }
                 continue
             }
             val deadline = System.currentTimeMillis() + 10_000
+            var receivedResponse = false
             while (System.currentTimeMillis() < deadline) {
                 val ret = deleteResults.remove(snsId)
                 if (ret != null) {
+                    receivedResponse = true
                     if (ret == 0) {
-                        deletingSnsIds.remove(snsId)
+                        scene?.let { pendingScenes.remove(it) }
                         WeLogger.i(TAG, "opType 探测成功：$candidate")
                         return candidate
                     }
@@ -1319,7 +1333,12 @@ object BatchDeleteMoments : ClickableFeature(), IResolveDex {
                 }
                 Thread.sleep(120)
             }
-            deletingSnsIds.remove(snsId)
+            scene?.let { pendingScenes.remove(it) }
+            // 超时的请求可能已到达服务端，不要换一个 opType 再试删同一条。
+            if (!receivedResponse) {
+                WeLogger.w(TAG, "opType=$candidate 超时，停止探测以避免重复请求")
+                return -1
+            }
         }
         return -1
     }
@@ -1334,33 +1353,33 @@ object BatchDeleteMoments : ClickableFeature(), IResolveDex {
     }
 
     /** 删除一条，阻塞等待结果（最多 15 秒）。 */
-    private fun deleteOne(ctor: Constructor<*>, snsId: Long): Boolean {
+    private fun deleteOne(ctor: Constructor<*>, snsId: Long): Boolean? {
         val opType = resolvedOpType
         if (opType < 0) return false
+        var netScene: Any? = null
         return try {
-            deletingSnsIds.add(snsId)
             deleteResults.remove(snsId)
-            val netScene = ctor.newInstance(snsId, opType)
-            WeNetSceneApi.sendNetScene(netScene)
+            netScene = ctor.newInstance(snsId, opType)
+            pendingScenes[netScene!!] = snsId
+            WeNetSceneApi.sendNetScene(netScene!!)
 
             // 等待 onGYNetEnd 回填结果
             val deadline = System.currentTimeMillis() + 15_000
             while (System.currentTimeMillis() < deadline) {
                 val ret = deleteResults.remove(snsId)
                 if (ret != null) {
-                    deletingSnsIds.remove(snsId)
                     WeLogger.i(TAG, "删除 snsId=$snsId retcode=$ret")
                     return ret == 0
                 }
                 Thread.sleep(120)
             }
             WeLogger.w(TAG, "删除 snsId=$snsId 超时未收到结果")
-            deletingSnsIds.remove(snsId)
-            false
+            null
         } catch (t: Throwable) {
             WeLogger.e(TAG, "删除 snsId=$snsId 抛异常", t)
-            deletingSnsIds.remove(snsId)
-            false
+            null
+        } finally {
+            netScene?.let { pendingScenes.remove(it) }
         }
     }
 
@@ -2059,11 +2078,14 @@ object BatchDeleteMoments : ClickableFeature(), IResolveDex {
                 confirmButton = {
                     Button(onClick = {
                         onDismiss()
+                        var startFailure: String? = null
                         val started = startDelete(
                             items = picked,
                             options = options,
                             onProgress = { done, total, message ->
-                                if (done % 10 == 0 || done == total) {
+                                if (done == 0) startFailure = message
+                                if (done <= 1 || done % 10 == 0 || done == total ||
+                                    message.contains("失败") || message.contains("中止")) {
                                     WeLogger.i(TAG, "进度 $done/$total：$message")
                                 }
                             },
@@ -2075,13 +2097,14 @@ object BatchDeleteMoments : ClickableFeature(), IResolveDex {
                                 )
                                 runCatching {
                                     showToast(
-                                        "批量删除结束：成功 ${report.success}，失败 ${report.failed}" +
+                                        "批量删除结束：成功 ${report.success}，失败 ${report.failed}，跳过 ${report.skipped}" +
                                             if (report.cancelled) "（已中止）" else ""
                                     )
                                 }
                             }
                         )
                         if (started) showToast("已开始删除 ${picked.size} 条，可在日志查看进度")
+                        else showToast(startFailure ?: "删除任务未启动，请查看运行日志")
                     }) { Text("确认删除") }
                 },
                 dismissButton = { TextButton(onDismiss) { Text("再想想") } }

@@ -235,7 +235,7 @@ jobs:
 
       - name: Rename APKs with version and ABI
         run: |
-          # 只发 v8a：产物文件名带版本与架构（如 wcx-v348-standard-v8a.apk）；
+          # 只发 v8a：产物文件名带版本与架构（如 wcx-v349-standard-v8a.apk）；
           # Release 里的文件名保持原样（app-...-release.apk），内置更新器按原名精确匹配。
           mkdir -p dist/named
           for flavor in standard legacy; do
