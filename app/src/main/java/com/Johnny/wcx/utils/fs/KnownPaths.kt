@@ -23,6 +23,9 @@ object KnownPaths {
         HostInfo.application.codeCacheDir.asPath
     }
 
+    /** 旧脚本目录不变；Python 插件和扩展包挂在同一模块数据根目录下。 */
+    val moduleRoot: Path by lazy { moduleData }
+
     val moduleCache by lazy {
         (internalStorage / "Android" / "data" /
                 runCatching { HostInfo.packageName }.getOrDefault(PackageNames.WECHAT)
