@@ -9,6 +9,7 @@ import dev.ujhhgtg.wekit.python.api.PythonResolvedField
 import dev.ujhhgtg.wekit.python.api.PythonResolvedMember
 import com.Johnny.wcx.utils.HostInfo
 import com.Johnny.wcx.utils.reflection.withDexKit
+import kotlinx.coroutines.runBlocking
 import org.luckypray.dexkit.query.matchers.ClassMatcher
 import org.luckypray.dexkit.query.matchers.FieldMatcher
 import org.luckypray.dexkit.query.matchers.MethodMatcher
@@ -123,12 +124,12 @@ class PythonDexHostImpl(private val scope: PythonPluginScope) : PythonDexHost {
         if (ignoreCase) ignorePackagesCase(true)
     }
 
-    private fun <T> query(block: () -> T): T {
+    private fun <T> query(block: suspend () -> T): T {
         check(!scope.isClosed) { "Python plugin scope is closed: ${scope.pluginId}" }
         return try {
             executor.submit<T> {
                 check(!scope.isClosed) { "Python plugin scope is closed: ${scope.pluginId}" }
-                block()
+                runBlocking { block() }
             }.get()
         } catch (error: ExecutionException) {
             throw error.cause ?: error
