@@ -244,26 +244,17 @@ jobs:
           echo "Renamed APKs:"
           ls -1 dist/named
 
-      - name: Collect mappings
-        run: |
-          mkdir -p dist/mapping
-          for m in app/build/outputs/mapping/*/mapping.txt; do
-            flavorDir=$(basename "$(dirname "$m")")
-            cp -v "$m" "dist/mapping/mapping-${flavorDir}.txt"
-          done
-          ls -1 dist/mapping || echo "(no mappings)"
-
-      - name: Upload Release APKs
+      - name: Upload Standard APK
         uses: actions/upload-artifact@v7
         with:
-          name: wcx-${{ steps.version.outputs.tag }}-apk
-          path: dist/named/*.apk
+          name: wcx-${{ steps.version.outputs.tag }}-standard-v8a
+          path: dist/named/wcx-${{ steps.version.outputs.tag }}-standard-v8a.apk
 
-      - name: Upload Release Obfuscation Mapping
+      - name: Upload Legacy APK
         uses: actions/upload-artifact@v7
         with:
-          name: wcx-${{ steps.version.outputs.tag }}-mapping
-          path: dist/mapping/*.txt
+          name: wcx-${{ steps.version.outputs.tag }}-legacy-v8a
+          path: dist/named/wcx-${{ steps.version.outputs.tag }}-legacy-v8a.apk
 
   release:
     needs: build
@@ -279,10 +270,16 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Download APK artifact
+      - name: Download Standard APK artifact
         uses: actions/download-artifact@v8
         with:
-          name: wcx-${{ needs.build.outputs.tag }}-apk
+          name: wcx-${{ needs.build.outputs.tag }}-standard-v8a
+          path: artifacts
+
+      - name: Download Legacy APK artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: wcx-${{ needs.build.outputs.tag }}-legacy-v8a
           path: artifacts
 
       - name: Restore original APK filenames for release
