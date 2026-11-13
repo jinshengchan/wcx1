@@ -544,7 +544,8 @@ object WeMessageApi : ApiFeature(), IResolveDex {
     }
     private val setVoiceMethod: Method by lazy {
         classVoiceNameGen.reflekt().firstMethod {
-            parameterCount { it == 3 || it == 4 }
+            modifiers(Modifiers.STATIC)
+            parameterCount { it in 3..5 }
             parameters {
                 it[0] == BString && it[1].typeMatches(int) && it[2].typeMatches(int)
             }
@@ -1606,13 +1607,13 @@ object WeMessageApi : ApiFeature(), IResolveDex {
 
             if (!copyFileViaVfs(path, destFullPath)) return false
 
-            // 设置语音信息
+            // 8.0.80 的 finishRecord 扩为 5 参；需先写入 voiceinfo 再发语音。
             val finalDurationMs = durationMs.coerceIn(1, 60_000)
-            val setVoiceReceiver = getReceiverForMethod(setVoiceMethod)
-            val setVoiceResult = if (setVoiceMethod.parameterCount == 4) {
-                setVoiceMethod.invoke(setVoiceReceiver, fileName, finalDurationMs, 0, null)
-            } else {
-                setVoiceMethod.invoke(setVoiceReceiver, fileName, finalDurationMs, 0)
+            val setVoice = setVoiceMethod
+            val setVoiceResult = when (setVoice.parameterCount) {
+                3 -> setVoice.invoke(null, fileName, finalDurationMs, 0)
+                4 -> setVoice.invoke(null, fileName, finalDurationMs, 0, null)
+                else -> setVoice.invoke(null, fileName, finalDurationMs, 0, null, null)
             } as? Boolean ?: false
 
             if (!setVoiceResult) {
@@ -1637,17 +1638,28 @@ object WeMessageApi : ApiFeature(), IResolveDex {
 
             val actualDuration = if (durationMs > 60000) 60000 else durationMs
 
-            val target = classVoiceLogic.clazz.reflekt()
-                .firstMethod {
+            val target = runCatching {
+                classVoiceLogic.clazz.reflekt().firstMethod {
+                    modifiers(Modifiers.STATIC)
+                    parameterCount { it in 3..5 }
                     parameters {
                         it[0] == BString && it[1] == BInt && it[2] == BInt
                     }
                     returnType = BBool
                 }.self
-            if (target.parameterCount == 4) {
-                target.invoke(null, partialPath, actualDuration, 0, null)
-            } else {
-                target.invoke(null, partialPath, actualDuration, 0)
+            }.getOrNull()
+            if (target == null) {
+                WeLogger.w(TAG, "VoiceLogic.finishRecord unavailable; fallback send skipped")
+                return@runCatching false
+            }
+            val finished = when (target.parameterCount) {
+                3 -> target.invoke(null, partialPath, actualDuration, 0)
+                4 -> target.invoke(null, partialPath, actualDuration, 0, null)
+                else -> target.invoke(null, partialPath, actualDuration, 0, null, null)
+            }
+            if (finished == false) {
+                WeLogger.w(TAG, "VoiceLogic.finishRecord returned false; fallback send skipped")
+                return@runCatching false
             }
 
             val service = classSceneVoiceService.clazz.reflekt()
@@ -1670,7 +1682,8 @@ object WeMessageApi : ApiFeature(), IResolveDex {
             }
 
             WeLogger.i(TAG, "sent voice (WAuxv method): $fullPath")
-        }.onFailure { WeLogger.e(TAG, "failed to send voice (WAuxv method)", it) }.isSuccess
+            true
+        }.onFailure { WeLogger.e(TAG, "failed to send voice (WAuxv method)", it) }.getOrDefault(false)
 
         return succeeded
     }

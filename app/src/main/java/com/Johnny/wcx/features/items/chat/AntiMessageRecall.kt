@@ -357,6 +357,20 @@ object AntiMessageRecall : ClickableFeature(), WeXmlParserApi.IAfterParseListene
         recalledKeyCache = recalledKeyCache + key
         recalledRecords = recalledKeyCache
         refreshBoundViews(talker, msgSvrId)
+        if (WeChatMessageViewApi.findBoundViews { it.talker == talker && it.serverId == msgSvrId }.isEmpty()) {
+            WeChatMessageViewApi.findMessageViewById(msgSvrId)?.let { (view, message) ->
+                if (message.talker == talker) {
+                    view.post {
+                        // 列表可能在 post 前复用该行，二次核对绑定信息再补徽标。
+                        val current = WeChatMessageViewApi.getBoundMessage(view)
+                        if (view.isAttachedToWindow &&
+                            (current == null || (current.talker == talker && current.serverId == msgSvrId))) {
+                            applyRecallStyle(view, message)
+                        }
+                    }
+                }
+            }
+        }
         WeLogger.i(TAG, "marked recalled: $key")
     }
 
@@ -895,29 +909,28 @@ object AntiMessageRecall : ClickableFeature(), WeXmlParserApi.IAfterParseListene
 
         var migrated = 0
         var unmatched = 0
-        val newKeys = mutableSetOf<String>()
         notices.forEachIndexed { index, notice ->
             val originalServerId = findOriginalMessage(notice)
             if (originalServerId == null) {
                 unmatched++
             } else {
-                newKeys += encodeKey(notice.talker, originalServerId)
-                WeDatabaseApi.delete("message", "msgId = ?", arrayOf(notice.msgId.toString()))
-                migrated++
+                // 先保存徽标记录再删旧提示；中途退出也不会丢失撤回标记。
+                val next = recalledKeyCache + encodeKey(notice.talker, originalServerId)
+                recalledRecords = next
+                recalledKeyCache = next
+                if (WeDatabaseApi.delete("message", "msgId = ?", arrayOf(notice.msgId.toString())) > 0) {
+                    migrated++
+                } else {
+                    unmatched++
+                }
             }
             onProgress(index + 1, notices.size)
-        }
-
-        if (newKeys.isNotEmpty()) {
-            recalledKeyCache = recalledKeyCache + newKeys
-            recalledRecords = recalledKeyCache
         }
         return migrated to unmatched
     }
 
-    // Legacy notices were injected at original.createTime + 1 (createTime is in seconds), so the
-    // original lives one second before the notice in the same chat; fall back to the nearest
-    // earlier regular message when that exact second has no surviving row.
+    // 旧提示由原消息 createTime + 1 插入。只在这个精确位置找到原消息才删除提示；
+    // 回退到「任意更早消息」会把无关系统消息误关联成撤回记录。
     @Suppress("DEPRECATION")
     private fun findOriginalMessage(notice: LegacyNotice): Long? {
         val systemTypes = listOf(
@@ -930,12 +943,6 @@ object AntiMessageRecall : ClickableFeature(), WeXmlParserApi.IAfterParseListene
 
         WeDatabaseApi.rawQuery(
             "SELECT msgSvrId FROM message WHERE talker = ? AND createTime = ? AND type NOT IN ($systemTypes) ORDER BY msgId DESC LIMIT 1",
-            arrayOf(notice.talker, beforeNotice)
-        ).use { cursor ->
-            if (cursor.moveToFirst()) return cursor.getLong(0).takeIf { it != 0L }
-        }
-        WeDatabaseApi.rawQuery(
-            "SELECT msgSvrId FROM message WHERE talker = ? AND createTime < ? AND type NOT IN ($systemTypes) ORDER BY createTime DESC, msgId DESC LIMIT 1",
             arrayOf(notice.talker, beforeNotice)
         ).use { cursor ->
             if (cursor.moveToFirst()) return cursor.getLong(0).takeIf { it != 0L }
@@ -1051,7 +1058,7 @@ object AntiMessageRecall : ClickableFeature(), WeXmlParserApi.IAfterParseListene
                                         is MigrationState.Progress ->
                                             "正在迁移… ${state.done}/${state.total}"
                                         is MigrationState.Done ->
-                                            "已迁移 ${state.migrated} 条提示，${state.unmatched} 条未能定位原消息"
+                                            "已迁移 ${state.migrated} 条提示，${state.unmatched} 条未匹配或未删除"
                                         MigrationState.Failed -> "迁移失败"
                                     },
                                     isError = migrationState is MigrationState.Failed,

@@ -12,6 +12,7 @@ import com.Johnny.wcx.features.core.Feature
 import com.Johnny.wcx.utils.WeLogger
 import java.util.Collections
 import java.util.WeakHashMap
+import java.lang.ref.WeakReference
 import java.util.concurrent.CopyOnWriteArrayList
 
 @Feature(name = "消息 View 创建监听服务", categories = ["API"], description = "提供消息 View 创建监听能力")
@@ -66,17 +67,23 @@ object WeChatMessageViewApi : ApiFeature(), IResolveDex {
 
     private const val TAG = "WeChatMessageViewApi"
 
-    private val methodChatItemOnBindView by dexMethod {
+    // 8.0.79/8.0.80 的原 "[onBindView]" 已是孤儿串；精确匹配仍存在的日志常量。
+    private val methodChatItemOnBindView by dexMethod(allowMultiple = true, allowFailure = true) {
         matcher {
             usingStrings(
                 "MicroMsg.MvvmChattingItem",
-                "[onBindView]"
+                "[onBindView] finish position:"
             )
         }
     }
 
     override fun onEnable() {
+        if (methodChatItemOnBindView.isPlaceholder) {
+            WeLogger.w(TAG, "onBindView 锚点未命中，消息徽标及 View 监听不可用")
+            return
+        }
         methodChatItemOnBindView.hookAfter {
+            cacheAdapter(this)
             val holder = args[0] ?: return@hookAfter
             val view = holder.reflekt()
                 .firstFieldOrNull {
@@ -111,6 +118,46 @@ object WeChatMessageViewApi : ApiFeature(), IResolveDex {
             }
         }
     }
+
+    // 只持弱引用，避免聊天页关闭后被 API 单例长期持有；切换会话时更新。
+    @Volatile private var adapterOwner: WeakReference<Any>? = null
+    @Volatile private var cachedAdapter: WeakReference<Any>? = null
+
+    private fun cacheAdapter(param: XC_MethodHook.MethodHookParam) {
+        val owner = param.thisObject ?: return
+        if (adapterOwner?.get() === owner && cachedAdapter?.get() != null) return
+        runCatching {
+            if (WeMessageApi.classChattingDataAdapter.isPlaceholder) return
+            val adapter = owner.reflekt()
+                .firstFieldOrNull { type = WeMessageApi.classChattingDataAdapter.clazz }
+                ?.get() ?: return
+            adapterOwner = WeakReference(owner)
+            cachedAdapter = WeakReference(adapter)
+        }.onFailure { WeLogger.w(TAG, "cacheAdapter failed: ${it.message}") }
+    }
+
+    /** 尝试按服务端 id 查可见消息；返回前校验实际 id，避免给复用的行贴错徽标。 */
+    fun findMessageViewById(serverId: Long): Pair<View, MessageInfo>? {
+        if (serverId == 0L || WeMessageApi.classMsgInfo.isPlaceholder) return null
+        val adapter = cachedAdapter?.get() ?: return null
+        return runCatching {
+            val view = pickAdapterMethod(adapter, View::class.java)
+                ?.invoke(adapter, serverId) as? View ?: return@runCatching null
+            val raw = pickAdapterMethod(adapter, WeMessageApi.classMsgInfo.clazz)
+                ?.invoke(adapter, serverId) ?: return@runCatching null
+            val message = MessageInfo(raw)
+            if (!view.isAttachedToWindow || message.serverId != serverId) return@runCatching null
+            view to message
+        }.onFailure { WeLogger.w(TAG, "findMessageViewById failed: ${it.message}") }.getOrNull()
+    }
+
+    private fun pickAdapterMethod(target: Any, returnType: Class<*>): java.lang.reflect.Method? =
+        target.javaClass.methods.firstOrNull { method ->
+            method.parameterCount == 1 &&
+                (method.parameterTypes[0] == Long::class.javaPrimitiveType ||
+                    method.parameterTypes[0] == java.lang.Long::class.java) &&
+                returnType.isAssignableFrom(method.returnType)
+        }
 
     private fun ensureAttachStateListener(view: View) {
         synchronized(attachStateListeners) {
