@@ -36,6 +36,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     if: |
       github.event_name == 'workflow_dispatch' || 
       startsWith(github.ref, 'refs/tags/') ||
@@ -54,6 +56,13 @@ jobs:
         with:
           fetch-depth: 0
           submodules: recursive
+
+      - name: Generate version info
+        id: version
+        run: |
+          # 版本号单一数据源：直接从 app/build.gradle.kts 读取 versionCode
+          VERSION_CODE=$(grep -oE 'versionCode[[:space:]]*=[[:space:]]*[0-9]+' app/build.gradle.kts | grep -oE '[0-9]+$')
+          echo "tag=v${VERSION_CODE}" >> $GITHUB_OUTPUT
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -237,13 +246,13 @@ jobs:
       - name: Upload Release APKs
         uses: actions/upload-artifact@v7
         with:
-          name: wcx-apk
+          name: wcx-${{ steps.version.outputs.tag }}-apk
           path: dist/apk/*.apk
 
       - name: Upload Release Obfuscation Mapping
         uses: actions/upload-artifact@v7
         with:
-          name: wcx-mapping
+          name: wcx-${{ steps.version.outputs.tag }}-mapping
           path: dist/mapping/*.txt
 
   release:
@@ -263,7 +272,7 @@ jobs:
       - name: Download APK artifact
         uses: actions/download-artifact@v8
         with:
-          name: wcx-apk
+          name: wcx-${{ needs.build.outputs.tag }}-apk
           path: artifacts
 
       - name: Generate version info
