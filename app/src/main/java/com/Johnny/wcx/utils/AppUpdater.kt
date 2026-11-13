@@ -65,16 +65,26 @@ private const val GITHUB_API_RELEASES =
     "https://api.github.com/repos/jinshengchan/wcx1/releases?per_page=20"
 private const val RELEASES_PAGE = "https://github.com/jinshengchan/wcx1/releases"
 
-// APKs are published per entry-point flavor: app-<flavor>-<abi>-release.apk.
+// APKs are published per entry-point flavor with the version in the name:
+// wcx-<tag>-<flavor>-v8a.apk (e.g. wcx-v350-standard-v8a.apk).
 // Stay on the same flavor the installed build was compiled for.
+// Old releases still use app-<flavor>-<abi>-release.apk; keep matching
+// them as a fallback so older releases remain downloadable.
 private val FLAVOR = BuildConfig.FLAVOR_SLUG
 private val ABI_LIST = listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
 private const val UNIVERSAL_APK_SUFFIX = "universal-release.apk"
 
 /**
  * 从 GitHub Release 的 asset 列表中选择最适合当前设备的 APK 下载地址
+ *
+ * 优先匹配带版本号的新文件名（wcx-<tag>-<flavor>-v8a.apk），再回落到
+ * 旧文件名（app-<flavor>-<abi>-release.apk），保证旧版 Release 也能下载。
  */
-private fun selectApkUrl(assets: List<GitHubAsset>): String {
+private fun selectApkUrl(assets: List<GitHubAsset>, tagName: String): String {
+    // 1. 新版：带版本号的文件名，只发 v8a。
+    assets.firstOrNull { it.name == "wcx-$tagName-$FLAVOR-v8a.apk" }
+        ?.let { return it.browser_download_url }
+    // 2. 旧版：原名（v347/v349/v350 早期 Release 仍用此名）。
     val supportedAbis = Build.SUPPORTED_ABIS
     for (abi in supportedAbis) {
         val expected = "app-$FLAVOR-$abi-release.apk"
@@ -182,7 +192,7 @@ object AppUpdater {
      * [BroadcastReceiver] on [Dispatchers.Main].
      */
     suspend fun downloadAndInstall(context: Context, info: UpdateInfo) {
-        val apkUrl = info.apkUrl.ifBlank { selectApkUrl(emptyList()) }
+        val apkUrl = info.apkUrl.ifBlank { selectApkUrl(emptyList(), info.releaseTag) }
         val fileName = "wcx-${info.versionName}.apk"
 
         val downloadId = enqueueDownload(context, apkUrl, fileName)
@@ -224,7 +234,7 @@ object AppUpdater {
     private fun parseUpdateInfo(release: GitHubRelease): UpdateInfo {
         val tagName = release.tag_name
         val versionCode = extractVersionCode(tagName)
-        val apkUrl = selectApkUrl(release.assets)
+        val apkUrl = selectApkUrl(release.assets, tagName)
         return UpdateInfo(
             versionCode = versionCode,
             versionName = release.name,

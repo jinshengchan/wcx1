@@ -236,7 +236,7 @@ jobs:
       - name: Rename APKs with version and ABI
         run: |
           # 只发 v8a：产物文件名带版本与架构（如 wcx-v350-standard-v8a.apk）；
-          # Release 里的文件名保持原样（app-...-release.apk），内置更新器按原名精确匹配。
+          # Release 里保持带版本号的文件名，更新器优先按此名匹配，旧原名作回落。
           mkdir -p dist/named
           for flavor in standard legacy; do
             cp -v "dist/apk/app-${flavor}-arm64-v8a-release.apk" "dist/named/wcx-${{ steps.version.outputs.tag }}-${flavor}-v8a.apk"
@@ -282,11 +282,9 @@ jobs:
           name: wcx-${{ needs.build.outputs.tag }}-legacy-v8a
           path: artifacts
 
-      - name: Restore original APK filenames for release
+      - name: List release files
         run: |
-          # artifact 里是改名后的文件；发版前恢复原名，内置更新器按原名精确匹配。
-          mv -v "artifacts/wcx-${{ needs.build.outputs.tag }}-standard-v8a.apk" artifacts/app-standard-arm64-v8a-release.apk
-          mv -v "artifacts/wcx-${{ needs.build.outputs.tag }}-legacy-v8a.apk" artifacts/app-legacy-arm64-v8a-release.apk
+          # 发版文件即带版本号的产物名，不再改回原名。
           ls -1 artifacts
 
       - name: Generate version info
