@@ -5,6 +5,10 @@
 -keep class com.Johnny.wcx.entry.** { *; }
 -keep class com.Johnny.wcx.application.** { *; }
 
+# Python runtime is downloaded separately and implements this shared host ABI.
+# Its prebuilt classes cannot follow names changed by the module's release R8 pass.
+-keep class dev.ujhhgtg.wekit.python.api.** { *; }
+
 # ─── Feature / Hook Classes ─────────────────────────────────────────
 # Keep class structure (for reflection/Xposed callback) but allow obfuscation
 -keep class com.Johnny.wcx.features.** { *; }

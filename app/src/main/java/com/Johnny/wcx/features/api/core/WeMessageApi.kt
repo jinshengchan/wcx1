@@ -608,7 +608,9 @@ object WeMessageApi : ApiFeature(), IResolveDex {
         if (HostInfo.versionCode >= WeChatVersions.MM_8_0_67 && !HostInfo.isHostGooglePlay ||
             HostInfo.versionCode >= WeChatVersions.MM_8_0_66_PLAY && HostInfo.isHostGooglePlay
         ) {
-            methodImgUploadFeatureServiceSendImage.find(dexKit) {
+            // 8.0.80 同一类的「1 参 + params」会命中两个方法；图片发送入口返回 Flow。
+            // 多候选时必须按返回类型唯一确认，不能因 DexKit 顺序变化误发图片任务。
+            methodImgUploadFeatureServiceSendImage.find(dexKit, allowMultiple = true, allowFailure = true) {
                 matcher {
                     declaredClass {
                         usingEqStrings("MicroMsg.ImgUpload.MsgImgFeatureService", "taskListener", "params")
@@ -616,6 +618,19 @@ object WeMessageApi : ApiFeature(), IResolveDex {
 
                     paramCount(1)
                     usingEqStrings("params")
+                }
+            }
+            val imageSendCandidates = methodImgUploadFeatureServiceSendImage.candidates
+            if (imageSendCandidates.size > 1) {
+                val sendImage = imageSendCandidates.filter {
+                    it.returnTypeName.startsWith("kotlinx.coroutines.flow.")
+                }.singleOrNull()
+                if (sendImage == null) {
+                    methodImgUploadFeatureServiceSendImage.setPlaceholderDescriptor()
+                    WeLogger.w(TAG, "图片发送入口无法唯一确认：${imageSendCandidates.size} 个候选，已停用该入口")
+                } else {
+                    methodImgUploadFeatureServiceSendImage.setDescriptor(sendImage)
+                    WeLogger.i(TAG, "图片发送入口定位到 ${sendImage.className}::${sendImage.methodName}")
                 }
             }
 
@@ -1448,14 +1463,19 @@ object WeMessageApi : ApiFeature(), IResolveDex {
         return false
     }
 
-    fun sendText(toUser: String, text: String): Boolean {
+    fun sendText(toUser: String, text: String): Boolean = sendTextInternal(toUser, text, true)
+
+    internal fun sendAiReply(toUser: String, text: String): Boolean = sendTextInternal(toUser, text, false)
+
+    private fun sendTextInternal(toUser: String, text: String, logContent: Boolean): Boolean {
         return try {
-            WeLogger.i(TAG, "sending text message: $text")
+            if (logContent) WeLogger.i(TAG, "sending text message: $text")
             val sendMsgObject = methodGetSendMsgObject.method.invoke(null) ?: return false
             val msgObj = newSendMsgSceneInstance(classNetSceneSendMsg.clazz, toUser, text) ?: return false
             methodPostToQueue.method.invoke(sendMsgObject, msgObj) as? Boolean ?: false
         } catch (e: Exception) {
-            WeLogger.e(TAG, "failed to send text message", e)
+            if (logContent) WeLogger.e(TAG, "failed to send text message", e)
+            else WeLogger.w(TAG, "AI reply enqueue failed; content omitted")
             false
         }
     }
