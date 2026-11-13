@@ -42,7 +42,7 @@ object StartupAgent {
         checkWriteXorExecuteForModulePath(modulePath)
 
         HostInfo.init(application)
-        NativeLoader.init(application)
+        NativeLoader.init(application, modulePath)
         // FIXME: some people have hiding on, which causes false positives in signature verifier
 //        SignatureVerifier.verify(application)
         WeLauncher.init(application)

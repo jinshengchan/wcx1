@@ -1,5 +1,7 @@
 package com.termux.terminal;
 
+import com.Johnny.wcx.loader.utils.NativeLoader;
+
 // Termux PTY 的 JNI 入口：方法与 libtermux.so 的符号严格对应，勿改名/改签名
 final class JNI {
 
@@ -16,7 +18,7 @@ final class JNI {
         } catch (Throwable ignored) {
         }
         if (!loaded) {
-            System.loadLibrary("termux");
+            NativeLoader.INSTANCE.loadLibrary("termux");
         }
     }
 
