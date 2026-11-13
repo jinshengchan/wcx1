@@ -363,8 +363,11 @@ object AntiMessageRecall : ClickableFeature(), WeXmlParserApi.IAfterParseListene
                     view.post {
                         // 列表可能在 post 前复用该行，二次核对绑定信息再补徽标。
                         val current = WeChatMessageViewApi.getBoundMessage(view)
+                        val stillMapped = current?.let {
+                            it.talker == talker && it.serverId == msgSvrId
+                        } ?: (WeChatMessageViewApi.findMessageViewById(msgSvrId)?.first === view)
                         if (view.isAttachedToWindow &&
-                            (current == null || (current.talker == talker && current.serverId == msgSvrId))) {
+                            stillMapped) {
                             applyRecallStyle(view, message)
                         }
                     }
