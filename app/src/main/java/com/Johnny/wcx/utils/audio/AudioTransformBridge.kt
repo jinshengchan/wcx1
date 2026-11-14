@@ -1,6 +1,7 @@
 package com.Johnny.wcx.utils.audio
 
 import dev.ujhhgtg.reflekt.reflekt
+import com.Johnny.wcx.loader.utils.NativeLoader
 import me.yun.silk.AacCodec
 import me.yun.silk.SilkCodec
 import java.util.function.Consumer
@@ -24,7 +25,7 @@ open class AudioTransformBridge(
     private val silkCodec: SilkCodec by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         // native 库仅在 arm64-v8a 提供；加载失败时 callInt/callLong 的 runCatching 会兜底
         // 捕获 UnsatisfiedLinkError，相关函数返回错误码而非崩溃。
-        runCatching { System.loadLibrary("silk_codec") }
+        runCatching { NativeLoader.loadLibrary("silk_codec") }
         SilkCodec()
     }
 
