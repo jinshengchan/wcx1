@@ -125,9 +125,10 @@ internal object ThemeMaterials {
             runCatching { ensureExtracted(theme) }
             ThemePaths.wallpaperFile(theme).takeIf { it.exists() }?.toFile()
         }
-        return listOf("chats", "contacts", "discover", "me").map { key ->
+        val defaults = listOf("chats", "contacts", "discover", "me").map { key ->
             pack?.wallpaperFor(key) ?: builtin
         }
+        return ThemeStore.resolveMainWallpapers(activeId, defaults)
     }
 
     /**
