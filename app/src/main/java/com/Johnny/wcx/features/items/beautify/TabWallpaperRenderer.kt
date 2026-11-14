@@ -58,6 +58,9 @@ internal object TabWallpaperRenderer {
     /** 只对挂过的窗口做清理，避免白跑。 */
     private val masked = java.util.WeakHashMap<ViewGroup, Boolean>()
 
+    /** Settings hide the launcher wallpaper; preserve the scene before that cleanup. */
+    private val detachedSnapshots = java.util.WeakHashMap<ViewGroup, String>()
+
     // ── 诊断快照（主题诊断页直接读，不用再猜） ──
     @Volatile var lastAt = 0L
         private set
@@ -115,7 +118,7 @@ internal object TabWallpaperRenderer {
         if (useUnderlay) {
             clearForeground(activity)
             val result = PageWallpaperUnderlay.apply(activity, bmp, shouldDraw)
-            if (result == "ok") return ok(activity, file, tab, 100, "页面底图")
+            if (result == "ok") return ok(activity, file, tab, 100, "页面底图 ImageView")
             underlayFailure = result
             WeLogger.w(TAG, "页面底图未就绪，使用兼容遮罩：$result")
         }
@@ -167,8 +170,15 @@ internal object TabWallpaperRenderer {
         }
     }
 
-    /** 彻底撤销：还回窗口原来的 foreground。 */
+    /** 撤销两种图层，并保留撤销前的真实绘制现场。 */
     fun clear(activity: Activity) {
+        val decor = activity.window?.decorView as? ViewGroup
+        if (decor != null && (masked.containsKey(decor) || PageWallpaperUnderlay.describe(activity) != null)) {
+            val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+            val snapshot = "$time ${describeCurrent(activity)}"
+            detachedSnapshots[decor] = snapshot
+            WeLogger.i(TAG, "背景撤销前：$snapshot")
+        }
         PageWallpaperUnderlay.clear(activity)
         clearForeground(activity)
     }
@@ -178,18 +188,29 @@ internal object TabWallpaperRenderer {
         if (masked.remove(decor) == null) return
         val mask = masks.remove(decor)
         if (lastDrawable === mask) lastDrawable = null
-        runCatching { decor.foreground = savedForeground.remove(decor) }
+        val original = savedForeground.remove(decor)
+        runCatching { if (decor.foreground === mask) decor.foreground = original }
             .onFailure { WeLogger.w(TAG, "还原 foreground 失败：${it.message}") }
         runCatching { decor.invalidate() }
     }
 
     fun isMasked(activity: Activity): Boolean =
         PageWallpaperUnderlay.isAttached(activity) ||
-            runCatching { masked[activity.window?.decorView as? ViewGroup] == true }.getOrDefault(false)
+            runCatching {
+                val decor = activity.window?.decorView as? ViewGroup ?: return@runCatching false
+                val mask = masks[decor]
+                mask != null && decor.foreground === mask
+            }.getOrDefault(false)
 
-    /** 诊断文本：这一屏到底有没有遮罩、画了几次、尺寸多少。 */
+    /** 当前状态和上次撤销前的现场分开展示，避免把历史写入当作仍在显示。 */
     fun describe(activity: Activity): String {
-        if (PageWallpaperUnderlay.isAttached(activity)) return PageWallpaperUnderlay.describe(activity)
+        val decor = activity.window?.decorView as? ViewGroup
+        val previous = detachedSnapshots[decor]
+        return describeCurrent(activity) + if (previous == null) "" else "\n  上次撤销前：$previous"
+    }
+
+    private fun describeCurrent(activity: Activity): String {
+        PageWallpaperUnderlay.describe(activity)?.let { return it }
         val decor = activity.window?.decorView as? ViewGroup ?: return "decorView 不可用"
         val mask = masks[decor]
         val fg = decor.foreground

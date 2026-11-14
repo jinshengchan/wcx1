@@ -540,13 +540,17 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     // 渲染方式：四页底图为可选模式，原有 DecorView 前景遮罩用于兼容回退
     // ══════════════════════════════════════════════════════════
 
-    fun renderModeName(): String = if (usePageBackground()) "页面底图（实验）" else "前景遮罩（兼容）"
+    fun renderModeName(): String = if (usePageBackground()) "页面底图（ImageView 实验）" else "前景遮罩（兼容）"
 
-    /** 设置页常驻展示的遮罩状态（挂没挂上、多久之前挂的）。 */
-    fun maskBrief(): String = runCatching {
+    /** 当前挂载和历史写入分开显示，不把上次成功当作当前生效。 */
+    fun wallpaperBrief(): String = runCatching {
         val at = TabWallpaperRenderer.lastAt
-        if (at == 0L) "未挂载"
-        else "已挂载 · ${((System.currentTimeMillis() - at) / 1000).toString()} 秒前"
+        val attached = ThemeSurface.liveActivities().any { ThemePages.isLauncher(it) && ThemeSurface.isAttached(it) }
+        when {
+            attached -> "当前已挂载"
+            at == 0L -> "尚未写入"
+            else -> "当前未挂载 · 上次写入 ${((System.currentTimeMillis() - at) / 1000)} 秒前"
+        }
     }.getOrDefault("未知")
 
     /** 设置页点「壁纸渲染方式」：立即重写一次前景遮罩。 */
@@ -630,7 +634,8 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
             }.getOrDefault("异常")
         )
         appendLine("渲染方式 = ${renderModeName()}")
-        appendLine("遮罩状态 = ${maskBrief()}")
+        appendLine("背景图层状态 = ${wallpaperBrief()}")
+        appendLine("最近绘制判定 = ${ThemeSurface.lastWallpaperDrawDecision}")
         appendLine(
             "最近一次写入 = tab=${TabWallpaperRenderer.lastTab} 结果=${TabWallpaperRenderer.lastResult}"
         )

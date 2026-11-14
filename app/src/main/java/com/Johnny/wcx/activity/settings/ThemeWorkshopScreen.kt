@@ -1145,13 +1145,13 @@ private fun OpacityRow(tick: Int) {
                 activeTrackColor = MiuixTheme.colorScheme.primary,
             ),
         )
-        val maskState = remember(tick, clearBackground) { ThemeStore.maskBrief() }
+        val wallpaperState = remember(tick, clearBackground) { ThemeStore.wallpaperBrief() }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable {
                     runCatching { ThemeStore.reapplyNow() }
-                    showToast(context, "已重写主题背景（${ThemeStore.maskBrief()}），回微信看看")
+                    showToast(context, "已重写主题背景（${ThemeStore.wallpaperBrief()}），回微信看看")
                 }
                 .padding(top = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -1159,14 +1159,14 @@ private fun OpacityRow(tick: Int) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("壁纸渲染方式 · ${ThemeStore.renderModeName()}", fontSize = 15.sp, color = titleColor())
                 Text(
-                    text = if (clearBackground) "页面底图：不插入微信子视图；点击可重新应用" else
+                    text = if (clearBackground) "页面底图：图片位于内容下方；点击可重新应用" else
                         "前景遮罩：画在内容之上；浓淡用上面的透明度调",
                     fontSize = 11.sp,
                     color = summaryColor(),
                 )
             }
             Text(
-                text = maskState,
+                text = wallpaperState,
                 fontSize = 11.sp,
                 maxLines = 1,
                 color = MiuixTheme.colorScheme.primary,
