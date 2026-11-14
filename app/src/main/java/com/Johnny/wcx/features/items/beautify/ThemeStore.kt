@@ -1,6 +1,9 @@
 package com.Johnny.wcx.features.items.beautify
 
 import android.app.Activity
+import android.content.Context
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.view.View
 import androidx.activity.ComponentActivity
 import com.Johnny.wcx.BuildConfig
@@ -19,6 +22,7 @@ import com.Johnny.wcx.utils.fs.createDirsSafe
 import dev.ujhhgtg.reflekt.reflekt
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import kotlin.io.path.absolutePathString
 import kotlin.io.path.div
 import kotlin.io.path.exists
@@ -82,6 +86,13 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
 
     /** 壁纸透明度（%），5~70。 */
     private var overlayOpacityPct by prefOption("theme_store_overlay_opacity", 40)
+
+    /** Optional four-tab background renderer. The previous foreground renderer remains a fallback. */
+    private var pageBackgroundEnabled by prefOption("theme_store_page_background", false)
+
+    private var mainWallpaperOn by prefOption("theme_store_main_wallpaper", true)
+    private var mainTextColorOn by prefOption("theme_store_main_text_color", true)
+    private var mainTitleColorHex by prefOption("theme_store_main_title_color", "")
 
     // ══════════════════════════════════════════════════════════
     // Feature 生命周期
@@ -290,9 +301,9 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         hookChattingFragment()
         ThemeSurface.registerCallbacks(true)
         WeChatMessageViewApi.addListener(this)
+        ThemeSurface.applyToAllLive()
         if (activeThemeId.isNotEmpty()) {
             // 进程重启后恢复：壁纸/沉浸式全局重挂（气泡文件已在 moduleAssets 持久存在）
-            ThemeSurface.applyToAllLive()
             WeLogger.i(TAG, "已恢复主题：$activeThemeId")
         }
     }
@@ -524,24 +535,163 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         ThemeSurface.refreshAlpha()
     }
 
+    fun usePageBackground(): Boolean = pageBackgroundEnabled
+
+    fun setUsePageBackground(enabled: Boolean) {
+        if (pageBackgroundEnabled == enabled) return
+        pageBackgroundEnabled = enabled
+        ThemeSurface.resetFailStreak()
+        ThemeSurface.applyToAllLive()
+    }
+
+    private val mainWallpaperKeys = listOf("chats", "contacts", "discover", "me")
+
+    fun mainWallpaperEnabled(): Boolean = mainWallpaperOn
+
+    fun setMainWallpaperEnabled(enabled: Boolean) {
+        mainWallpaperOn = enabled
+        invalidateWallpaperCache()
+        ThemeSurface.applyToAllLive()
+    }
+
+    fun mainTextColorEnabled(): Boolean = mainTextColorOn
+
+    fun setMainTextColorEnabled(enabled: Boolean) {
+        mainTextColorOn = enabled
+        ThemeSurface.resetFailStreak()
+        ThemeSurface.applyToAllLive()
+    }
+
+    /** null 表示按背景自动选择清晰的文字颜色。 */
+    fun mainTitleColor(): Int? {
+        val hex = mainTitleColorHex
+        if (!hex.matches(Regex("#[0-9a-fA-F]{6}"))) return null
+        return hex.substring(1).toInt(16) or 0xff000000.toInt()
+    }
+
+    fun setMainTitleColor(color: Int?) {
+        mainTitleColorHex = color?.let { String.format("#%06X", it and 0xffffff) } ?: ""
+        ThemeSurface.resetFailStreak()
+        ThemeSurface.applyToAllLive()
+    }
+
+    private fun mainWallpaperOverrideDir(id: String): File {
+        require(id.isNotBlank()) { "请先应用一套主题，再设置主页背景" }
+        val root = File(ThemePaths.storeDir.toFile(), "overrides").canonicalFile
+        val dir = File(root, id).canonicalFile
+        require(dir.parentFile == root) { "主题标识无效" }
+        return dir
+    }
+
+    /** 禁用标记优先于自选图片和主题自带图，避免「恢复」又落回全局图。 */
+    internal fun resolveMainWallpapers(activeId: String, defaults: List<File?>): List<File?> {
+        if (activeId.isBlank()) return defaults
+        val dir = mainWallpaperOverrideDir(activeId)
+        return mainWallpaperKeys.mapIndexed { index, key ->
+            when {
+                File(dir, "$key.disabled").exists() -> null
+                else -> File(dir, "$key.img").takeIf { it.isFile && it.length() > 0L }
+                    ?: defaults.getOrNull(index)
+            }
+        }
+    }
+
+    fun mainWallpaperStatus(index: Int): String {
+        require(index in mainWallpaperKeys.indices) { "页面序号无效" }
+        val id = activeThemeId
+        if (id.isBlank()) return "未应用主题"
+        val dir = mainWallpaperOverrideDir(id)
+        val key = mainWallpaperKeys[index]
+        return when {
+            File(dir, "$key.disabled").exists() -> "微信原生背景"
+            File(dir, "$key.img").let { it.isFile && it.length() > 0L } -> "自定义背景"
+            ThemeMaterials.tabWallpaperFiles(id).getOrNull(index) != null -> "当前主题背景"
+            else -> "微信原生背景"
+        }
+    }
+
+    /** 只覆盖当前主题的主页背景，不改主题选择、气泡或功能总开关。 */
+    fun setMainWallpaper(context: Context, uri: Uri, index: Int?): Result<Unit> = runCatching {
+        require(index == null || index in mainWallpaperKeys.indices) { "页面序号无效" }
+        val dir = mainWallpaperOverrideDir(activeThemeId)
+        check(dir.isDirectory || dir.mkdirs()) { "无法创建主页背景目录" }
+        val source = File.createTempFile("wallpaper-", ".tmp", dir)
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                source.outputStream().use { output -> input.copyTo(output) }
+            } ?: error("读不到这张图片")
+            require(source.length() > 0L) { "这张图片是空的" }
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(source.absolutePath, options)
+            require(options.outWidth > 0 && options.outHeight > 0) { "请选择有效的图片" }
+            options.inJustDecodeBounds = false
+            options.inSampleSize = 1
+            while (maxOf(options.outWidth, options.outHeight) / options.inSampleSize > 512) {
+                options.inSampleSize *= 2
+            }
+            val preview = BitmapFactory.decodeFile(source.absolutePath, options)
+                ?: error("这张图片无法解码")
+            preview.recycle()
+            val indices = index?.let { listOf(it) } ?: mainWallpaperKeys.indices.toList()
+            for (page in indices) {
+                val key = mainWallpaperKeys[page]
+                val staged = File.createTempFile("$key-", ".tmp", dir)
+                try {
+                    Files.copy(source.toPath(), staged.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                    Files.move(staged.toPath(), File(dir, "$key.img").toPath(), StandardCopyOption.REPLACE_EXISTING)
+                    Files.deleteIfExists(File(dir, "$key.disabled").toPath())
+                } finally {
+                    staged.delete()
+                }
+            }
+        } finally {
+            source.delete()
+        }
+    }.onSuccess {
+        invalidateWallpaperCache()
+        ThemeSurface.applyToAllLive()
+    }
+
+    /** 选中页面恢复微信原生背景；其余页面和主题气泡保持不变。 */
+    fun resetMainWallpapers(indices: Set<Int>): Result<Unit> {
+        if (indices.isEmpty()) return Result.success(Unit)
+        return runCatching {
+            require(indices.all { it in mainWallpaperKeys.indices }) { "页面序号无效" }
+            val dir = mainWallpaperOverrideDir(activeThemeId)
+            check(dir.isDirectory || dir.mkdirs()) { "无法创建主页背景目录" }
+            for (index in indices) {
+                val key = mainWallpaperKeys[index]
+                File(dir, "$key.disabled").writeText("")
+                Files.deleteIfExists(File(dir, "$key.img").toPath())
+            }
+        }.onSuccess {
+            invalidateWallpaperCache()
+            ThemeSurface.applyToAllLive()
+        }
+    }
+
     // ══════════════════════════════════════════════════════════
-    // 渲染方式（2026-10-27 重写后只有一种实现：DecorView 前景遮罩）
+    // 渲染方式：四页底图为可选模式，原有 DecorView 前景遮罩用于兼容回退
     // ══════════════════════════════════════════════════════════
 
-    fun renderModeName(): String = "前景遮罩（压在内容上，不改页面结构）"
+    fun renderModeName(): String = if (usePageBackground()) "全屏背景（实验）" else "前景遮罩（兼容）"
 
-    /** 设置页常驻展示的遮罩状态（挂没挂上、多久之前挂的）。 */
-    fun maskBrief(): String = runCatching {
+    /** 当前挂载和历史写入分开显示，不把上次成功当作当前生效。 */
+    fun wallpaperBrief(): String = runCatching {
         val at = TabWallpaperRenderer.lastAt
-        if (at == 0L) "未挂载"
-        else "已挂载 · ${((System.currentTimeMillis() - at) / 1000).toString()} 秒前"
+        val attached = ThemeSurface.liveActivities().any { ThemePages.isLauncher(it) && ThemeSurface.isAttached(it) }
+        when {
+            attached -> "当前已挂载"
+            at == 0L -> "尚未写入"
+            else -> "当前未挂载 · 上次写入 ${((System.currentTimeMillis() - at) / 1000)} 秒前"
+        }
     }.getOrDefault("未知")
 
     /** 设置页点「壁纸渲染方式」：立即重写一次前景遮罩。 */
     fun reapplyNow() {
         invalidateWallpaperCache()
         ThemeSurface.applyToAllLive()
-        WeLogger.i(TAG, "手动重写前景遮罩：${TabWallpaperRenderer.lastResult}")
+        WeLogger.i(TAG, "手动重写主题背景：${TabWallpaperRenderer.lastResult}")
     }
 
     /** 换主题 / 改素材 / 改透明度后清图缓存，避免拿到旧图。 */
@@ -618,12 +768,14 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
             }.getOrDefault("异常")
         )
         appendLine("渲染方式 = ${renderModeName()}")
-        appendLine("遮罩状态 = ${maskBrief()}")
+        appendLine("背景图层状态 = ${wallpaperBrief()}")
+        appendLine("最近绘制判定 = ${ThemeSurface.lastWallpaperDrawDecision}")
         appendLine(
             "最近一次写入 = tab=${TabWallpaperRenderer.lastTab} 结果=${TabWallpaperRenderer.lastResult}"
         )
         appendLine("  文件=${TabWallpaperRenderer.lastPath}")
         appendLine("壁纸透明度 = ${overlayOpacity()}%")
+        appendLine("四页渲染方式 = ${renderModeName()}")
         appendLine("自定义气泡开关 = " + runCatching { WePrefs.getBoolOrFalse(CUSTOM_BUBBLES_PREF_KEY) }.getOrDefault(false))
         appendLine(
             "气泡文件存在 = left:" + ThemePaths.activeBubble(ThemePaths.LEFT_BUBBLE_FILE).exists() +

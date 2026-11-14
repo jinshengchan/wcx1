@@ -39,6 +39,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -76,8 +77,8 @@ import java.io.File
  *
  * 交互约定（用户明确要求）：
  * - 点卡片/下拉只是「选中」，不生效；必须点右上角「应用」才算应用，且要划掉微信重开
- * - 内置主题只能调透明度，不能改名称/素材；长按可重命名/改描述，但不能分享
- * - 壁纸永远在最底层，文字永远在上层，透明度拉满也不会挡字
+ * - 内置主题的气泡素材只读；长按可重命名/改描述，但不能分享
+ * - 主界面背景与文字颜色直接修改正在使用的主题，即时生效
  */
 @Composable
 fun ThemeWorkshopScreen(onBack: () -> Unit) {
@@ -116,6 +117,8 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
     var draftDesc by remember { mutableStateOf("") }
     var descVisible by remember { mutableStateOf(false) }
     var tick by remember { mutableStateOf(0) }
+    var pendingMainIndex by rememberSaveable { mutableStateOf(-1) }
+    var showTitleColor by remember { mutableStateOf(false) }
 
     fun refreshAll() {
         packs = ThemePack.list()
@@ -246,6 +249,36 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
             .onFailure { showToast(context, "添加失败：${it.message}") }
     }
 
+    val pickMainImageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        ThemeStore.setMainWallpaper(context, uri, pendingMainIndex.takeIf { it in 0..3 })
+            .onSuccess {
+                refreshAll()
+                if (editing?.id == active) editing = ThemePack.find(active)
+                showToast(context, "主界面背景已更新，即时生效")
+            }
+            .onFailure { showToast(context, "设置失败：${it.message}") }
+    }
+
+    fun pickMainImage(index: Int?) {
+        if (ThemeStore.activeThemeIdOrEmpty().isBlank()) {
+            showToast(context, "先选择并应用一套主题，再设置主界面背景")
+            return
+        }
+        pendingMainIndex = index ?: -1
+        pickMainImageLauncher.launch("image/*")
+    }
+
+    fun resetMainImages(indices: Set<Int>) {
+        ThemeStore.resetMainWallpapers(indices)
+            .onSuccess {
+                refreshAll()
+                if (editing?.id == active) editing = ThemePack.find(active)
+                showToast(context, "已恢复微信原生背景")
+            }
+            .onFailure { showToast(context, "恢复失败：${it.message}") }
+    }
+
     PageScaffold(
         title = "主题设置",
         largeTitle = "主题设置",
@@ -370,6 +403,96 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                 bottom = padding.calculateBottomPadding() + 90.dp,
             ),
         ) {
+            item {
+                GroupCard(title = "主界面背景") {
+                    if (remember(tick) { findFeature("主题工坊")?.isEnabled != true }) {
+                        HintRow("主题功能总开关已关闭。可先设置，下方开启总开关后显示效果。")
+                    }
+                    val backgroundOn = remember(tick) { ThemeStore.mainWallpaperEnabled() }
+                    SwitchRow(
+                        title = "开启主界面背景",
+                        summary = "只控制最近聊天、通讯录、发现、我四页背景，关闭后恢复原生背景",
+                        checked = backgroundOn,
+                    ) { enabled ->
+                        ThemeStore.setMainWallpaperEnabled(enabled)
+                        refreshAll()
+                    }
+                    RowDivider()
+                    SwitchRow(
+                        title = "全屏连续背景",
+                        summary = "图片从状态栏延伸到顶部、页面内容和底部标签；关闭后使用兼容显示",
+                        checked = remember(tick) { ThemeStore.usePageBackground() },
+                    ) { enabled ->
+                        ThemeStore.setUsePageBackground(enabled)
+                        refreshAll()
+                    }
+                    RowDivider()
+                    HintRow(
+                        if (active.isBlank()) "请先在下方选择并应用一套主题。背景设置会即时作用于正在使用的主题。"
+                        else "正在使用：${themeName(active)}。以下选图与恢复即时生效，无需点右上角「应用」。"
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        PillButton("一张图片应用四页", Modifier.weight(1f), primary = true) { pickMainImage(null) }
+                        PillButton("恢复全部", Modifier.weight(1f)) { resetMainImages(setOf(0, 1, 2, 3)) }
+                    }
+                    listOf("最近聊天", "通讯录", "发现", "我").forEachIndexed { index, label ->
+                        RowDivider()
+                        val status = remember(tick, index) { ThemeStore.mainWallpaperStatus(index) }
+                        MainWallpaperRow(
+                            title = label,
+                            summary = status,
+                            onPick = { pickMainImage(index) },
+                            onReset = { resetMainImages(setOf(index)) },
+                        )
+                    }
+                }
+            }
+            item {
+                GroupCard(title = "主界面文字颜色") {
+                    val textColorOn = remember(tick) { ThemeStore.mainTextColorEnabled() }
+                    val customTitleColor = remember(tick) { ThemeStore.mainTitleColor() }
+                    SwitchRow(
+                        title = "开启主界面文字颜色",
+                        summary = "随主题功能总开关生效；关闭后恢复微信原生文字和图标颜色，开启后即时应用下方设置",
+                        checked = textColorOn,
+                    ) { enabled ->
+                        ThemeStore.setMainTextColorEnabled(enabled)
+                        refreshAll()
+                    }
+                    RowDivider()
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f).clickable { showTitleColor = true }.padding(vertical = 4.dp),
+                        ) {
+                            Text("标题颜色", fontSize = 15.sp, color = titleColor())
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                customTitleColor?.let { rgbHex(it) } ?: "自动（按背景调整清晰文字）",
+                                fontSize = 12.sp,
+                                color = summaryColor(),
+                            )
+                        }
+                        Box(
+                            modifier = Modifier.size(28.dp).clip(RoundedCornerShape(8.dp))
+                                .background(customTitleColor?.let { Color(it) } ?: MiuixTheme.colorScheme.primary)
+                                .clickable { showTitleColor = true },
+                        )
+                        TextButton(onClick = { showTitleColor = true }) { Text("选择") }
+                        TextButton(onClick = {
+                            ThemeStore.setMainTitleColor(null)
+                            refreshAll()
+                        }) { Text("恢复") }
+                    }
+                    HintRow("应用于四页主要标题、顶部标题/搜索/加号及底部标签文字和图标。状态栏图标随标题颜色自动切换深浅。")
+                }
+            }
+
             // ── 卡片1 主题基础 ───────────────────────────────
             item {
                 GroupCard(title = "主题基础") {
@@ -415,8 +538,8 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                     RowDivider()
                     FeatureSwitchRow(
                         featureName = "主题工坊",
-                        title = "主题",
-                        summary = "总开关：内置 6 款全局主题，关闭后立即还原背景与气泡",
+                        title = "主题功能总开关",
+                        summary = "控制整套主题，关闭后还原背景、文字颜色与气泡",
                         tick = tick,
                         onChanged = { refreshAll() },
                     )
@@ -430,7 +553,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                     RowDivider()
                     // 当前选中的主题：跟着上面/下面的选择实时变（未选则显示微信原生）
                     InfoRow(
-                        label = "当前主题",
+                        label = "待应用主题",
                         value = if (selectedId.isBlank()) "未选择（微信原生）" else themeName(selectedId),
                     )
                     RowDivider()
@@ -444,7 +567,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                     Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             PillButton("保存", Modifier.weight(1f)) {
-                                if (editing == null) showToast(context, "内置主题不可编辑，只能调透明度")
+                                if (editing == null) showToast(context, "内置主题无需保存，上方主界面设置即时生效")
                                 else if (saveCurrent()) showToast(context, "已保存：$draftName")
                             }
                             PillButton("分享", Modifier.weight(1f)) {
@@ -473,12 +596,9 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                     val pack = editing
                     when {
                         selectedId.isBlank() -> HintRow("先在下面「默认主题」或「我的主题」里点一张卡片选中它。")
-                        // 内置主题：只能调透明度，其余只读
+                        // 内置主题：素材只读，主界面即时设置在上方
                         pack == null -> {
-                            HintRow(
-                                "这是内置主题（全局）。内置主题只能调「壁纸透明度」，" +
-                                    "不能改名称/素材；长按卡片可重命名或改描述。"
-                            )
+                            HintRow("内置主题的气泡素材不可编辑；主界面背景与文字颜色在上方即时设置。长按卡片可重命名或改描述。")
                             BuiltinPreviewStrip(selectedId)
                         }
                         else -> {
@@ -607,6 +727,18 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
 
     // ── 弹窗区 ──────────────────────────────────────────────
 
+    if (showTitleColor) {
+        RgbColorDialog(
+            initialColor = ThemeStore.mainTitleColor(),
+            onDismiss = { showTitleColor = false },
+            onApply = { color ->
+                ThemeStore.setMainTitleColor(color)
+                refreshAll()
+                showTitleColor = false
+            },
+        )
+    }
+
     if (enableConfirm) {
         AlertDialog(
             onDismissRequest = { enableConfirm = false },
@@ -699,7 +831,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                     GuideLine("1", "一套主题", "4 张界面背景（主页/通讯录/发现/我）+ 左右两个点九气泡。")
                     GuideLine("2", "必须点「应用」", "无论是内置主题还是自己新建的主题，选中后都要点右上角「应用」才会生效。")
                     GuideLine("3", "应用后会自动重启", "点「应用」后会自动热重启微信，重开就能看到效果；重启失败时才需要手动划掉微信重开。")
-                    GuideLine("4", "内置主题", "内置主题只能调透明度，不能改素材；长按卡片可以重命名、改描述；内置主题不能分享。")
+                    GuideLine("4", "主界面即时设置", "上方背景与文字颜色设置只作用于正在使用的主题，无需重启。四页可共用一张图片，也可单独选择或恢复；内置主题同样适用。")
                     GuideLine("5", "自己做/分享", "新建主题 → 选图片 → 保存 → 右上角应用；分享按钮只分享自己的主题。")
                     GuideLine("6", "聊天页规则", "主题只作用于主页/通讯录/发现/我 4 个界面，永远不影响聊天页；聊天页背景由微信自带，或用「随机聊天背景」图池。")
                     GuideLine("7", "透明度为什么封顶 70%", "背景越不透明越容易盖住文字、时间和分割线。70% 是「背景够明显、文字还看得清」的平衡点，默认 40%。")
@@ -1101,16 +1233,18 @@ private fun SwitchRow(title: String, summary: String, checked: Boolean, onChange
 
 @Composable
 private fun OpacityRow(tick: Int) {
-    val context = LocalContext.current
     var pct by remember(tick) { mutableStateOf(ThemeStore.overlayOpacity()) }
+    val clearBackground = remember(tick) { ThemeStore.usePageBackground() }
     Column(modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("壁纸透明度", fontSize = 15.sp, color = titleColor(), modifier = Modifier.weight(1f))
+            Text(if (clearBackground) "兼容/聊天壁纸透明度" else "壁纸透明度", fontSize = 15.sp,
+                color = titleColor(), modifier = Modifier.weight(1f))
             Text("$pct%", fontSize = 13.sp, color = summaryColor())
         }
         Text(
-            text = "默认 40%，最高 70%。再往上背景会压住文字、时间、分割线，" +
-                "聊天列表和消息就看不清了，所以封在 70%。",
+            text = if (clearBackground) "全屏连续背景按原图显示；此项控制聊天壁纸与兼容显示的透明度。" else
+                "默认 40%，最高 70%。再往上背景会压住文字、时间、分割线，" +
+                    "聊天列表和消息就看不清了，所以封在 70%。",
             fontSize = 11.sp,
             color = summaryColor(),
         )
@@ -1124,36 +1258,88 @@ private fun OpacityRow(tick: Int) {
                 activeTrackColor = MiuixTheme.colorScheme.primary,
             ),
         )
-        // 渲染方式（2026-10-27 重写为「DecorView 前景遮罩」，只有一种实现）：
-        // 画在所有内容之上、不往视图树塞节点、不拦点击。这里固定展示实现名与实时挂载状态，
-        // 点一下 = 立即重写一次（换主题/改素材后可直接点这里验证）。
-        val maskState = remember(tick) { ThemeStore.maskBrief() }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable {
-                    runCatching { ThemeStore.reapplyNow() }
-                    showToast(context, "已重写前景遮罩（${ThemeStore.maskBrief()}），回微信看看")
-                }
-                .padding(top = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("壁纸渲染方式", fontSize = 15.sp, color = titleColor())
-                Text(
-                    text = "前景遮罩：画在所有内容之上、不改页面结构、不拦点击；浓淡用上面的透明度调",
-                    fontSize = 11.sp,
-                    color = summaryColor(),
-                )
-            }
-            Text(
-                text = maskState,
-                fontSize = 11.sp,
-                maxLines = 1,
-                color = MiuixTheme.colorScheme.primary,
-            )
-        }
     }
+}
+
+@Composable
+private fun MainWallpaperRow(title: String, summary: String, onPick: () -> Unit, onReset: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f).clickable(onClick = onPick).padding(vertical = 4.dp)) {
+            Text(title, fontSize = 15.sp, color = titleColor())
+            Spacer(Modifier.height(2.dp))
+            Text(summary, fontSize = 12.sp, color = summaryColor(), maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        TextButton(onClick = onPick) { Text("选择图片") }
+        TextButton(onClick = onReset) { Text("恢复") }
+    }
+}
+
+private fun rgbHex(color: Int): String = "#%06X".format(color and 0xFFFFFF)
+
+@Composable
+private fun RgbColorDialog(initialColor: Int?, onDismiss: () -> Unit, onApply: (Int) -> Unit) {
+    var color by remember { mutableStateOf(initialColor ?: android.graphics.Color.BLACK) }
+    var hex by remember { mutableStateOf(rgbHex(color)) }
+    val digits = hex.trim().removePrefix("#")
+    val valid = digits.length == 6 && digits.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("标题颜色") },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier.size(40.dp).clip(RoundedCornerShape(10.dp))
+                            .background(Color(color)).border(1.dp, summaryColor(), RoundedCornerShape(10.dp)),
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text("颜色预览 · ${rgbHex(color)}", fontSize = 14.sp, color = titleColor())
+                }
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = hex,
+                    onValueChange = { value ->
+                        hex = value
+                        val valueDigits = value.trim().removePrefix("#")
+                        if (valueDigits.length == 6) {
+                            valueDigits.toIntOrNull(16)?.let { color = it or 0xFF000000.toInt() }
+                        }
+                    },
+                    label = { Text("RGB 颜色（#RRGGBB）") },
+                    isError = !valid,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (!valid) Text("请输入六位十六进制颜色，如 #336699", fontSize = 12.sp, color = summaryColor())
+                listOf("R" to 16, "G" to 8, "B" to 0).forEach { (label, shift) ->
+                    val channel = (color ushr shift) and 0xFF
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("$label  $channel", fontSize = 13.sp, color = titleColor(), modifier = Modifier.width(56.dp))
+                        Slider(
+                            value = channel.toFloat(),
+                            onValueChange = { value ->
+                                color = (color and (0xFF shl shift).inv()) or (value.toInt().coerceIn(0, 255) shl shift)
+                                hex = rgbHex(color)
+                            },
+                            valueRange = 0f..255f,
+                            modifier = Modifier.weight(1f),
+                            colors = SliderDefaults.colors(
+                                thumbColor = MiuixTheme.colorScheme.primary,
+                                activeTrackColor = MiuixTheme.colorScheme.primary,
+                            ),
+                        )
+                    }
+                }
+                Text("保存后即时生效；需开启「主界面文字颜色」。", fontSize = 12.sp, color = summaryColor())
+            }
+        },
+        confirmButton = { TextButton(onClick = { onApply(color) }, enabled = valid) { Text("应用") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 @Composable

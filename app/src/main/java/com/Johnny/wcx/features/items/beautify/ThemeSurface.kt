@@ -259,7 +259,7 @@ internal object ThemeSurface {
             if (entered) {
                 noteEvent("识别到聊天页 → 撤壁纸 + 容器兜底不透明")
                 // 撤掉主界面壁纸层（双保险之一；另一层是容器自身的挡色背景）
-                runCatching { TabWallpaperRenderer.clear(activity) }
+                runCatching { TabWallpaperRenderer.clear(activity); restoreWindow(activity) }
             }
             return
         }
@@ -297,8 +297,15 @@ internal object ThemeSurface {
             }
         }
 
-        if (wasVisible && onMainPage) {
-            noteEvent("离开聊天页 → 重挂壁纸")
+        if (!onMainPage || !ThemeStore.wallpaperSwitchOn()) return
+        val attached = isAttached(activity)
+        val hasWallpaper = ThemeStore.mainWallpaperEnabled() && (attached ||
+            fileForTab(ThemeMaterials.tabWallpaperFiles(ThemeStore.activeThemeIdOrEmpty()), currentTabIndex(activity)) != null)
+        val needsWallpaper = hasWallpaper && !attached
+        val needsText = ThemeStore.mainTextColorEnabled() && !MainPageAppearance.isApplied(activity) &&
+            (ThemeStore.mainTitleColor() != null || (hasWallpaper && ThemeStore.usePageBackground()))
+        if (onMainPage && (wasVisible || ((needsWallpaper || needsText) && activity.window?.decorView?.hasWindowFocus() == true))) {
+            noteEvent("主页面图层缺失或离开聊天页 → 重挂壁纸")
             runCatching { applyTabWallpapers(activity) }
         }
     }
@@ -316,10 +323,25 @@ internal object ThemeSurface {
     /** 当前前台 Activity 的类名（诊断用）。 */
     fun foregroundName(): String = resumedRef?.get()?.javaClass?.simpleName ?: "null"
 
-    /** 记录哪些 Activity 真的挂过，避免对没挂过的页面白跑 removeWallpaper。 */
-    private val wallpaperAttached = java.util.WeakHashMap<Activity, Boolean>()
+    /** 挂载状态只从真实图层读取，撤销后不保留另一份布尔标记。 */
+    fun isAttached(activity: Activity): Boolean = TabWallpaperRenderer.isMasked(activity)
 
-    fun isAttached(activity: Activity): Boolean = wallpaperAttached[activity] == true
+    var lastWallpaperDrawDecision = "尚未判定"
+        private set
+
+    private fun canDrawWallpaper(): Boolean {
+        val decision = when {
+            !onMainPage -> "拦截：未确认主页面（${ChatPageGuard.mainPageInfo}）"
+            chatPageVisible -> "拦截：聊天页可见"
+            !ThemeStore.wallpaperSwitchOn() -> "拦截：主题开关关闭"
+            else -> "允许"
+        }
+        if (decision != lastWallpaperDrawDecision) {
+            lastWallpaperDrawDecision = decision
+            WeLogger.i(TAG, "背景绘制判定：$decision")
+        }
+        return decision == "允许"
+    }
 
     /** 已挂过切页监听的 adapter，避免每次进主页重复 hook。 */
     private val hookedTabsAdapters: MutableSet<Any> =
@@ -367,7 +389,7 @@ internal object ThemeSurface {
             resumedRef = java.lang.ref.WeakReference(activity)
             noteEvent("前台 → ${activity.javaClass.simpleName}")
             // 总开关关掉时一个字节都不动，避免「关了主题还在改窗口 / 还在挂背景」
-            if (!ThemeStore.wallpaperSwitchOn() || ThemeStore.activeThemeIdOrEmpty().isEmpty()) return
+            if (!ThemeStore.wallpaperSwitchOn()) return
             // 非主界面进前台：先把主界面遮罩藏掉（聊天页半透明时会透出后面这张壁纸）
             if (!ThemePages.isLauncher(activity)) hideLauncherWallpapers()
             // 回前台若判定「还在聊天页」（如相册 → 聊天页返回），不挂壁纸，免得闪一帧又浸透。
@@ -401,8 +423,8 @@ internal object ThemeSurface {
         override fun onActivityStopped(activity: Activity) {}
         override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
         override fun onActivityDestroyed(activity: Activity) {
+            if (ThemePages.isLauncher(activity)) TabWallpaperRenderer.clear(activity)
             windowBackups.remove(System.identityHashCode(activity))
-            wallpaperAttached.remove(activity)
         }
     }
 
@@ -429,7 +451,6 @@ internal object ThemeSurface {
         val actRef: WeakReference<Activity>,
         val statusBarColor: Int,
         val navBarColor: Int,
-        val sysUi: Int,
         val contrastStatusEnforced: Boolean,
         val contrastNavEnforced: Boolean
     )
@@ -451,7 +472,6 @@ internal object ThemeSurface {
                     WeakReference(activity),
                     w.statusBarColor,
                     w.navigationBarColor,
-                    w.decorView.systemUiVisibility,
                     Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && w.isStatusBarContrastEnforced,
                     Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && w.isNavigationBarContrastEnforced
                 )
@@ -463,9 +483,6 @@ internal object ThemeSurface {
                 w.isStatusBarContrastEnforced = false
                 w.isNavigationBarContrastEnforced = false
             }
-            @Suppress("DEPRECATION")
-            w.decorView.systemUiVisibility = w.decorView.systemUiVisibility or
-                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         } catch (e: Throwable) {
             WeLogger.w(TAG, "applyImmersive 异常：${e.message}", e)
         }
@@ -483,8 +500,6 @@ internal object ThemeSurface {
                 act.window?.isStatusBarContrastEnforced = backup.contrastStatusEnforced
                 act.window?.isNavigationBarContrastEnforced = backup.contrastNavEnforced
             }
-            @Suppress("DEPRECATION")
-            act.window?.decorView?.systemUiVisibility = backup.sysUi
         } catch (e: Throwable) {
             WeLogger.w(TAG, "restoreWindow 异常：${e.message}", e)
         }
@@ -513,8 +528,6 @@ internal object ThemeSurface {
      * - 其它页面：不动；只有真的挂过才去还原
      */
     fun applyTo(activity: Activity) {
-        if (ThemeStore.activeThemeIdOrEmpty().isEmpty()) return
-        applyImmersive(activity)
         when {
             ThemePages.isScanner(activity) || ThemePages.isPhotoViewer(activity) -> removeWallpaper(activity)
             ThemePages.isChatting(activity) -> {
@@ -526,7 +539,7 @@ internal object ThemeSurface {
                 // 任何其它页面（设置页 / 朋友圈 / 小程序 / 扫码…）在前台时，
                 // 主界面遮罩一律隐藏：主题只允许出现在主页/通讯录/发现/我 这 4 个 Tab 上。
                 hideLauncherWallpapers()
-                if (wallpaperAttached[activity] == true) removeWallpaper(activity)
+                if (isAttached(activity)) removeWallpaper(activity)
             }
         }
     }
@@ -628,9 +641,9 @@ internal object ThemeSurface {
         return null
     }
 
-    /** tabIndex 对应的图片文件；该页没设就退回第一张有图的页。 */
+    /** 素材层已解析继承规则；有效页码的 null 表示用户明确恢复了原生背景。 */
     private fun fileForTab(files: List<java.io.File?>, tab: Int): java.io.File? =
-        files.getOrNull(tab) ?: files.firstOrNull { it != null }
+        if (tab in 0..3) files.getOrNull(tab) else files.firstOrNull { it != null }
 
     /**
      * 主界面窗口焦点监听：进聊天页 / 其它页面时**必然失焦**，这是最可靠的一道闸。
@@ -651,7 +664,7 @@ internal object ThemeSurface {
                 // 且「获得焦点」回调不保证与失焦对称（实测日志：丢一次就永久没图）。
                 // 撤壁纸只由「聊天页状态」与「非 Launcher 的 Activity 到前台」决定，见 hideLauncherWallpapers()。
                 if (hasFocus) {
-                    if (ThemeStore.wallpaperSwitchOn() && ThemeStore.activeThemeIdOrEmpty().isNotEmpty() && !chatPageVisible) {
+                    if (ThemeStore.wallpaperSwitchOn() && !chatPageVisible) {
                         noteEvent("主界面获得焦点 → 补挂")
                         WeLogger.i(TAG, "主界面重新获得窗口焦点 → 补挂壁纸遮罩")
                         runCatching { applyTabWallpapers(activity) }
@@ -693,7 +706,7 @@ internal object ThemeSurface {
      */
     fun onTabSelected(activity: Activity, position: Int) {
         runCatching { checkChatPage(activity) }
-        if (position == lastTabIndex) return
+        if (position == TabWallpaperRenderer.lastTab && isAttached(activity)) return
         lastTabIndex = position
         runCatching { updateTabWallpaper(activity, position) }
             .onFailure { WeLogger.w(TAG, "切 Tab 换背景（onPageSelected）失败：${it.message}") }
@@ -702,84 +715,65 @@ internal object ThemeSurface {
     /**
      * 挂 / 刷新 4 个页面的背景。
      *
-     * 不往视图树塞任何节点（不占 index、不依赖自绘层布局），
-     * 全部交给 [TabWallpaperRenderer] 写 DecorView 的 foreground。
+     * 由 [TabWallpaperRenderer] 选择全屏窗口底图或兼容的 foreground 遮罩。
      */
-    private fun applyTabWallpapers(activity: Activity) {
-        // 【总开关闸】焦点补挂 / 切页 / 锚点离开 等所有入口最终都会走到这里。
-        // 总开关关掉时一律拦掉，并把已挂的清干净 —— 否则关掉主题后 4 个界面还显示背景。
+    private fun applyTabWallpapers(activity: Activity, tabHint: Int? = null) {
         if (!ThemeStore.wallpaperSwitchOn()) {
-            runCatching {
-                TabWallpaperRenderer.clear(activity)
-                wallpaperAttached.remove(activity)
-            }
+            TabWallpaperRenderer.clear(activity)
+            restoreWindow(activity)
             return
         }
-        // 【正向闸】挂载前刷新「是否在 4 个 Tab 主页面」：不在主页面一律不挂。
-        // 聊天页与二级页面都不需要壁纸，挂上去只会带来「挂着却要挡着不画」的不一致。
-        runCatching { onMainPage = ChatPageGuard.detectMainPage(activity, chatPageVisible) }
-        if (!onMainPage) {
-            noteEvent("挂载前识别到非主页面 → 跳过挂载")
-            return
-        }
-        if (wallpaperFailStreak >= 3) return
-        val decor = activity.window?.decorView as? ViewGroup
-        if (decor == null) {
-            WeLogger.w(TAG, "跳过挂载：decorView 不可用（${activity.javaClass.name}）")
-            return
-        }
-        // 装一次焦点监听 / 聊天页检测监听
+        val decor = activity.window?.decorView as? ViewGroup ?: return
+        // 首次布局可能还没有 Tab；先安装监听，布局完成后才能补挂。
         ensureWindowFocusWatcher(activity, decor)
         ensureChatWatcher(activity, decor)
-        // 不再因「没有窗口焦点」拒绝挂载：返回主界面时焦点常晚几十~几百毫秒才到，
-        // 一旦拒绝就再没人补挂 → 表现为「退回主界面 4 页全空」。
-        // DecorView 的 foreground 只在该窗口可见时才绘制，后台挂着不会漏到别的页面。
-        val activeId = ThemeStore.activeThemeIdOrEmpty()
-        val files = runCatching { ThemeMaterials.tabWallpaperFiles(activeId) }.getOrDefault(emptyList())
-        if (files.all { it == null }) {
-            WeLogger.w(TAG, "跳过挂载：当前主题没有可用壁纸文件（active=$activeId）")
+        runCatching { onMainPage = ChatPageGuard.detectMainPage(activity, chatPageVisible) }
+        if (!onMainPage || chatPageVisible) {
             TabWallpaperRenderer.clear(activity)
+            restoreWindow(activity)
+            noteEvent("非主页面或聊天页可见 → 撤下主页主题")
             return
         }
-        // 以当前真实页码为准：LauncherUI 重建后 lastTabIndex 是上一次的残值，会挂错图
-        val tab = currentTabIndex(activity).takeIf { it in 0..3 } ?: lastTabIndex
-        if (tab in 0..3) lastTabIndex = tab
-        // 页码取不到时兜底第一张可用图，宁可显示「主页」那张，也不要一片空白
-        val file = fileForTab(files, tab) ?: files.firstOrNull { it != null }
-        val alphaPct = ThemeStore.overlayOpacity()
-        val result = TabWallpaperRenderer.apply(activity, file, tab, alphaPct) {
-            onMainPage && !chatPageVisible && ThemeStore.wallpaperSwitchOn()
+        val tab = tabHint?.takeIf { it in 0..3 } ?: currentTabIndex(activity)
+        lastTabIndex = tab
+        val files = if (ThemeStore.mainWallpaperEnabled()) {
+            runCatching { ThemeMaterials.tabWallpaperFiles(ThemeStore.activeThemeIdOrEmpty()) }.getOrDefault(emptyList())
+        } else emptyList()
+        val file = fileForTab(files, tab)
+        if (file == null || wallpaperFailStreak >= 3) {
+            TabWallpaperRenderer.clear(activity)
+            restoreWindow(activity)
+            MainPageAppearance.apply(activity, null, ThemeStore.mainTextColorEnabled(), ThemeStore.mainTitleColor()) {
+                canDrawWallpaper()
+            }
+            if (file == null) wallpaperFailStreak = 0
+            return
         }
+        val fullscreen = ThemeStore.usePageBackground()
+        if (fullscreen) restoreWindow(activity)
+        val result = TabWallpaperRenderer.apply(
+            activity, file, tab, ThemeStore.overlayOpacity(), fullscreen,
+            ThemeStore.mainTextColorEnabled(), ThemeStore.mainTitleColor()
+        ) { canDrawWallpaper() }
         if (result != "ok") {
             wallpaperFailStreak += 1
             WeLogger.w(TAG, "挂载 4 页背景失败（第 $wallpaperFailStreak 次）：$result")
             return
         }
+        if (!fullscreen) applyImmersive(activity)
         wallpaperFailStreak = 0
-        wallpaperAttached[activity] = true
-        noteEvent("挂上 Tab=$tab ${file?.name ?: "null"}")
-
+        noteEvent("挂上 Tab=$tab ${file.name}")
         val info = files.mapIndexed { i, f -> "${TAB_NAMES[i]}=${f != null}" }.joinToString("，")
-        val logKey = "$info|tab=$tab|${file?.absolutePath}"
+        val logKey = "$info|tab=$tab|${file.absolutePath}"
         if (logKey != lastLoggedWallpaper) {
             lastLoggedWallpaper = logKey
-            WeLogger.i(TAG, "4 页背景已写入前景遮罩（$info），Tab=$tab，文件=${file?.absolutePath ?: "null"}")
+            WeLogger.i(TAG, "4 页背景已写入（$info），Tab=$tab，文件=${file.absolutePath}")
         }
     }
 
-    /** 切 Tab：换一张图（同一套前景遮罩，只换 bitmap）。 */
+    /** 切页与恢复使用同一套开关、选图和文字规则。 */
     private fun updateTabWallpaper(activity: Activity, position: Int) {
-        runCatching {
-            if (!ThemeStore.wallpaperSwitchOn()) return@runCatching
-            if (wallpaperAttached[activity] != true) return@runCatching
-            val files = ThemeMaterials.tabWallpaperFiles(ThemeStore.activeThemeIdOrEmpty())
-            if (files.all { it == null }) return@runCatching
-            val file = fileForTab(files, position) ?: files.firstOrNull { it != null }
-            val result = TabWallpaperRenderer.apply(activity, file, position, ThemeStore.overlayOpacity()) {
-                onMainPage && !chatPageVisible && ThemeStore.wallpaperSwitchOn()
-            }
-            WeLogger.i(TAG, "切页换图 → Tab=$position 文件=${file?.name ?: "null"} 结果=$result")
-        }.onFailure { WeLogger.w(TAG, "切 Tab 换背景失败：${it.message}") }
+        applyTabWallpapers(activity, position)
     }
 
     /** 改透明度后重挂一次（前景遮罩的 alpha 每次 apply 重算）。 */
@@ -803,7 +797,7 @@ internal object ThemeSurface {
         anchorLeaveSince = 0L
         runCatching {
             liveActivities().forEach { act ->
-                if (ThemePages.isLauncher(act)) TabWallpaperRenderer.clear(act)
+                if (ThemePages.isLauncher(act)) { TabWallpaperRenderer.clear(act); restoreWindow(act) }
             }
         }
         (fragmentView as? ViewGroup)?.let { runCatching { ChatPageGuard.ensureOpaque(it) } }
@@ -872,6 +866,7 @@ internal object ThemeSurface {
                 // 只置 null 的话遮罩对象仍在，任何一次重挂/保活都会把它写回来，
                 // 聊天页（半透明窗口）就会透出主界面壁纸。
                 TabWallpaperRenderer.clear(act)
+                restoreWindow(act)
             }
         }.onFailure { WeLogger.w(TAG, "撤掉主界面遮罩失败：${it.message}") }
     }
@@ -936,7 +931,6 @@ internal object ThemeSurface {
             }
         }
         restoreWindowBackground(activity)
-        wallpaperAttached.remove(activity)
     }
 
     /** 撤掉所有存活页面的壁纸与窗口还原。 */
@@ -971,7 +965,7 @@ internal object ThemeSurface {
                 "  content=" + (content?.let { "${it.javaClass.simpleName} childCount=${it.childCount}" } ?: "未找到")
             )
             appendLine("  " + runCatching { TabWallpaperRenderer.describe(activity) }.getOrDefault("遮罩诊断异常"))
-            appendLine("  wallpaperAttached=" + (wallpaperAttached[activity] == true))
+            appendLine("  背景图层当前挂载=" + isAttached(activity))
         }
     }
 }
