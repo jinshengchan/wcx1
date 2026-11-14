@@ -83,6 +83,9 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     /** 壁纸透明度（%），5~70。 */
     private var overlayOpacityPct by prefOption("theme_store_overlay_opacity", 40)
 
+    /** Optional four-tab background renderer. The previous foreground renderer remains a fallback. */
+    private var pageBackgroundEnabled by prefOption("theme_store_page_background", false)
+
     // ══════════════════════════════════════════════════════════
     // Feature 生命周期
     // ══════════════════════════════════════════════════════════
@@ -524,11 +527,20 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         ThemeSurface.refreshAlpha()
     }
 
+    fun usePageBackground(): Boolean = pageBackgroundEnabled
+
+    fun setUsePageBackground(enabled: Boolean) {
+        if (pageBackgroundEnabled == enabled) return
+        pageBackgroundEnabled = enabled
+        ThemeSurface.resetFailStreak()
+        ThemeSurface.applyToAllLive()
+    }
+
     // ══════════════════════════════════════════════════════════
-    // 渲染方式（2026-10-27 重写后只有一种实现：DecorView 前景遮罩）
+    // 渲染方式：四页底图为可选模式，原有 DecorView 前景遮罩用于兼容回退
     // ══════════════════════════════════════════════════════════
 
-    fun renderModeName(): String = "前景遮罩（压在内容上，不改页面结构）"
+    fun renderModeName(): String = if (usePageBackground()) "页面底图（实验）" else "前景遮罩（兼容）"
 
     /** 设置页常驻展示的遮罩状态（挂没挂上、多久之前挂的）。 */
     fun maskBrief(): String = runCatching {
@@ -541,7 +553,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     fun reapplyNow() {
         invalidateWallpaperCache()
         ThemeSurface.applyToAllLive()
-        WeLogger.i(TAG, "手动重写前景遮罩：${TabWallpaperRenderer.lastResult}")
+        WeLogger.i(TAG, "手动重写主题背景：${TabWallpaperRenderer.lastResult}")
     }
 
     /** 换主题 / 改素材 / 改透明度后清图缓存，避免拿到旧图。 */
@@ -624,6 +636,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         )
         appendLine("  文件=${TabWallpaperRenderer.lastPath}")
         appendLine("壁纸透明度 = ${overlayOpacity()}%")
+        appendLine("四页渲染方式 = ${renderModeName()}")
         appendLine("自定义气泡开关 = " + runCatching { WePrefs.getBoolOrFalse(CUSTOM_BUBBLES_PREF_KEY) }.getOrDefault(false))
         appendLine(
             "气泡文件存在 = left:" + ThemePaths.activeBubble(ThemePaths.LEFT_BUBBLE_FILE).exists() +

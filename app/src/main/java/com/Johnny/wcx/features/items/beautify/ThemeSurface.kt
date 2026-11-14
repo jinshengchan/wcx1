@@ -401,6 +401,7 @@ internal object ThemeSurface {
         override fun onActivityStopped(activity: Activity) {}
         override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
         override fun onActivityDestroyed(activity: Activity) {
+            if (ThemePages.isLauncher(activity)) TabWallpaperRenderer.clear(activity)
             windowBackups.remove(System.identityHashCode(activity))
             wallpaperAttached.remove(activity)
         }
@@ -703,7 +704,7 @@ internal object ThemeSurface {
      * 挂 / 刷新 4 个页面的背景。
      *
      * 不往视图树塞任何节点（不占 index、不依赖自绘层布局），
-     * 全部交给 [TabWallpaperRenderer] 写 DecorView 的 foreground。
+     * 由 [TabWallpaperRenderer] 选择页面内容底图或兼容的 foreground 遮罩。
      */
     private fun applyTabWallpapers(activity: Activity) {
         // 【总开关闸】焦点补挂 / 切页 / 锚点离开 等所有入口最终都会走到这里。
@@ -719,6 +720,7 @@ internal object ThemeSurface {
         // 聊天页与二级页面都不需要壁纸，挂上去只会带来「挂着却要挡着不画」的不一致。
         runCatching { onMainPage = ChatPageGuard.detectMainPage(activity, chatPageVisible) }
         if (!onMainPage) {
+            TabWallpaperRenderer.clear(activity)
             noteEvent("挂载前识别到非主页面 → 跳过挂载")
             return
         }
@@ -747,7 +749,7 @@ internal object ThemeSurface {
         // 页码取不到时兜底第一张可用图，宁可显示「主页」那张，也不要一片空白
         val file = fileForTab(files, tab) ?: files.firstOrNull { it != null }
         val alphaPct = ThemeStore.overlayOpacity()
-        val result = TabWallpaperRenderer.apply(activity, file, tab, alphaPct) {
+        val result = TabWallpaperRenderer.apply(activity, file, tab, alphaPct, ThemeStore.usePageBackground()) {
             onMainPage && !chatPageVisible && ThemeStore.wallpaperSwitchOn()
         }
         if (result != "ok") {
@@ -763,7 +765,7 @@ internal object ThemeSurface {
         val logKey = "$info|tab=$tab|${file?.absolutePath}"
         if (logKey != lastLoggedWallpaper) {
             lastLoggedWallpaper = logKey
-            WeLogger.i(TAG, "4 页背景已写入前景遮罩（$info），Tab=$tab，文件=${file?.absolutePath ?: "null"}")
+            WeLogger.i(TAG, "4 页背景已写入（$info），Tab=$tab，文件=${file?.absolutePath ?: "null"}")
         }
     }
 
@@ -775,7 +777,7 @@ internal object ThemeSurface {
             val files = ThemeMaterials.tabWallpaperFiles(ThemeStore.activeThemeIdOrEmpty())
             if (files.all { it == null }) return@runCatching
             val file = fileForTab(files, position) ?: files.firstOrNull { it != null }
-            val result = TabWallpaperRenderer.apply(activity, file, position, ThemeStore.overlayOpacity()) {
+            val result = TabWallpaperRenderer.apply(activity, file, position, ThemeStore.overlayOpacity(), ThemeStore.usePageBackground()) {
                 onMainPage && !chatPageVisible && ThemeStore.wallpaperSwitchOn()
             }
             WeLogger.i(TAG, "切页换图 → Tab=$position 文件=${file?.name ?: "null"} 结果=$result")

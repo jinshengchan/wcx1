@@ -77,7 +77,7 @@ import java.io.File
  * 交互约定（用户明确要求）：
  * - 点卡片/下拉只是「选中」，不生效；必须点右上角「应用」才算应用，且要划掉微信重开
  * - 内置主题只能调透明度，不能改名称/素材；长按可重命名/改描述，但不能分享
- * - 壁纸永远在最底层，文字永远在上层，透明度拉满也不会挡字
+ * - 四页清晰背景可选择绘制在页面内容下方；兼容模式仍使用前景遮罩
  */
 @Composable
 fun ThemeWorkshopScreen(onBack: () -> Unit) {
@@ -1103,14 +1103,35 @@ private fun SwitchRow(title: String, summary: String, checked: Boolean, onChange
 private fun OpacityRow(tick: Int) {
     val context = LocalContext.current
     var pct by remember(tick) { mutableStateOf(ThemeStore.overlayOpacity()) }
+    var clearBackground by remember(tick) { mutableStateOf(ThemeStore.usePageBackground()) }
     Column(modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("壁纸透明度", fontSize = 15.sp, color = titleColor(), modifier = Modifier.weight(1f))
+            Column(modifier = Modifier.weight(1f)) {
+                Text("清晰四页背景（试验）", fontSize = 15.sp, color = titleColor())
+                Text(
+                    "背景画在微信、通讯录、发现、我页面的内容下方；异常时可关闭并恢复兼容方式",
+                    fontSize = 11.sp,
+                    color = summaryColor(),
+                )
+            }
+            Switch(
+                checked = clearBackground,
+                onCheckedChange = { enabled ->
+                    clearBackground = enabled
+                    ThemeStore.setUsePageBackground(enabled)
+                },
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(if (clearBackground) "兼容/聊天壁纸透明度" else "壁纸透明度", fontSize = 15.sp,
+                color = titleColor(), modifier = Modifier.weight(1f))
             Text("$pct%", fontSize = 13.sp, color = summaryColor())
         }
         Text(
-            text = "默认 40%，最高 70%。再往上背景会压住文字、时间、分割线，" +
-                "聊天列表和消息就看不清了，所以封在 70%。",
+            text = if (clearBackground) "四页底图按原图显示；此项仍控制聊天壁纸和兼容回退的透明度。" else
+                "默认 40%，最高 70%。再往上背景会压住文字、时间、分割线，" +
+                    "聊天列表和消息就看不清了，所以封在 70%。",
             fontSize = 11.sp,
             color = summaryColor(),
         )
@@ -1124,24 +1145,22 @@ private fun OpacityRow(tick: Int) {
                 activeTrackColor = MiuixTheme.colorScheme.primary,
             ),
         )
-        // 渲染方式（2026-10-27 重写为「DecorView 前景遮罩」，只有一种实现）：
-        // 画在所有内容之上、不往视图树塞节点、不拦点击。这里固定展示实现名与实时挂载状态，
-        // 点一下 = 立即重写一次（换主题/改素材后可直接点这里验证）。
-        val maskState = remember(tick) { ThemeStore.maskBrief() }
+        val maskState = remember(tick, clearBackground) { ThemeStore.maskBrief() }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable {
                     runCatching { ThemeStore.reapplyNow() }
-                    showToast(context, "已重写前景遮罩（${ThemeStore.maskBrief()}），回微信看看")
+                    showToast(context, "已重写主题背景（${ThemeStore.maskBrief()}），回微信看看")
                 }
                 .padding(top = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("壁纸渲染方式", fontSize = 15.sp, color = titleColor())
+                Text("壁纸渲染方式 · ${ThemeStore.renderModeName()}", fontSize = 15.sp, color = titleColor())
                 Text(
-                    text = "前景遮罩：画在所有内容之上、不改页面结构、不拦点击；浓淡用上面的透明度调",
+                    text = if (clearBackground) "页面底图：不插入微信子视图；点击可重新应用" else
+                        "前景遮罩：画在内容之上；浓淡用上面的透明度调",
                     fontSize = 11.sp,
                     color = summaryColor(),
                 )

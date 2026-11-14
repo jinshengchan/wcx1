@@ -71,13 +71,13 @@ internal object TabWallpaperRenderer {
         private set
     @Volatile private var lastDrawable: WallpaperMaskDrawable? = null
 
-    private fun ok(activity: Activity, file: File, tab: Int, alphaPct: Int): String {
+    private fun ok(activity: Activity, file: File, tab: Int, alphaPct: Int, mode: String = "前景遮罩"): String {
         lastAt = System.currentTimeMillis()
         lastTab = tab
         lastPath = file.absolutePath
         lastAlphaPct = alphaPct
-        lastResult = "ok"
-        WeLogger.d(TAG, "前景遮罩已写入 ${activity.javaClass.simpleName} tab=$tab alpha=${alphaPct}% ${file.name}")
+        lastResult = "ok($mode)"
+        WeLogger.d(TAG, "$mode 已写入 ${activity.javaClass.simpleName} tab=$tab alpha=${alphaPct}% ${file.name}")
         return "ok"
     }
 
@@ -100,6 +100,7 @@ internal object TabWallpaperRenderer {
         file: File?,
         tab: Int,
         alphaPct: Int,
+        useUnderlay: Boolean = false,
         shouldDraw: () -> Boolean = { true }
     ): String {
         val decor = activity.window?.decorView as? ViewGroup ?: return fail("decorView 不可用")
@@ -109,6 +110,16 @@ internal object TabWallpaperRenderer {
         }
         if (!file.exists()) return fail("文件不存在：${file.absolutePath}")
         val bmp = loadBitmap(file) ?: return fail("解码失败：${file.absolutePath}")
+
+        var underlayFailure: String? = null
+        if (useUnderlay) {
+            clearForeground(activity)
+            val result = PageWallpaperUnderlay.apply(activity, bmp, shouldDraw)
+            if (result == "ok") return ok(activity, file, tab, 100, "页面底图")
+            underlayFailure = result
+            WeLogger.w(TAG, "页面底图未就绪，使用兼容遮罩：$result")
+        }
+        PageWallpaperUnderlay.clear(activity)
 
         val mask = WallpaperMaskDrawable(bmp, shouldDraw)
         mask.setAlpha(alphaPct.coerceIn(MIN_ALPHA_PCT, MAX_ALPHA_PCT) * 255 / 100)
@@ -125,7 +136,9 @@ internal object TabWallpaperRenderer {
         }
         runCatching { decor.invalidate() }
         reassertLater(activity, mask, alphaPct)
-        return ok(activity, file, tab, alphaPct)
+        val result = ok(activity, file, tab, alphaPct)
+        if (underlayFailure != null) lastResult = "回退前景遮罩：$underlayFailure"
+        return result
     }
 
     /**
@@ -156,6 +169,11 @@ internal object TabWallpaperRenderer {
 
     /** 彻底撤销：还回窗口原来的 foreground。 */
     fun clear(activity: Activity) {
+        PageWallpaperUnderlay.clear(activity)
+        clearForeground(activity)
+    }
+
+    private fun clearForeground(activity: Activity) {
         val decor = activity.window?.decorView as? ViewGroup ?: return
         if (masked.remove(decor) == null) return
         val mask = masks.remove(decor)
@@ -166,10 +184,12 @@ internal object TabWallpaperRenderer {
     }
 
     fun isMasked(activity: Activity): Boolean =
-        runCatching { masked[activity.window?.decorView as? ViewGroup] == true }.getOrDefault(false)
+        PageWallpaperUnderlay.isAttached(activity) ||
+            runCatching { masked[activity.window?.decorView as? ViewGroup] == true }.getOrDefault(false)
 
     /** 诊断文本：这一屏到底有没有遮罩、画了几次、尺寸多少。 */
     fun describe(activity: Activity): String {
+        if (PageWallpaperUnderlay.isAttached(activity)) return PageWallpaperUnderlay.describe(activity)
         val decor = activity.window?.decorView as? ViewGroup ?: return "decorView 不可用"
         val mask = masks[decor]
         val fg = decor.foreground
