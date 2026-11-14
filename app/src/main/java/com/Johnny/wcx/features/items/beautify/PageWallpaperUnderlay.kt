@@ -4,8 +4,12 @@ import android.app.Activity
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
+import android.graphics.drawable.DrawableWrapper
+import android.graphics.drawable.LayerDrawable
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -32,6 +36,7 @@ internal object PageWallpaperUnderlay {
         val pager = WeakReference(pager)
         val image = WeakReference(image)
         val patches = ArrayList<Patch>()
+        val retainedRows = LinkedHashSet<String>()
         var observer: WeakReference<ViewTreeObserver>? = null
         var listener: ViewTreeObserver.OnPreDrawListener? = null
         var visited = 0
@@ -124,13 +129,21 @@ internal object PageWallpaperUnderlay {
             return
         }
         state.visited = 0
+        state.retainedRows.clear()
         state.patches.removeAll { it.view.get() == null }
+        val visibleRect = Rect()
         fun walk(view: View, depth: Int) {
-            if (depth > MAX_DEPTH || state.visited++ >= MAX_NODES || view.visibility != View.VISIBLE) return
-            if (view !is ViewGroup) return
-            // Structural page/list surfaces only; never clear rows, cards, text or bubbles.
-            if (view.width < host.width * 0.75f || view.height < host.height * 0.45f) return
-            makeTransparent(state, view)
+            if (view !is ViewGroup || view.visibility != View.VISIBLE || !view.getGlobalVisibleRect(visibleRect)) return
+            if (depth > MAX_DEPTH || state.visited++ >= MAX_NODES) return
+            // Short full-width rows also cover the image; icons/avatars and narrow cards do not.
+            if (view.width < host.width * 0.75f) return
+            val structural = view.height >= host.height * 0.45f
+            val background = view.background
+            if (structural || isNeutralSurface(background)) {
+                makeTransparent(state, view, structural)
+            } else if (background != null && background !is SurfaceBackground && state.retainedRows.size < 6) {
+                state.retainedRows.add("${view.javaClass.simpleName}/${background.javaClass.simpleName}")
+            }
             for (i in 0 until view.childCount) {
                 walk(view.getChildAt(i) ?: continue, depth + 1)
                 if (state.visited >= MAX_NODES) break
@@ -145,7 +158,7 @@ internal object PageWallpaperUnderlay {
         walk(pager, 0)
     }
 
-    private fun makeTransparent(state: State, view: View) {
+    private fun makeTransparent(state: State, view: View, structural: Boolean = true) {
         val patch = state.patches.firstOrNull { it.view.get() === view }
         if (patch != null && view.background === patch.installed.get()) return
         val original = view.background
@@ -153,7 +166,7 @@ internal object PageWallpaperUnderlay {
             if (patch != null) state.patches.remove(patch)
             return
         }
-        val transparent = ColorDrawable(Color.TRANSPARENT)
+        val transparent = if (structural) ColorDrawable(Color.TRANSPARENT) else SurfaceBackground(original)
         if (patch == null) {
             state.patches.add(Patch(WeakReference(view), original, WeakReference(transparent)))
         } else {
@@ -161,6 +174,43 @@ internal object PageWallpaperUnderlay {
             patch.installed = WeakReference(transparent)
         }
         view.background = transparent
+        // View.setBackground clears the old drawable's callback after constructing the wrapper.
+        if (transparent is SurfaceBackground) original.callback = transparent
+    }
+
+    private fun isNeutralSurface(drawable: Drawable?, depth: Int = 0): Boolean {
+        if (drawable == null || depth > 4) return false
+        val current = drawable.current
+        if (current !== drawable) return isNeutralSurface(current, depth + 1)
+        return when (drawable) {
+            is ColorDrawable -> {
+                val color = drawable.color
+                Color.alpha(color) == 0 || (Color.alpha(color) == 255 &&
+                    maxOf(Color.red(color), Color.green(color), Color.blue(color)) -
+                    minOf(Color.red(color), Color.green(color), Color.blue(color)) <= 10)
+            }
+            is DrawableWrapper -> isNeutralSurface(drawable.drawable, depth + 1)
+            is LayerDrawable -> {
+                val layers = (0 until drawable.numberOfLayers).filter { drawable.getId(it) != android.R.id.mask }
+                layers.isNotEmpty() && layers.all { isNeutralSurface(drawable.getDrawable(it), depth + 1) }
+            }
+            else -> false
+        }
+    }
+
+    /** Suppress only idle neutral fill; the platform wrapper forwards padding, states and ripple callbacks. */
+    private class SurfaceBackground(original: Drawable) : DrawableWrapper(original) {
+        @Deprecated("Deprecated in Java")
+        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+
+        override fun draw(canvas: Canvas) {
+            val feedback = state.any {
+                it == android.R.attr.state_pressed || it == android.R.attr.state_focused ||
+                    it == android.R.attr.state_selected || it == android.R.attr.state_activated ||
+                    it == android.R.attr.state_checked
+            }
+            if (feedback || !isNeutralSurface(drawable)) super.draw(canvas)
+        }
     }
 
     private fun restore(state: State) {
@@ -202,7 +252,9 @@ internal object PageWallpaperUnderlay {
         return "页面底图=${if (isAttached(activity)) "已挂载" else "图层已脱离"} " +
             "容器=${host?.javaClass?.name} 尺寸=${image?.width}x${image?.height} 可见=${image?.isShown} " +
             "绘制=${image?.drawCount}次 跳过=${image?.skipCount}次 " +
-            "检查=${state.visited} 透明底色=${state.patches.size}"
+            "检查=${state.visited} 透明底色=${state.patches.size} " +
+            "行底色=${state.patches.count { it.installed.get() is SurfaceBackground }} " +
+            "保留行背景=${state.retainedRows.joinToString(",").ifEmpty { "无" }}"
     }
 
     private class WallpaperView(host: FrameLayout, var shouldDraw: () -> Boolean) : ImageView(host.context) {
