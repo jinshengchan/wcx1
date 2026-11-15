@@ -403,6 +403,33 @@ internal object PageWallpaperUnderlay {
         return if (found.isEmpty()) "无" else found.joinToString(",")
     }
 
+    /** ListView 实况诊断：报每个可见 ListView 的实时背景（不是补丁状态）+ 补丁装没装 + 是否被接管。
+     * 用来确认 MainPageAppearance 是否每帧把 ListView 刷回灰。只读，不改任何背景。 */
+    private fun listViewLiveState(decor: ViewGroup, state: State): String {
+        val found = ArrayList<String>()
+        var visited = 0
+        fun visit(view: View, depth: Int) {
+            if (depth > MAX_DEPTH || visited++ >= MAX_NODES || found.size >= 4) return
+            if (view is ListView && view.visibility == View.VISIBLE) {
+                val background = view.background
+                val patch = state.patches.firstOrNull { it.view.get() === view }
+                val patchState = when {
+                    patch == null -> "补丁=无"
+                    background === patch.installed.get() -> "补丁=已装"
+                    else -> "补丁=未装"
+                }
+                val owns = MainSurfaceBackgrounds.owns(view)
+                found.add("${view.javaClass.simpleName}/实背景=${background?.javaClass?.simpleName ?: "null"}${background?.let { retainedDetail(it) } ?: ""} $patchState 接管=$owns")
+            }
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                visit(view.getChildAt(i) ?: continue, depth + 1)
+                if (visited >= MAX_NODES || found.size >= 4) break
+            }
+        }
+        runCatching { visit(decor, 0) }.onFailure { return "未知" }
+        return if (found.isEmpty()) "无" else found.joinToString(";")
+    }
+
     private fun isNeutralSurface(drawable: Drawable?, depth: Int = 0): Boolean {
         if (drawable == null || depth > 4) return false
         val current = drawable.current
@@ -579,7 +606,8 @@ internal object PageWallpaperUnderlay {
             "宿主回写=${state.hostWrites} 最近恢复原因=${restoreReasons[decor] ?: "无"} " +
             "行底色=${state.patches.count { !it.structural }} " +
             "保留行背景=${state.retainedRows.joinToString(",").ifEmpty { "无" }} " +
-            "弹跳视图=${bounceViewBackgrounds(decor)}"
+            "弹跳视图=${bounceViewBackgrounds(decor)}" +
+            " ListView实况=${listViewLiveState(decor, state)}"
     }
 
     private class WindowWallpaper(var bitmap: Bitmap, var shouldDraw: () -> Boolean) : Drawable() {
