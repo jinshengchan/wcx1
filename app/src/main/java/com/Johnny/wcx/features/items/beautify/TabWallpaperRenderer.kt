@@ -63,13 +63,13 @@ internal object TabWallpaperRenderer {
         private set
     @Volatile private var lastDrawable: WallpaperMaskDrawable? = null
 
-    private fun ok(activity: Activity, file: File, tab: Int, alphaPct: Int, mode: String = "前景遮罩"): String {
+    private fun ok(activity: Activity, source: String, tab: Int, alphaPct: Int, mode: String = "前景遮罩"): String {
         lastAt = System.currentTimeMillis()
         lastTab = tab
-        lastPath = file.absolutePath
+        lastPath = source
         lastAlphaPct = alphaPct
         lastResult = "ok($mode)"
-        WeLogger.d(TAG, "$mode 已写入 ${activity.javaClass.simpleName} tab=$tab alpha=${alphaPct}% ${file.name}")
+        WeLogger.d(TAG, "$mode 已写入 ${activity.javaClass.simpleName} tab=$tab alpha=${alphaPct}% $source")
         return "ok"
     }
 
@@ -95,6 +95,8 @@ internal object TabWallpaperRenderer {
         useUnderlay: Boolean = false,
         textColorEnabled: Boolean = true,
         titleColor: Int? = null,
+        profile: ThemeProfile? = null,
+        backgroundOpacity: Float = 1f,
         shouldDraw: () -> Boolean = { true }
     ): String {
         val decor = activity.window?.decorView as? ViewGroup ?: return fail("decorView 不可用")
@@ -102,22 +104,45 @@ internal object TabWallpaperRenderer {
             clear(activity)
             return fail("本页没有壁纸文件")
         }
-        if (!file.exists()) return fail("文件不存在：${file.absolutePath}")
-        val bmp = loadBitmap(file) ?: return fail("解码失败：${file.absolutePath}")
+        if (!file.exists()) { clear(activity); return fail("文件不存在：${file.absolutePath}") }
+        val bmp = loadBitmap(file) ?: run { clear(activity); return fail("解码失败：${file.absolutePath}") }
+        return renderDecoded(activity, bmp, file.absolutePath, tab, alphaPct, useUnderlay,
+            textColorEnabled, titleColor, profile, backgroundOpacity, shouldDraw)
+    }
+
+    fun applyColor(activity: Activity, argb: Int, tab: Int, textColorEnabled: Boolean = true,
+                   titleColor: Int? = null, profile: ThemeProfile? = null, shouldDraw: () -> Boolean = { true }): String {
+        val key = "solid:$argb"
+        val bitmap = bitmapCache[key]?.takeUnless { it.isRecycled } ?: Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+            .apply { eraseColor(argb); bitmapCache[key] = this }
+        return renderDecoded(activity, bitmap, String.format("solid:#%08X", argb), tab, 100, true,
+            textColorEnabled, titleColor, profile, 1f, shouldDraw, false)
+    }
+
+    private fun renderDecoded(activity: Activity, bmp: Bitmap, source: String, tab: Int, alphaPct: Int,
+                              useUnderlay: Boolean, textColorEnabled: Boolean, titleColor: Int?,
+                              profile: ThemeProfile?, opacity: Float, shouldDraw: () -> Boolean,
+                              allowForegroundFallback: Boolean = true): String {
+        val decor = activity.window?.decorView as? ViewGroup ?: return fail("decorView 不可用")
 
         var underlayFailure: String? = null
         if (useUnderlay) {
             clearForeground(activity)
-            val result = PageWallpaperUnderlay.apply(activity, bmp, shouldDraw)
+            val result = PageWallpaperUnderlay.apply(activity, bmp, opacity, shouldDraw)
             if (result == "ok") {
-                MainPageAppearance.apply(activity, bmp, textColorEnabled, titleColor, shouldDraw)
-                return ok(activity, file, tab, 100, "全屏底图")
+                MainPageAppearance.apply(activity, bmp, textColorEnabled, titleColor, profile, opacity,
+                    PageWallpaperUnderlay.backdropColor(activity), ThemeStore.mainWallpaperEnabled(), shouldDraw)
+                return ok(activity, source, tab, (opacity * 100).toInt(), "全屏底图")
+            }
+            if (!allowForegroundFallback) {
+                MainPageAppearance.apply(activity, null, textColorEnabled, titleColor, profile, shouldDraw)
+                return fail("等待底图：$result")
             }
             underlayFailure = result
             WeLogger.w(TAG, "页面底图未就绪，使用兼容遮罩：$result")
         }
         PageWallpaperUnderlay.clear(activity)
-        MainPageAppearance.apply(activity, null, textColorEnabled, titleColor, shouldDraw)
+        MainPageAppearance.apply(activity, null, textColorEnabled, titleColor, profile, shouldDraw)
 
         val mask = WallpaperMaskDrawable(bmp, shouldDraw)
         mask.setAlpha(alphaPct.coerceIn(MIN_ALPHA_PCT, MAX_ALPHA_PCT) * 255 / 100)
@@ -134,7 +159,7 @@ internal object TabWallpaperRenderer {
         }
         runCatching { decor.invalidate() }
         reassertLater(activity, mask, alphaPct)
-        val result = ok(activity, file, tab, alphaPct)
+        val result = ok(activity, source, tab, alphaPct)
         if (underlayFailure != null) lastResult = "回退前景遮罩：$underlayFailure"
         return result
     }

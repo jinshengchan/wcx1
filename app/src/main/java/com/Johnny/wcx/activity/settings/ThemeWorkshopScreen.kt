@@ -88,9 +88,14 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
     var packs by remember { mutableStateOf(ThemePack.list()) }
     var active by remember { mutableStateOf(ThemeStore.activeThemeIdOrEmpty()) }
     // 待应用的主题（内置 id 或主题包 id）；点「应用」才写进 ThemeStore
-    var selectedId by remember { mutableStateOf(ThemeStore.activeThemeIdOrEmpty()) }
-    var editing by remember { mutableStateOf<ThemePack.Pack?>(null) }
-    var pendingRole by remember { mutableStateOf("") }
+    var selectedId by rememberSaveable { mutableStateOf(ThemeStore.activeThemeIdOrEmpty()) }
+    var editing by remember { mutableStateOf<ThemePack.Pack?>(ThemePack.find(selectedId)) }
+    var pendingRole by rememberSaveable { mutableStateOf("") }
+    var pendingThemeId by rememberSaveable { mutableStateOf("") }
+    var pendingMainThemeId by rememberSaveable { mutableStateOf("") }
+    var pendingTabThemeId by rememberSaveable { mutableStateOf("") }
+    var pendingTabIndex by rememberSaveable { mutableStateOf(-1) }
+    var pendingTabSelected by rememberSaveable { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var showPicker by remember { mutableStateOf(false) }
     var showGuide by remember { mutableStateOf(false) }
@@ -113,8 +118,8 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
     var showRandomPool by remember { mutableStateOf(false) }
     var poolFiles by remember { mutableStateOf(ThemePack.randomPoolFiles()) }
 
-    var draftName by remember { mutableStateOf("") }
-    var draftDesc by remember { mutableStateOf("") }
+    var draftName by rememberSaveable { mutableStateOf(editing?.name.orEmpty()) }
+    var draftDesc by rememberSaveable { mutableStateOf(editing?.manifest?.optString("description").orEmpty()) }
     var descVisible by remember { mutableStateOf(false) }
     var tick by remember { mutableStateOf(0) }
     var pendingMainIndex by rememberSaveable { mutableStateOf(-1) }
@@ -148,23 +153,35 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
         tick++
     }
 
+    fun editableActive(): Boolean {
+        val id = ThemeStore.activeThemeIdOrEmpty()
+        if (id.isBlank() || ThemePack.find(id) != null) return true
+        ThemeStore.cloneTheme(id)
+            .onSuccess { copy -> refreshAll(); select(copy.id); showToast(context, "已复制内置主题，请先应用副本再编辑当前主题") }
+            .onFailure { showToast(context, "复制失败：${it.message}") }
+        return false
+    }
+
     fun saveCurrent(): Boolean {
         // editing 只在「手动点选主题」时才有值。直接点右上「应用」时它是 null，
         // 原来会直接 return false → 弹「保存失败」（用户必须重新点一下主题才能应用）。
         // 这里用当前选中的主题兜底。
         val pack = editing ?: ThemePack.find(selectedId) ?: return false
-        ThemePack.updateMeta(pack, draftName, draftDesc.trim())
-        ThemePack.saveSwitches(pack, ThemeExtras.currentSwitches())
+        if (ThemePack.updateMeta(pack, draftName, draftDesc.trim()) == null) return false
         refreshAll()
         ThemePack.find(pack.id)?.let { loadDraft(it) }
         return true
     }
 
     /** 真正执行应用（写配置 → 提示划掉微信重开）。 */
-    fun doApply() {
+    fun doApply(enableFeature: Boolean = false) {
         val id = selectedId
         if (id.isBlank()) {
             showToast(context, "先选一个主题")
+            return
+        }
+        if (ThemeStore.profileSnapshot(id) == null) {
+            showToast(context, "应用失败：主题配置无效")
             return
         }
         val pack = ThemePack.find(id)
@@ -173,9 +190,17 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                 showToast(context, "保存失败")
                 return
             }
-            // 主题包里存的开关快照，应用时一起同步
-            runCatching { ThemeExtras.applySwitches(ThemePack.switches(pack)) }
-                .onFailure { WeLogger.w("ThemeWorkshop", "同步开关失败：${it.message}") }
+        }
+        if (ThemeStore.profileSnapshot(id) == null) {
+            showToast(context, "应用失败：主题配置无效")
+            return
+        }
+        if (enableFeature) {
+            val feature = findFeature("主题工坊")
+            if (feature != null) {
+                runCatching { WePrefs.putBool(feature.name, true); feature.isEnabled = true }
+                    .onFailure { showToast(context, "打开失败：${it.message}"); return }
+            }
         }
         runCatching { ThemeStore.applyThemeById(id) }
             .onFailure {
@@ -183,6 +208,10 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                 showToast(context, "应用失败：${it.message}")
                 return
             }
+        if (pack != null) {
+            runCatching { ThemeExtras.applySwitches(ThemePack.switches(ThemePack.find(id) ?: pack)) }
+                .onFailure { WeLogger.w("ThemeWorkshop", "同步开关失败：${it.message}") }
+        }
         refreshAll()
         // 应用后直接热重启微信（用微信自己的 KillProcessHelperActivity，等同用户手动重开）
         // 热重启；失败才走「请手动划掉微信」的兜底提示
@@ -230,13 +259,47 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
 
     val pickImageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        val pack = editing
+        val pack = ThemePack.find(pendingThemeId)
         if (pack == null || pendingRole.isEmpty()) return@rememberLauncherForActivityResult
         val ninePatch = pendingRole.startsWith("bubble_")
         ThemePack.writeImage(pack, context, uri, pendingRole, ninePatch)?.let { updated ->
-            loadDraft(updated)
-            showToast(context, "已选择：${roleLabel(pendingRole)}，记得点「保存」")
-        }
+            if (selectedId == updated.id) editing = updated
+            refreshAll()
+            showToast(context, "已选择：${roleLabel(pendingRole)}")
+        } ?: showToast(context, "素材保存失败，请检查图片格式和可用空间")
+    }
+
+    val pickTabIconLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        runCatching {
+            require(pendingTabIndex in 0..3) { "标签序号无效" }
+            val snapshot = requireNotNull(ThemeStore.profileSnapshot(pendingTabThemeId)) { "原主题已不可用" }
+            val source = File.createTempFile("theme-tab-", ".tmp", context.cacheDir)
+            try {
+                context.contentResolver.openInputStream(uri)?.use { input -> source.outputStream().use { input.copyTo(it) } }
+                    ?: error("读不到这张图片")
+                val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(source.absolutePath, options)
+                require(options.outWidth > 0 && options.outHeight > 0) { "请选择有效的图片" }
+                options.inJustDecodeBounds = false
+                options.inSampleSize = 1
+                while (maxOf(options.outWidth, options.outHeight) / options.inSampleSize > 512) options.inSampleSize *= 2
+                val preview = BitmapFactory.decodeFile(source.absolutePath, options) ?: error("这张图片无法解码")
+                preview.recycle()
+                val json = snapshot.profile.toJson()
+                val appearance = json.getJSONObject("appearance")
+                val chrome = appearance.optJSONObject("chrome") ?: org.json.JSONObject().also { appearance.put("chrome", it) }
+                val icons = chrome.optJSONObject("tabIcons") ?: org.json.JSONObject().also { chrome.put("tabIcons", it) }
+                val state = if (pendingTabSelected) "selected" else "normal"
+                val existing = icons.optJSONArray(state) ?: json.optJSONArray("tab")
+                val values = org.json.JSONArray()
+                val relative = "edits/${java.util.UUID.randomUUID()}/tab.img"
+                repeat(4) { index -> values.put(if (index == pendingTabIndex) relative else existing?.opt(index) ?: org.json.JSONObject.NULL) }
+                icons.put(state, values)
+                ThemeStore.updateThemeProfile(json, mapOf(relative to source), pendingTabThemeId).getOrThrow()
+            } finally { source.delete() }
+        }.onSuccess { refreshAll(); showToast(context, "图标已保存") }
+            .onFailure { showToast(context, "保存失败：${it.message}") }
     }
 
     val pickPoolImageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -251,25 +314,54 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
 
     val pickMainImageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        ThemeStore.setMainWallpaper(context, uri, pendingMainIndex.takeIf { it in 0..3 })
+        val targetId = pendingMainThemeId
+        val result = if (ThemeStore.activeThemeIdOrEmpty() == targetId) {
+            ThemeStore.setMainWallpaper(context, uri, pendingMainIndex.takeIf { it in 0..3 })
+        } else runCatching {
+            val snapshot = requireNotNull(ThemeStore.profileSnapshot(targetId)) { "原主题已不可用" }
+            val source = File.createTempFile("theme-picker-", ".tmp", context.cacheDir)
+            try {
+                context.contentResolver.openInputStream(uri)?.use { input -> source.outputStream().use { input.copyTo(it) } }
+                    ?: error("读不到这张图片")
+                val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(source.absolutePath, options)
+                require(options.outWidth > 0 && options.outHeight > 0) { "请选择有效的图片" }
+                options.inJustDecodeBounds = false
+                options.inSampleSize = 1
+                while (maxOf(options.outWidth, options.outHeight) / options.inSampleSize > 512) options.inSampleSize *= 2
+                val preview = BitmapFactory.decodeFile(source.absolutePath, options) ?: error("这张图片无法解码")
+                preview.recycle()
+                val json = snapshot.profile.toJson()
+                val pages = json.getJSONObject("appearance").getJSONObject("pages")
+                val keys = listOf("chats", "contacts", "discover", "me")
+                val indices = pendingMainIndex.takeIf { it in 0..3 }?.let { listOf(it) } ?: keys.indices.toList()
+                val relative = "edits/${java.util.UUID.randomUUID()}/wallpaper.img"
+                indices.forEach { pages.put(keys[it], org.json.JSONObject().put("kind", "image").put("asset", relative)) }
+                ThemeStore.updateThemeProfile(json, mapOf(relative to source), targetId).getOrThrow()
+            } finally { source.delete() }
+        }
+        result
             .onSuccess {
                 refreshAll()
                 if (editing?.id == active) editing = ThemePack.find(active)
-                showToast(context, "主界面背景已更新，即时生效")
+                showToast(context, if (targetId == active) "主界面背景已更新，即时生效" else "原主题的背景草稿已更新")
             }
             .onFailure { showToast(context, "设置失败：${it.message}") }
     }
 
     fun pickMainImage(index: Int?) {
+        if (!editableActive()) return
         if (ThemeStore.activeThemeIdOrEmpty().isBlank()) {
             showToast(context, "先选择并应用一套主题，再设置主界面背景")
             return
         }
         pendingMainIndex = index ?: -1
+        pendingMainThemeId = ThemeStore.activeThemeIdOrEmpty()
         pickMainImageLauncher.launch("image/*")
     }
 
     fun resetMainImages(indices: Set<Int>) {
+        if (!editableActive()) return
         ThemeStore.resetMainWallpapers(indices)
             .onSuccess {
                 refreshAll()
@@ -320,19 +412,25 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                             },
                         )
                         DropdownMenuItem(
+                            text = { Text("复制为新主题") },
+                            onClick = {
+                                menuOpen = false
+                                ThemeStore.cloneTheme(selectedId)
+                                    .onSuccess { pack ->
+                                        refreshAll()
+                                        select(pack.id)
+                                        showToast(context, "已复制：${pack.name}，编辑后点「应用」")
+                                    }
+                                    .onFailure { showToast(context, "复制失败：${it.message}") }
+                            },
+                        )
+                        DropdownMenuItem(
                             text = { Text("导出主题") },
                             onClick = {
                                 menuOpen = false
-                                val pack = ThemePack.find(selectedId)
-                                if (pack == null) {
-                                    showToast(context, "内置主题不能导出/分享，请先选一个自己的主题")
-                                } else {
-                                    val file = ThemePack.exportZip(pack).getOrNull()
-                                    showToast(
-                                        context,
-                                        if (file != null) "已导出：${file.absolutePath}" else "导出失败",
-                                    )
-                                }
+                                ThemeStore.exportTheme(selectedId)
+                                    .onSuccess { showToast(context, "已导出：${it.absolutePath}") }
+                                    .onFailure { showToast(context, "导出失败：${it.message}") }
                             },
                         )
                         DropdownMenuItem(
@@ -414,6 +512,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                         summary = "只控制最近聊天、通讯录、发现、我四页背景，关闭后恢复原生背景",
                         checked = backgroundOn,
                     ) { enabled ->
+                        if (!editableActive()) return@SwitchRow
                         ThemeStore.setMainWallpaperEnabled(enabled)
                         refreshAll()
                     }
@@ -459,6 +558,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                         summary = "随主题功能总开关生效；关闭后恢复微信原生文字和图标颜色，开启后即时应用下方设置",
                         checked = textColorOn,
                     ) { enabled ->
+                        if (!editableActive()) return@SwitchRow
                         ThemeStore.setMainTextColorEnabled(enabled)
                         refreshAll()
                     }
@@ -468,7 +568,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(
-                            modifier = Modifier.weight(1f).clickable { showTitleColor = true }.padding(vertical = 4.dp),
+                            modifier = Modifier.weight(1f).clickable { if (editableActive()) showTitleColor = true }.padding(vertical = 4.dp),
                         ) {
                             Text("标题颜色", fontSize = 15.sp, color = titleColor())
                             Spacer(Modifier.height(2.dp))
@@ -481,10 +581,11 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                         Box(
                             modifier = Modifier.size(28.dp).clip(RoundedCornerShape(8.dp))
                                 .background(customTitleColor?.let { Color(it) } ?: MiuixTheme.colorScheme.primary)
-                                .clickable { showTitleColor = true },
+                                .clickable { if (editableActive()) showTitleColor = true },
                         )
-                        TextButton(onClick = { showTitleColor = true }) { Text("选择") }
+                        TextButton(onClick = { if (editableActive()) showTitleColor = true }) { Text("选择") }
                         TextButton(onClick = {
+                            if (!editableActive()) return@TextButton
                             ThemeStore.setMainTitleColor(null)
                             refreshAll()
                         }) { Text("恢复") }
@@ -496,6 +597,8 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
             // ── 卡片1 主题基础 ───────────────────────────────
             item {
                 GroupCard(title = "主题基础") {
+                    ThemeModeSettings(selectedId, tick) { refreshAll() }
+                    RowDivider()
                     // 随机聊天背景：开关 + 齿轮（管理图池，最多 5 张）
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 12.dp),
@@ -598,8 +701,13 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                         selectedId.isBlank() -> HintRow("先在下面「默认主题」或「我的主题」里点一张卡片选中它。")
                         // 内置主题：素材只读，主界面即时设置在上方
                         pack == null -> {
-                            HintRow("内置主题的气泡素材不可编辑；主界面背景与文字颜色在上方即时设置。长按卡片可重命名或改描述。")
+                            HintRow("内置主题只读，复制后可编辑副本。")
                             BuiltinPreviewStrip(selectedId)
+                            PillButton("复制并编辑", Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                                ThemeStore.cloneTheme(selectedId)
+                                    .onSuccess { copy -> refreshAll(); select(copy.id) }
+                                    .onFailure { showToast(context, "复制失败：${it.message}") }
+                            }
                         }
                         else -> {
                             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
@@ -631,29 +739,37 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                             RowDivider()
                             ThemePreview(pack)
                             RowDivider()
+                            ThemeProfileSettings(pack.id, tick, onPickTab = { index, selected ->
+                                pendingTabThemeId = pack.id
+                                pendingTabIndex = index
+                                pendingTabSelected = selected
+                                pickTabIconLauncher.launch("image/*")
+                            }) { refreshAll() }
+                            RowDivider()
+                            ThemeOwnedSettings(pack.id, tick) { refreshAll() }
                             MaterialRow("主页背景", "wallpaper_chats", pack, pendingRole,
-                                { role -> pendingRole = role; pickImageLauncher.launch("image/*") },
-                                { updated -> loadDraft(updated) },
+                                { role -> pendingRole = role; pendingThemeId = pack.id; pickImageLauncher.launch("image/*") },
+                                { updated -> editing = updated; tick++ },
                             )
                             MaterialRow("通讯录背景", "wallpaper_contacts", pack, pendingRole,
-                                { role -> pendingRole = role; pickImageLauncher.launch("image/*") },
-                                { updated -> loadDraft(updated) },
+                                { role -> pendingRole = role; pendingThemeId = pack.id; pickImageLauncher.launch("image/*") },
+                                { updated -> editing = updated; tick++ },
                             )
                             MaterialRow("发现页背景", "wallpaper_discover", pack, pendingRole,
-                                { role -> pendingRole = role; pickImageLauncher.launch("image/*") },
-                                { updated -> loadDraft(updated) },
+                                { role -> pendingRole = role; pendingThemeId = pack.id; pickImageLauncher.launch("image/*") },
+                                { updated -> editing = updated; tick++ },
                             )
                             MaterialRow("我的背景", "wallpaper_me", pack, pendingRole,
-                                { role -> pendingRole = role; pickImageLauncher.launch("image/*") },
-                                { updated -> loadDraft(updated) },
+                                { role -> pendingRole = role; pendingThemeId = pack.id; pickImageLauncher.launch("image/*") },
+                                { updated -> editing = updated; tick++ },
                             )
                             MaterialRow("消息气泡 · 左（对方）", "bubble_left", pack, pendingRole,
-                                { role -> pendingRole = role; pickImageLauncher.launch("*/*") },
-                                { updated -> loadDraft(updated) },
+                                { role -> pendingRole = role; pendingThemeId = pack.id; pickImageLauncher.launch("*/*") },
+                                { updated -> editing = updated; tick++ },
                             )
                             MaterialRow("消息气泡 · 右（自己）", "bubble_right", pack, pendingRole,
-                                { role -> pendingRole = role; pickImageLauncher.launch("*/*") },
-                                { updated -> loadDraft(updated) },
+                                { role -> pendingRole = role; pendingThemeId = pack.id; pickImageLauncher.launch("*/*") },
+                                { updated -> editing = updated; tick++ },
                             )
                         }
                     }
@@ -747,18 +863,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
             confirmButton = {
                 TextButton(onClick = {
                     enableConfirm = false
-                    val feature = findFeature("主题工坊")
-                    if (feature != null) {
-                        runCatching {
-                            WePrefs.putBool(feature.name, true)
-                            feature.isEnabled = true
-                        }.onFailure {
-                            WeLogger.w("ThemeWorkshop", "打开主题总开关失败：${it.message}")
-                            showToast(context, "打开失败：${it.message}")
-                            return@TextButton
-                        }
-                    }
-                    doApply()
+                    doApply(enableFeature = true)
                 }) { Text("打开并应用") }
             },
             dismissButton = { TextButton(onClick = { enableConfirm = false }) { Text("取消") } },
@@ -1280,7 +1385,7 @@ private fun MainWallpaperRow(title: String, summary: String, onPick: () -> Unit,
 private fun rgbHex(color: Int): String = "#%06X".format(color and 0xFFFFFF)
 
 @Composable
-private fun RgbColorDialog(initialColor: Int?, onDismiss: () -> Unit, onApply: (Int) -> Unit) {
+internal fun RgbColorDialog(initialColor: Int?, onDismiss: () -> Unit, onApply: (Int) -> Unit) {
     var color by remember { mutableStateOf(initialColor ?: android.graphics.Color.BLACK) }
     var hex by remember { mutableStateOf(rgbHex(color)) }
     val digits = hex.trim().removePrefix("#")
@@ -1288,7 +1393,7 @@ private fun RgbColorDialog(initialColor: Int?, onDismiss: () -> Unit, onApply: (
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("标题颜色") },
+        title = { Text("选择颜色") },
         text = {
             Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1334,7 +1439,7 @@ private fun RgbColorDialog(initialColor: Int?, onDismiss: () -> Unit, onApply: (
                         )
                     }
                 }
-                Text("保存后即时生效；需开启「主界面文字颜色」。", fontSize = 12.sp, color = summaryColor())
+                Text("当前主题即时生效；其他主题保存为草稿。", fontSize = 12.sp, color = summaryColor())
             }
         },
         confirmButton = { TextButton(onClick = { onApply(color) }, enabled = valid) { Text("应用") } },
@@ -1480,7 +1585,15 @@ private fun MaterialRow(
     onReset: (ThemePack.Pack) -> Unit,
 ) {
     val context = LocalContext.current
-    val set = editing?.manifest?.optString(role)?.takeIf { it.isNotBlank() }
+    val snapshot = editing?.let { ThemeStore.profileSnapshot(it.id) }
+    val set = if (role.startsWith("bubble_") && snapshot != null) {
+        val key = if (role == "bubble_left") "leftBubble" else "rightBubble"
+        when (val rule = snapshot.profile.background("chat", key)) {
+            is com.Johnny.wcx.features.items.beautify.BackgroundRule.Image -> rule.asset
+            com.Johnny.wcx.features.items.beautify.BackgroundRule.Inherit -> snapshot.profile.toJson().optString(role).takeIf { it.isNotBlank() }
+            else -> null
+        }
+    } else editing?.manifest?.optString(role)?.takeIf { it.isNotBlank() }
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
         Text(title, fontSize = 15.sp, color = titleColor())
         Spacer(Modifier.height(2.dp))
@@ -1503,8 +1616,18 @@ private fun MaterialRow(
                 if (pack == null) {
                     showToast(context, "先新建或选择一个主题")
                 } else {
-                    ThemePack.resetRole(pack, role)?.let(onReset)
-                    showToast(context, "已恢复默认：$title")
+                    val result = if (role.startsWith("bubble_")) {
+                        runCatching {
+                            val json = requireNotNull(ThemeStore.profileSnapshot(pack.id)) { "主题配置不可用" }.profile.toJson()
+                            resetBubbleRule(json, role)
+                            ThemeStore.updateThemeProfile(json, id = pack.id).getOrThrow()
+                            pack
+                        }
+                    } else runCatching { requireNotNull(ThemePack.resetRole(pack, role)) { "恢复失败" } }
+                    result.onSuccess { updated ->
+                        onReset(updated)
+                        showToast(context, "已恢复默认：$title")
+                    }.onFailure { showToast(context, "恢复失败：${it.message}") }
                 }
             }
         }
@@ -1758,16 +1881,9 @@ private fun roleLabel(role: String): String = when (role) {
     else -> role
 }
 
-/**
- * 分享指定主题（只有自己的主题包能分享；内置主题明确拒绝）。
- */
+/** 分享指定主题的完整配置与素材，不切换当前主题。 */
 private fun shareSelectedTheme(context: Context, id: String) {
-    val pack = ThemePack.find(id)
-    if (pack == null) {
-        showToast(context, "内置主题不能分享")
-        return
-    }
-    val file = ThemePack.exportZip(pack).getOrNull()
+    val file = ThemeStore.exportTheme(id).getOrNull()
     if (file == null) {
         showToast(context, "导出失败，无法分享")
         return

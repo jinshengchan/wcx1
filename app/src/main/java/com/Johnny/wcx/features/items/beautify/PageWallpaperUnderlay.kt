@@ -49,6 +49,7 @@ internal object PageWallpaperUnderlay {
         var attachListener: View.OnAttachStateChangeListener? = null
         var dirty = true
         var visited = 0
+        var hostWrites = 0
         var statusColor = window.statusBarColor
         var navColor = window.navigationBarColor
         var statusContrast = Build.VERSION.SDK_INT >= 29 && window.isStatusBarContrastEnforced
@@ -57,8 +58,13 @@ internal object PageWallpaperUnderlay {
     }
 
     private val states = WeakHashMap<ViewGroup, WeakReference<State>>()
+    private val restoreReasons = WeakHashMap<ViewGroup, String>()
 
     fun apply(activity: Activity, bitmap: Bitmap, shouldDraw: () -> Boolean): String {
+        return apply(activity, bitmap, 1f, shouldDraw)
+    }
+
+    fun apply(activity: Activity, bitmap: Bitmap, opacity: Float, shouldDraw: () -> Boolean): String {
         val window = activity.window ?: return "window 不可用"
         val decor = window.decorView as? ViewGroup ?: return "decorView 不可用"
         val content = decor.findViewById<ViewGroup>(android.R.id.content) ?: return "content 不可用"
@@ -73,12 +79,15 @@ internal object PageWallpaperUnderlay {
                 val installed = state
                 val listener = object : View.OnAttachStateChangeListener {
                     override fun onViewAttachedToWindow(view: View) {
+                        installed.pager.get()?.let { ThemeHostAdapter.track(decor, it, installed.wallpaper.shouldDraw) }
                         observe(installed, view)
                         installed.dirty = true
                         refresh(installed)
                     }
 
                     override fun onViewDetachedFromWindow(view: View) {
+                        ThemeHostAdapter.forget(decor)
+                        restoreReasons[decor] = "窗口 detach"
                         removeListeners(installed)
                         restore(installed)
                         restoreBackdrop(installed)
@@ -90,7 +99,9 @@ internal object PageWallpaperUnderlay {
                 WeLogger.i(TAG, "全屏底图已设置：${decor.width}x${decor.height}，未新增窗口子视图")
             }
             state.wallpaper.bitmap = bitmap
+            state.wallpaper.setAlpha((opacity.coerceIn(0f, 1f) * 255).toInt())
             state.wallpaper.shouldDraw = shouldDraw
+            ThemeHostAdapter.track(decor, pager, shouldDraw)
             observe(state, decor)
             state.wallpaper.invalidateSelf()
             state.dirty = true
@@ -126,7 +137,7 @@ internal object PageWallpaperUnderlay {
         state.layout = null
     }
 
-    private fun findPager(content: ViewGroup): ViewGroup? {
+    fun findPager(content: ViewGroup): ViewGroup? {
         var visited = 0
         fun walk(view: View, depth: Int): ViewGroup? {
             if (depth > MAX_DEPTH || visited++ >= MAX_NODES || view.visibility != View.VISIBLE) return null
@@ -149,6 +160,7 @@ internal object PageWallpaperUnderlay {
         val decor = state.decor.get() ?: return
         val pager = state.pager.get() ?: return
         if (!state.wallpaper.shouldDraw() || !decor.isShown || !pager.isShown) {
+            restoreReasons[decor] = "主页面守卫关闭或窗口不可见"
             restore(state)
             state.dirty = true
             restoreBackdrop(state)
@@ -156,15 +168,20 @@ internal object PageWallpaperUnderlay {
             return
         }
         if (decor.background !== state.wallpaper) {
+            if (state.wallpaper.drawCount > 0) state.hostWrites++
             state.originalBackdrop = decor.background
+            MainPageAppearance.updateBackdrop(decor, (decor.background?.current as? ColorDrawable)?.takeIf { it.alpha == 255 }?.color)
+            state.wallpaper.backdrop = decor.background
             decor.background = state.wallpaper
         }
         transparentBars(state)
         // Host background replacement need not trigger layout. Maintain known surfaces every frame.
         state.patches.toList().forEach { patch ->
             val view = patch.view.get() ?: return@forEach
+            if (MainSurfaceBackgrounds.owns(view)) return@forEach
             val installed = patch.installed.get()
             if (view.background !== installed) {
+                state.hostWrites++
                 val structural = patch.structural
                 if (structural || isNeutralSurface(view.background)) makeTransparent(state, view, structural)
                 else state.patches.remove(patch)
@@ -175,13 +192,14 @@ internal object PageWallpaperUnderlay {
         state.visited = 0
         state.retainedRows.clear()
         state.patches.removeAll { it.view.get() == null }
+        val structuralTargets = ThemeHostAdapter.structuralTargets(decor, pager)
         val visibleRect = Rect()
         fun walk(view: View, depth: Int) {
             if (depth > MAX_DEPTH || state.visited++ >= MAX_NODES || view.visibility != View.VISIBLE) return
             if (view is ImageView || !view.getGlobalVisibleRect(visibleRect)) return
             if (view !== decor) {
                 if (view.width < decor.width * 0.75f) return
-                val structural = view is ViewGroup && view.height >= decor.height * 0.45f
+                val structural = view in structuralTargets
                 val background = view.background
                 if (structural || isNeutralSurface(background)) {
                     makeTransparent(state, view, structural)
@@ -195,6 +213,14 @@ internal object PageWallpaperUnderlay {
             }
         }
         walk(decor, 0)
+    }
+
+    /** Called only for a row returned by the concrete adapter of a registered main-page list. */
+    fun onRowBound(decor: ViewGroup, list: ViewGroup, row: View) {
+        val state = states[decor]?.get() ?: return
+        if (!state.wallpaper.shouldDraw() || !decor.isShown || !list.isShown) return
+        state.dirty = true
+        if (row !is ImageView && isNeutralSurface(row.background)) makeTransparent(state, row, false)
     }
 
     @Suppress("DEPRECATION")
@@ -240,6 +266,7 @@ internal object PageWallpaperUnderlay {
     }
 
     private fun makeTransparent(state: State, view: View, structural: Boolean = true) {
+        if (MainSurfaceBackgrounds.owns(view)) return
         val patch = state.patches.firstOrNull { it.view.get() === view }
         if (patch != null && view.background === patch.installed.get()) return
         val original = view.background
@@ -311,13 +338,30 @@ internal object PageWallpaperUnderlay {
 
     fun clear(activity: Activity) {
         val decor = activity.window?.decorView as? ViewGroup ?: return
+        ThemeHostAdapter.forget(decor)
         val state = states.remove(decor)?.get() ?: return
+        restoreReasons[decor] = "clear（关闭、切换模式或离开主页）"
         removeListeners(state)
         state.attachListener?.let { decor.removeOnAttachStateChangeListener(it) }
         state.attachListener = null
         restore(state)
         restoreBackdrop(state)
         restoreBars(state)
+    }
+
+    fun originalBackground(view: View): Drawable? {
+        states.values.forEach { ref ->
+            ref.get()?.patches?.firstOrNull { it.view.get() === view }?.let { patch ->
+                if (view.background === patch.installed.get()) return patch.original
+            }
+        }
+        return view.background
+    }
+
+    fun backdropColor(activity: Activity): Int? {
+        val decor = activity.window?.decorView as? ViewGroup ?: return null
+        val original = states[decor]?.get()?.originalBackdrop ?: decor.background
+        return (original?.current as? ColorDrawable)?.takeIf { it.alpha == 255 }?.color
     }
 
     fun isAttached(activity: Activity): Boolean {
@@ -328,16 +372,18 @@ internal object PageWallpaperUnderlay {
 
     fun describe(activity: Activity): String? {
         val decor = activity.window?.decorView as? ViewGroup ?: return null
-        val state = states[decor]?.get() ?: return null
+        val state = states[decor]?.get() ?: return restoreReasons[decor]?.let { "最近恢复原因=$it" }
         return "全屏底图=${if (isAttached(activity)) "已挂载" else "已撤下或被覆盖"} " +
             "窗口=${decor.width}x${decor.height} 图片=${state.wallpaper.bitmap.width}x${state.wallpaper.bitmap.height} " +
             "绘制=${state.wallpaper.drawCount}次 跳过=${state.wallpaper.skipCount}次 " +
             "检查=${state.visited} 透明底色=${state.patches.size} " +
+            "宿主回写=${state.hostWrites} 最近恢复原因=${restoreReasons[decor] ?: "无"} " +
             "行底色=${state.patches.count { !it.structural }} " +
             "保留行背景=${state.retainedRows.joinToString(",").ifEmpty { "无" }}"
     }
 
     private class WindowWallpaper(var bitmap: Bitmap, var shouldDraw: () -> Boolean) : Drawable() {
+        var backdrop: Drawable? = null
         private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
         private val source = Rect()
         var drawCount = 0
@@ -349,6 +395,10 @@ internal object PageWallpaperUnderlay {
             if (!shouldDraw()) { skipCount++; return }
             val target = bounds
             if (bitmap.isRecycled || target.width() <= 0 || target.height() <= 0) return
+            backdrop?.let { original ->
+                original.setBounds(target.left, target.top, target.right, target.bottom)
+                original.draw(canvas)
+            }
             val ratio = target.width().toFloat() / target.height()
             if (bitmap.width.toFloat() / bitmap.height > ratio) {
                 val width = (bitmap.height * ratio).toInt().coerceAtLeast(1)

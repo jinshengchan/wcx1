@@ -12,8 +12,6 @@ import com.Johnny.wcx.features.api.ui.WeChatMessageViewApi
 import com.Johnny.wcx.features.api.ui.WeMainActivityBeautifyApi
 import com.Johnny.wcx.features.core.ClickableFeature
 import com.Johnny.wcx.features.core.Feature
-import com.Johnny.wcx.features.core.FeaturesProvider
-import com.Johnny.wcx.features.core.SwitchFeature
 import com.Johnny.wcx.preferences.WePrefs
 import com.Johnny.wcx.preferences.WePrefs.Companion.prefOption
 import com.Johnny.wcx.utils.reflection.ClassLoaders
@@ -94,6 +92,136 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     private var mainTextColorOn by prefOption("theme_store_main_text_color", true)
     private var mainTitleColorHex by prefOption("theme_store_main_title_color", "")
 
+    private val profileRepository by lazy { ThemeProfileRepository(File(ThemePaths.storeDir.toFile(), "profiles")) }
+
+    init {
+        ThemePack.snapshotProvider = { id -> profileSnapshot(id) }
+        ThemePack.onChanged = { pack, role -> syncPackEdit(pack, role) }
+    }
+
+    /** 渲染只读已校验的快照；每套主题首次读取时才迁移旧文件。 */
+    internal fun profileSnapshot(id: String = activeThemeId): ThemeProfileRepository.Snapshot? {
+        if (id.isBlank()) return null
+        return runCatching { profileRepository.read(id) { profileSeed(id) } }
+            .onFailure { WeLogger.w(TAG, "主题配置读取失败：$id / ${it.message}") }.getOrNull()
+    }
+
+    internal fun updateThemeProfile(
+        manifest: org.json.JSONObject,
+        assets: Map<String, File> = emptyMap(),
+        id: String = activeThemeId
+    ): Result<Unit> = runCatching {
+        requireNotNull(profileSnapshot(id)) { "主题配置不可用" }
+        profileRepository.save(id, manifest, assets)
+        if (id == activeThemeId) {
+            runCatching {
+                invalidateWallpaperCache()
+                ThemeRuntime.invalidate()
+                ThemeOwnedAppearance.invalidate()
+                CustomMessageBubbles.refreshBoundViews()
+                ThemeSurface.applyToAllLive()
+            }.onFailure { WeLogger.w(TAG, "主题已保存，刷新失败：${it.message}") }
+        }
+    }
+
+    private fun profileSeed(id: String): ThemeProfileRepository.Seed {
+        val pack = ThemePack.find(id)
+        val source: File
+        val manifest: org.json.JSONObject
+        if (pack != null) {
+            source = pack.dir
+            manifest = pack.profile.toJson()
+        } else {
+            val builtin = requireNotNull(BuiltinThemes.find(id)) { "未知主题：$id" }
+            ThemeMaterials.ensureExtracted(builtin)
+            source = ThemePaths.themeDir(builtin).toFile()
+            manifest = org.json.JSONObject().put("name", builtinDisplayName(id, builtin.name))
+                .put("author", "WCX").put("version", "1.0").put("description", builtinDesc(id))
+            ThemePaths.wallpaperFile(builtin).toFile().takeIf { it.isFile }?.let { manifest.put("wallpaper", it.name) }
+            ThemePaths.bubbleFile(builtin, ThemePaths.LEFT_BUBBLE_FILE).toFile().takeIf { it.isFile }?.let { manifest.put("bubble_left", it.name) }
+            ThemePaths.bubbleFile(builtin, ThemePaths.RIGHT_BUBBLE_FILE).toFile().takeIf { it.isFile }?.let { manifest.put("bubble_right", it.name) }
+        }
+        val canonical = ThemeProfile.parse(manifest).toJson()
+        val appearance = canonical.getJSONObject("appearance")
+        val pages = appearance.getJSONObject("pages")
+        val extras = mutableMapOf<String, File>()
+        val overrides = mainWallpaperOverrideDir(id)
+        mainWallpaperKeys.forEach { key ->
+            val file = File(overrides, "$key.img")
+            when {
+                File(overrides, "$key.disabled").exists() -> pages.put(key, org.json.JSONObject().put("kind", "native"))
+                file.isFile && file.length() > 0L -> {
+                    val relative = "overrides/$key.img"
+                    pages.put(key, org.json.JSONObject().put("kind", "image").put("asset", relative))
+                    extras[relative] = file
+                }
+            }
+        }
+        // 仅迁移已有生效主题的全局旧偏好；以后应用其它主题以各自配置为准。
+        if (id == activeThemeId) {
+            pages.put("enabled", mainWallpaperOn)
+            appearance.put("compatibility", org.json.JSONObject().put("mainTextColorEnabled", mainTextColorOn))
+            if (mainTitleColorHex.matches(Regex("#[0-9a-fA-F]{6}"))) {
+                for ((group, keys) in mapOf(
+                    "chrome" to listOf("toolbarText", "toolbarIcon", "tabText", "tabSelectedText", "tabIcon", "tabSelectedIcon"),
+                    "lists" to listOf("title")
+                )) {
+                    val values = appearance.optJSONObject(group) ?: org.json.JSONObject().also { appearance.put(group, it) }
+                    keys.filterNot { values.has(it) }.forEach { key ->
+                        values.put(key, org.json.JSONObject().put("mode", "value").put("value", mainTitleColorHex))
+                    }
+                }
+            }
+        }
+        return ThemeProfileRepository.Seed(canonical) { extras[it] ?: ThemePack.safeAsset(source, it) }
+    }
+
+    /** 包编辑只同步被编辑的素材位，保留已保存的配色、分页和模式。 */
+    private fun syncPackEdit(pack: ThemePack.Pack, role: String) {
+        val snapshot = requireNotNull(profileSnapshot(pack.id)) { "无法同步主题配置" }
+        val json = snapshot.profile.toJson()
+        val assets = mutableMapOf<String, File>()
+        when {
+            role == "metadata" -> for (key in listOf("name", "description")) {
+                if (pack.manifest.has(key)) json.put(key, pack.manifest.get(key))
+            }
+            role == "switches" -> json.put("switches", pack.manifest.optJSONObject("switches"))
+            else -> {
+                val original = pack.manifest.optString(role)
+                val file = pack.asset(original)
+                val relative = file?.let { "edits/${java.util.UUID.randomUUID()}/${it.name}" }
+                if (relative == null) json.remove(role) else {
+                    json.put(role, relative)
+                    assets[relative] = file
+                }
+                val page = if (role == "wallpaper") "common" else role.removePrefix("wallpaper_")
+                if (page == "common" || page in ThemeProfile.PAGE_KEYS) {
+                    json.getJSONObject("appearance").getJSONObject("pages").put(page,
+                        org.json.JSONObject().put("kind", if (relative == null) "native" else "image")
+                            .also { if (relative != null) it.put("asset", relative) })
+                }
+                if (role == "bubble_left" || role == "bubble_right") {
+                    val appearance = json.getJSONObject("appearance")
+                    val chat = appearance.optJSONObject("chat") ?: org.json.JSONObject().also { appearance.put("chat", it) }
+                    val rule = org.json.JSONObject().put("kind", if (relative == null) "native" else "image")
+                    if (relative != null) rule.put("asset", relative)
+                    chat.put(if (role == "bubble_left") "leftBubble" else "rightBubble", rule)
+                }
+            }
+        }
+        updateThemeProfile(json, assets, pack.id).getOrThrow()
+    }
+
+    fun cloneTheme(id: String, name: String? = null): Result<ThemePack.Pack> = runCatching {
+        val snapshot = requireNotNull(profileSnapshot(id)) { "主题配置不可用" }
+        ThemePack.cloneProfile(name ?: "${snapshot.profile.toJson().optString("name")} 副本", snapshot.profile, snapshot::asset).getOrThrow()
+    }
+
+    fun exportTheme(id: String): Result<File> = runCatching {
+        val snapshot = requireNotNull(profileSnapshot(id)) { "主题配置不可用" }
+        ThemePack.exportProfile(snapshot.profile.toJson().optString("name"), snapshot.profile, snapshot::asset).getOrThrow()
+    }
+
     // ══════════════════════════════════════════════════════════
     // Feature 生命周期
     // ══════════════════════════════════════════════════════════
@@ -105,54 +233,64 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
      * 搬到独立 object 里会 Unresolved（2026-10-27 重写时踩过）。
      */
     private fun hookTabSwitch() {
-        // doOnCreate 只会被 hook 一次，重复调用不会重置状态（应用主题后会再调一次，抢时机）
-        if (!doOnCreateHooked) {
-            doOnCreateHooked = true
-            runCatching {
-                WeMainActivityBeautifyApi.methodDoOnCreate.hookAfter {
-                    // hook 目标是 com.tencent.mm.ui.MainTabUI —— **不是 Activity**。
-                    // 必须从它的 MMFragmentActivity 字段里取宿主 Activity，
-                    // 写成 thisObject as? Activity 会永远是 null，整个 hook 第一行就 return
-                    // （2026-10-27 的「4 页全用主页图、adapter 0 处」就是这么来的）。
-                    val activity = runCatching {
-                        thisObject.reflekt()
-                            .firstField { type = "com.tencent.mm.ui.MMFragmentActivity" }
-                            .get() as? Activity
-                    }.getOrNull() ?: (thisObject as? Activity) ?: run {
-                        WeLogger.w(TAG, "主界面 hook：取不到宿主 Activity（MainTabUI 结构变化），本次跳过")
-                        return@hookAfter
-                    }
-                    if (!ThemePages.isLauncher(activity)) return@hookAfter
-                    ThemeSurface.applyNow(activity)
-                    // doOnCreate 时 DecorView 往往还没完成首次布局，下一帧再挂一次兜底
-                    activity.window?.decorView?.post { ThemeSurface.applyNow(activity) }
-                    val tabsAdapter = runCatching {
-                        thisObject.reflekt().firstField { name = "mTabsAdapter" }.get()
-                    }.getOrNull() ?: run {
-                        WeLogger.w(TAG, "主界面 hook：未找到 mTabsAdapter，切页换图不可用（4 页会一直显示第 1 张）")
-                        return@hookAfter
-                    }
-                    if (!hookedTabsAdapters.add(tabsAdapter)) return@hookAfter
-                    WeLogger.i(TAG, "主界面 hook：已接上切页监听（${activity.javaClass.simpleName}）")
-                runCatching {
-                    tabsAdapter.reflekt().firstMethod { name = "onPageScrolled" }.hookBefore {
-                        val position = args.getOrNull(0) as? Int ?: return@hookBefore
-                        val offset = args.getOrNull(1) as? Float ?: return@hookBefore
-                        ThemeSurface.onTabScrolled(activity, position, offset)
-                    }
-                    hookScrolledOk = true
-                }.onFailure { WeLogger.w(TAG, "hook onPageScrolled 失败", it) }
-                // 第二条切页信号：onPageSelected 是「页码最终落定」，
-                // 只 hook onPageScrolled 时一旦 offset 判断不满足就永远不换图（4 页只显示主页那张）
-                runCatching {
-                    tabsAdapter.reflekt().firstMethod { name = "onPageSelected" }.hookAfter {
-                        val position = args.getOrNull(0) as? Int ?: return@hookAfter
-                        ThemeSurface.onTabSelected(activity, position)
-                    }
-                    hookSelectedOk = true
-                    }.onFailure { WeLogger.w(TAG, "hook onPageSelected 失败", it) }
-                }
-            }.onFailure { WeLogger.w(TAG, "hookTabSwitch 失败", it) }
+        if (doOnCreateHooked) return
+        val method = runCatching { WeMainActivityBeautifyApi.methodDoOnCreate.method }
+            .onFailure { WeLogger.w(TAG, "解析主界面创建方法失败", it) }.getOrNull() ?: return
+        method.hookAfter {
+            ThemeHostAdapter.mainTabHit()
+            val activity = runCatching {
+                thisObject.reflekt().firstField { type = "com.tencent.mm.ui.MMFragmentActivity" }.get() as? Activity
+            }.getOrNull() ?: (thisObject as? Activity) ?: return@hookAfter
+            if (!ThemePages.isLauncher(activity)) return@hookAfter
+            ThemeSurface.applyNow(activity)
+            activity.window?.decorView?.post { ThemeSurface.applyNow(activity) }
+            val tabsAdapter = runCatching {
+                thisObject.reflekt().firstField { name = "mTabsAdapter" }.get()
+            }.getOrNull() ?: ThemeHostAdapter.liveTabAdapter(activity.window?.decorView as? android.view.ViewGroup)
+            if (tabsAdapter != null) hookTabsAdapter(activity, tabsAdapter)
+        }
+        ThemeHostAdapter.mainTabResolved(method)
+        doOnCreateHooked = true
+    }
+
+    private fun hookTabsAdapter(activity: Activity, tabsAdapter: Any) {
+        if (tabsAdapter in hookedTabsAdapters) return
+        val selected = runCatching {
+            tabsAdapter.javaClass.getMethod("onPageSelected", Int::class.javaPrimitiveType)
+        }.getOrNull()
+        val scrolled = runCatching {
+            tabsAdapter.javaClass.getMethod("onPageScrolled", Int::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+        }.getOrNull()
+        if (selected == null && scrolled == null) return
+        val activityRef = java.lang.ref.WeakReference(activity)
+        val adapterRef = java.lang.ref.WeakReference(tabsAdapter)
+        selected?.hookAfter {
+            if (thisObject !== adapterRef.get()) return@hookAfter
+            val host = activityRef.get() ?: return@hookAfter
+            val position = args.getOrNull(0) as? Int ?: return@hookAfter
+            ThemeHostAdapter.tabCallbackHit(selected)
+            ThemeSurface.onTabSelected(host, position)
+        }
+        scrolled?.hookBefore {
+            if (thisObject !== adapterRef.get()) return@hookBefore
+            val host = activityRef.get() ?: return@hookBefore
+            val position = args.getOrNull(0) as? Int ?: return@hookBefore
+            val offset = args.getOrNull(1) as? Float ?: return@hookBefore
+            ThemeHostAdapter.tabCallbackHit(scrolled)
+            ThemeSurface.onTabScrolled(host, position, offset)
+        }
+        selected?.let(ThemeHostAdapter::tabCallbackHooked)
+        scrolled?.let(ThemeHostAdapter::tabCallbackHooked)
+        hookSelectedOk = hookSelectedOk || selected != null
+        hookScrolledOk = hookScrolledOk || scrolled != null
+        hookedTabsAdapters.add(tabsAdapter)
+    }
+
+    private fun hookLiveTabAdapters() {
+        ThemeSurface.liveActivities().filter { ThemePages.isLauncher(it) }.forEach { activity ->
+            val adapter = ThemeHostAdapter.liveTabAdapter(activity.window?.decorView as? android.view.ViewGroup)
+            if (adapter != null) hookTabsAdapter(activity, adapter)
         }
     }
 
@@ -296,11 +434,22 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     override fun onEnable() {
         // 清掉历史遗留的持久化失败计数（老版本写进去的脏值会让主题被永久锁死）
         runCatching { WePrefs.remove("theme_store_wallpaper_fail") }
+        ThemeHostAdapter.installListBindingHook = { method ->
+            method.hookAfter {
+                ThemeHostAdapter.onListBound(
+                    method, thisObject, args.getOrNull(2) as? android.view.ViewGroup, result as? View
+                )
+            }
+        }
         hookTabSwitch()
+        hookLiveTabAdapters()
         hookChattingPage()
         hookChattingFragment()
         ThemeSurface.registerCallbacks(true)
         WeChatMessageViewApi.addListener(this)
+        ThemeRuntime.invalidate()
+        ThemeOwnedAppearance.invalidate()
+        CustomMessageBubbles.refreshBoundViews()
         ThemeSurface.applyToAllLive()
         if (activeThemeId.isNotEmpty()) {
             // 进程重启后恢复：壁纸/沉浸式全局重挂（气泡文件已在 moduleAssets 持久存在）
@@ -312,10 +461,25 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         // 只撤效果，**保留主题选择**：关开关不该清掉 activeThemeId，
         // 否则每次关掉再打开都得回主题工坊重新应用一次（实测用户反复测试全被这个清空）。
         // 重开时 onEnable 里的 applyToAllLive() 会按 activeThemeId 自动恢复。
-        runCatching { ThemeBubbleKit.restoreBackup() }
         runCatching { ThemeSurface.removeAllLive() }
         ThemeSurface.registerCallbacks(false)
+        ThemeHostAdapter.resetHooks()
+        // BaseFeature.disable unhooks these too; enable must resolve and install them again.
+        doOnCreateHooked = false
+        hookedTabsAdapters.clear()
+        hookSelectedOk = false
+        hookScrolledOk = false
+        chattingPageHooked = false
+        chattingHookOk = false
+        chattingFragmentHooked = false
+        chattingFragmentHookOk = false
+        chattingFragmentHookCount = 0
+        ThemeSurface.fragmentAnchorAvailable = false
         WeChatMessageViewApi.removeListener(this)
+        ChatThemeAppearance.restoreAll()
+        ThemeRuntime.invalidate()
+        ThemeOwnedAppearance.invalidate()
+        CustomMessageBubbles.refreshBoundViews()
     }
 
     // ══════════════════════════════════════════════════════════
@@ -346,20 +510,40 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
                 WePrefs.putBool(NEW_FEATURE_NAME, true)
                 isEnabled = true
             }
-            FeaturesProvider.ALL_HOOK_ITEMS
-                .filterIsInstance<SwitchFeature>()
-                .firstOrNull { it.name == CUSTOM_BUBBLES_PREF_KEY }
-                ?.takeIf { !it.isEnabled }
-                ?.let {
-                    WeLogger.i(TAG, "自定义消息气泡未启用，随「应用主题」自动开启")
-                    WePrefs.putBool(CUSTOM_BUBBLES_PREF_KEY, true)
-                    it.isEnabled = true
-                }
         }.onFailure { WeLogger.w(TAG, "自动启用主题相关功能失败：${it.message}") }
+    }
+
+    /** 自动切换只在总开关已开启时执行，绝不调用启用功能的路径。 */
+    internal fun applyScheduledTheme(id: String): Boolean {
+        if (!wallpaperSwitchOn() || !isEnabled || id == activeThemeId) return false
+        val pack = ThemePack.find(id)
+        val builtin = BuiltinThemes.find(id)
+        if (pack == null && builtin == null) return false
+        val snapshot = profileSnapshot(id) ?: return false
+        ThemePack.validateAssets(snapshot.profile) { snapshot.asset(it) }
+        if (builtin != null) ThemeMaterials.ensureExtracted(builtin)
+        if (!wallpaperSwitchOn() || !isEnabled) return false
+        ChatThemeAppearance.restoreAll()
+        activeThemeId = id
+        ThemePack.currentId = pack?.id ?: ""
+        ThemeRuntime.invalidate()
+        ThemeOwnedAppearance.invalidate()
+        CustomMessageBubbles.refreshBoundViews()
+        ThemeSurface.applyToAllLive()
+        return true
+    }
+
+    internal fun refreshEffectiveTheme() {
+        ThemeRuntime.invalidate()
+        ThemeOwnedAppearance.invalidate()
+        if (!wallpaperSwitchOn() || !isEnabled) return
+        CustomMessageBubbles.refreshBoundViews()
+        ThemeSurface.applyToAllLive()
     }
 
     /** 应用主题（内置或主题包），并同步一次壁纸透明度。 */
     fun applyThemeById(id: String) {
+        requireNotNull(profileSnapshot(id)) { "主题配置无效：$id" }
         // 用户主动应用 = 重新给一次机会，清掉本进程内的连续失败计数
         ThemeSurface.resetFailStreak()
         // 顺手确认一次切页 hook（幂等）：万一 onEnable 时还没到主界面 doOnCreate，这里补上
@@ -371,6 +555,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     }
 
     private fun applyThemeInternal(id: String) {
+        ChatThemeAppearance.restoreAll()
         ensureThemeFeaturesEnabled()
         // 外部主题包优先：壁纸与左右气泡取自包内素材，缺哪项就跳过，不影响其它维度。
         ThemePack.find(id)?.let {
@@ -383,22 +568,12 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         }
         try {
             ThemeMaterials.ensureExtracted(theme)
-            ThemeBubbleKit.backupCurrent()
-            // 气泡写入模块 assets（left=对方 / right=自己），并开启「自定义消息气泡」开关
-            ThemeBubbleKit.replaceAtomic(
-                listOfNotNull(
-                    ThemePaths.bubbleFile(theme, ThemePaths.LEFT_BUBBLE_FILE)
-                        .takeIf { it.exists() && it.toFile().length() > 0 }
-                        ?.let { it to ThemePaths.activeBubble(ThemePaths.LEFT_BUBBLE_FILE) },
-                    ThemePaths.bubbleFile(theme, ThemePaths.RIGHT_BUBBLE_FILE)
-                        .takeIf { it.exists() && it.toFile().length() > 0 }
-                        ?.let { it to ThemePaths.activeBubble(ThemePaths.RIGHT_BUBBLE_FILE) },
-                )
-            )
-            WePrefs.putBool(CUSTOM_BUBBLES_PREF_KEY, true)
             activeThemeId = id
             // 切到内置主题时清掉主题包游标，避免上一套主题包继续生效
             ThemePack.currentId = ""
+            ThemeRuntime.invalidate()
+            ThemeOwnedAppearance.invalidate()
+            CustomMessageBubbles.refreshBoundViews()
             ThemeSurface.applyToAllLive()
             WeLogger.i(TAG, "已应用主题：${theme.name}")
         } catch (e: Throwable) {
@@ -409,27 +584,17 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     /** 应用外部主题包（ThemePack）：壁纸 + 左右气泡。 */
     private fun applyPackInternal(pack: ThemePack.Pack) {
         try {
-            val left = pack.bubbleOther()
-            val right = pack.bubbleSelf()
-            if (left != null || right != null) {
-                ThemeBubbleKit.backupCurrent()
-                // 原子替换：失败保留旧气泡；新主题没给的那一侧才删掉旧文件
-                ThemeBubbleKit.replaceAtomic(
-                    listOfNotNull(
-                        left?.toPath()?.let { it to ThemePaths.activeBubble(ThemePaths.LEFT_BUBBLE_FILE) },
-                        right?.toPath()?.let { it to ThemePaths.activeBubble(ThemePaths.RIGHT_BUBBLE_FILE) },
-                    )
-                )
-                WePrefs.putBool(CUSTOM_BUBBLES_PREF_KEY, true)
-            }
             activeThemeId = pack.id
             // 关键：壁纸读取走 ThemePack.active()（读 currentId）。
             // 只写 activeThemeId 不写 currentId，重启微信后壁纸永远解析不出来。
             ThemePack.currentId = pack.id
+            ThemeRuntime.invalidate()
+            ThemeOwnedAppearance.invalidate()
+            CustomMessageBubbles.refreshBoundViews()
             ThemeSurface.applyToAllLive()
             WeLogger.i(
                 TAG,
-                "已应用主题包：${pack.name}（壁纸=${pack.wallpaper() != null}，气泡=${left != null}/${right != null}）"
+                "已应用主题包：${pack.name}（壁纸=${pack.wallpaper() != null}）"
             )
         } catch (e: Throwable) {
             WeLogger.e(TAG, "applyPackInternal 异常", e)
@@ -440,27 +605,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
      * 把当前生效的主题（内置或主题包）打包成 zip，可直接分享给别人导入。
      * 内置主题会先按同样格式生成一个主题包再打包，保证两边格式一致。
      */
-    fun exportActiveTheme(): File? {
-        val id = activeThemeId
-        if (id.isEmpty()) {
-            WeLogger.w(TAG, "没有生效中的主题，无法导出")
-            return null
-        }
-        ThemePack.find(id)?.let { return ThemePack.exportZip(it).getOrNull() }
-        val theme = BuiltinThemes.find(id) ?: run {
-            WeLogger.w(TAG, "未知主题：$id")
-            return null
-        }
-        val pack = ThemePack.createPackFromFiles(
-            name = theme.name,
-            wallpaper = ThemePaths.wallpaperFile(theme).takeIf { it.exists() }?.toFile(),
-            bubbleLeft = ThemePaths.bubbleFile(theme, ThemePaths.LEFT_BUBBLE_FILE)
-                .takeIf { it.exists() }?.toFile(),
-            bubbleRight = ThemePaths.bubbleFile(theme, ThemePaths.RIGHT_BUBBLE_FILE)
-                .takeIf { it.exists() }?.toFile(),
-        ).getOrNull() ?: return null
-        return ThemePack.exportZip(pack).getOrNull()
-    }
+    fun exportActiveTheme(): File? = exportTheme(activeThemeId).getOrNull()
 
     // ══════════════════════════════════════════════════════════
     // 恢复默认 / 清缓存
@@ -469,9 +614,12 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     /** 恢复默认：清空主题 id、还原窗口与壁纸层、还原应用主题前的气泡文件。 */
     private fun restoreDefault() {
         try {
-            ThemeBubbleKit.restoreBackup()
+            ChatThemeAppearance.restoreAll()
             activeThemeId = ""
             ThemePack.currentId = ""
+            ThemeRuntime.invalidate()
+            ThemeOwnedAppearance.invalidate()
+            CustomMessageBubbles.refreshBoundViews()
             ThemeSurface.removeAllLive()
         } catch (e: Throwable) {
             WeLogger.e(TAG, "restoreDefault 异常", e)
@@ -495,12 +643,11 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
      * 清除主题相关缓存（应急用）。
      *
      * 场景：换主题后旧气泡没被替换、或没在用主题却还留着残留气泡时，
-     * 一键把「模块目录里的气泡文件 + 内置素材提取缓存 + 已挂的背景」全部清掉，
-     * 让微信回到原生样式。不会删用户的主题包本身，也不会动气泡备份。
+     * 撤销当前主题并清除解码与内置提取缓存；保留主题配置、主题包和独立气泡文件。
      */
     fun clearThemeCache() {
         runCatching {
-            ThemeBubbleKit.clearActive()
+            restoreDefault()
             // 内置素材提取缓存：下次应用主题会重新从 APK 提取
             runCatching {
                 ThemePaths.builtinDir.toFile().deleteRecursively()
@@ -511,9 +658,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
             TabWallpaperRenderer.invalidateCache()
             // 撤掉已经挂在页面上的背景
             ThemeSurface.removeAllLive()
-            // 关掉气泡接管，避免它继续生效
-            WePrefs.putBool(CUSTOM_BUBBLES_PREF_KEY, false)
-            WeLogger.i(TAG, "已清除主题相关缓存（气泡 / 内置素材 / 背景层）")
+            WeLogger.i(TAG, "已撤销当前主题并清除缓存，保留独立气泡设置")
         }.onFailure { WeLogger.w(TAG, "清除主题缓存失败：${it.message}") }
     }
 
@@ -546,17 +691,31 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
 
     private val mainWallpaperKeys = listOf("chats", "contacts", "discover", "me")
 
-    fun mainWallpaperEnabled(): Boolean = mainWallpaperOn
+    fun mainWallpaperEnabled(): Boolean = profileSnapshot()?.profile?.enabled("pages") ?: mainWallpaperOn
 
     fun setMainWallpaperEnabled(enabled: Boolean) {
+        profileSnapshot()?.let { snapshot ->
+            val json = snapshot.profile.toJson()
+            json.getJSONObject("appearance").getJSONObject("pages").put("enabled", enabled)
+            updateThemeProfile(json).getOrThrow()
+            return
+        }
         mainWallpaperOn = enabled
         invalidateWallpaperCache()
         ThemeSurface.applyToAllLive()
     }
 
-    fun mainTextColorEnabled(): Boolean = mainTextColorOn
+    fun mainTextColorEnabled(): Boolean = profileSnapshot()?.mainTextColorEnabled ?: mainTextColorOn
 
     fun setMainTextColorEnabled(enabled: Boolean) {
+        profileSnapshot()?.let { snapshot ->
+            val json = snapshot.profile.toJson()
+            val appearance = json.getJSONObject("appearance")
+            val compatibility = appearance.optJSONObject("compatibility") ?: org.json.JSONObject()
+            appearance.put("compatibility", compatibility.put("mainTextColorEnabled", enabled))
+            updateThemeProfile(json).getOrThrow()
+            return
+        }
         mainTextColorOn = enabled
         ThemeSurface.resetFailStreak()
         ThemeSurface.applyToAllLive()
@@ -564,12 +723,30 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
 
     /** null 表示按背景自动选择清晰的文字颜色。 */
     fun mainTitleColor(): Int? {
+        profileSnapshot()?.let { return (it.profile.color("chrome", "toolbarText") as? ColorRule.Value)?.argb }
         val hex = mainTitleColorHex
         if (!hex.matches(Regex("#[0-9a-fA-F]{6}"))) return null
         return hex.substring(1).toInt(16) or 0xff000000.toInt()
     }
 
     fun setMainTitleColor(color: Int?) {
+        profileSnapshot()?.let { snapshot ->
+            val json = snapshot.profile.toJson()
+            val appearance = json.getJSONObject("appearance")
+            for ((group, keys) in mapOf(
+                "chrome" to listOf("toolbarText", "toolbarIcon", "tabText", "tabSelectedText", "tabIcon", "tabSelectedIcon"),
+                "lists" to listOf("title")
+            )) {
+                val values = appearance.optJSONObject(group) ?: org.json.JSONObject().also { appearance.put(group, it) }
+                keys.forEach { key ->
+                    val rule = org.json.JSONObject().put("mode", if (color == null) "auto" else "value")
+                    if (color != null) rule.put("value", String.format("#%08X", color))
+                    values.put(key, rule)
+                }
+            }
+            updateThemeProfile(json).getOrThrow()
+            return
+        }
         mainTitleColorHex = color?.let { String.format("#%06X", it and 0xffffff) } ?: ""
         ThemeSurface.resetFailStreak()
         ThemeSurface.applyToAllLive()
@@ -586,6 +763,11 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     /** 禁用标记优先于自选图片和主题自带图，避免「恢复」又落回全局图。 */
     internal fun resolveMainWallpapers(activeId: String, defaults: List<File?>): List<File?> {
         if (activeId.isBlank()) return defaults
+        profileSnapshot(activeId)?.let { snapshot ->
+            return mainWallpaperKeys.map { key ->
+                (snapshot.profile.background(key) as? BackgroundRule.Image)?.let { snapshot.asset(it.asset) }
+            }
+        }
         val dir = mainWallpaperOverrideDir(activeId)
         return mainWallpaperKeys.mapIndexed { index, key ->
             when {
@@ -600,6 +782,14 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         require(index in mainWallpaperKeys.indices) { "页面序号无效" }
         val id = activeThemeId
         if (id.isBlank()) return "未应用主题"
+        profileSnapshot(id)?.let { snapshot ->
+            return when (val rule = snapshot.profile.background(mainWallpaperKeys[index])) {
+                is BackgroundRule.Image -> if (rule.asset.startsWith("overrides/") || rule.asset.startsWith("edits/")) "自定义背景" else "当前主题背景"
+                BackgroundRule.Transparent -> "透明背景"
+                is BackgroundRule.Solid -> "纯色背景"
+                else -> "微信原生背景"
+            }
+        }
         val dir = mainWallpaperOverrideDir(id)
         val key = mainWallpaperKeys[index]
         return when {
@@ -613,6 +803,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     /** 只覆盖当前主题的主页背景，不改主题选择、气泡或功能总开关。 */
     fun setMainWallpaper(context: Context, uri: Uri, index: Int?): Result<Unit> = runCatching {
         require(index == null || index in mainWallpaperKeys.indices) { "页面序号无效" }
+        val snapshot = requireNotNull(profileSnapshot()) { "请先应用一套主题" }
         val dir = mainWallpaperOverrideDir(activeThemeId)
         check(dir.isDirectory || dir.mkdirs()) { "无法创建主页背景目录" }
         val source = File.createTempFile("wallpaper-", ".tmp", dir)
@@ -626,47 +817,30 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
             require(options.outWidth > 0 && options.outHeight > 0) { "请选择有效的图片" }
             options.inJustDecodeBounds = false
             options.inSampleSize = 1
-            while (maxOf(options.outWidth, options.outHeight) / options.inSampleSize > 512) {
-                options.inSampleSize *= 2
-            }
-            val preview = BitmapFactory.decodeFile(source.absolutePath, options)
-                ?: error("这张图片无法解码")
+            while (maxOf(options.outWidth, options.outHeight) / options.inSampleSize > 512) options.inSampleSize *= 2
+            val preview = BitmapFactory.decodeFile(source.absolutePath, options) ?: error("这张图片无法解码")
             preview.recycle()
+            val json = snapshot.profile.toJson()
+            val pages = json.getJSONObject("appearance").getJSONObject("pages")
             val indices = index?.let { listOf(it) } ?: mainWallpaperKeys.indices.toList()
-            for (page in indices) {
-                val key = mainWallpaperKeys[page]
-                val staged = File.createTempFile("$key-", ".tmp", dir)
-                try {
-                    Files.copy(source.toPath(), staged.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                    Files.move(staged.toPath(), File(dir, "$key.img").toPath(), StandardCopyOption.REPLACE_EXISTING)
-                    Files.deleteIfExists(File(dir, "$key.disabled").toPath())
-                } finally {
-                    staged.delete()
-                }
-            }
+            val relative = "edits/" + java.util.UUID.randomUUID() + "/wallpaper.img"
+            indices.forEach { page -> pages.put(mainWallpaperKeys[page],
+                org.json.JSONObject().put("kind", "image").put("asset", relative)) }
+            updateThemeProfile(json, mapOf(relative to source)).getOrThrow()
         } finally {
             source.delete()
         }
-    }.onSuccess {
-        invalidateWallpaperCache()
-        ThemeSurface.applyToAllLive()
     }
 
-    /** 选中页面恢复微信原生背景；其余页面和主题气泡保持不变。 */
     fun resetMainWallpapers(indices: Set<Int>): Result<Unit> {
         if (indices.isEmpty()) return Result.success(Unit)
         return runCatching {
             require(indices.all { it in mainWallpaperKeys.indices }) { "页面序号无效" }
-            val dir = mainWallpaperOverrideDir(activeThemeId)
-            check(dir.isDirectory || dir.mkdirs()) { "无法创建主页背景目录" }
-            for (index in indices) {
-                val key = mainWallpaperKeys[index]
-                File(dir, "$key.disabled").writeText("")
-                Files.deleteIfExists(File(dir, "$key.img").toPath())
-            }
-        }.onSuccess {
-            invalidateWallpaperCache()
-            ThemeSurface.applyToAllLive()
+            val snapshot = requireNotNull(profileSnapshot()) { "请先应用一套主题" }
+            val json = snapshot.profile.toJson()
+            val pages = json.getJSONObject("appearance").getJSONObject("pages")
+            indices.forEach { index -> pages.put(mainWallpaperKeys[index], org.json.JSONObject().put("kind", "native")) }
+            updateThemeProfile(json).getOrThrow()
         }
     }
 
@@ -737,12 +911,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         param: de.robv.android.xposed.XC_MethodHook.MethodHookParam,
         view: View
     ) {
-        if (activeThemeId.isEmpty()) return
-        try {
-            ThemeBubbleKit.applyToMessageView(param, view)
-        } catch (e: Throwable) {
-            WeLogger.w(TAG, "onCreateView 应用气泡异常", e)
-        }
+        if (!CustomMessageBubbles.isEnabled) CustomMessageBubbles.onCreateView(param, view)
     }
 
     // ══════════════════════════════════════════════════════════
@@ -817,6 +986,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         runCatching { ThemeSurface.liveActivities() }.getOrDefault(emptyList())
             .firstOrNull { ThemePages.isLauncher(it) }
             ?.let { launcher ->
+                appendLine(ThemeHostAdapter.describe(launcher.window?.decorView as? android.view.ViewGroup))
                 appendLine(
                     "当前 Tab 实测 = ${ThemeSurface.currentTabIndex(launcher)}" +
                         "（0=主页 1=通讯录 2=发现 3=我；永远是 0 就是页码没读到）"

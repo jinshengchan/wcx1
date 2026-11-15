@@ -380,8 +380,12 @@ object AddMainScreenFab : ClickableFeature() {
 
                     setContent {
                         InjectedUiTheme {
-                            val backgroundColor = if (isSystemInDarkTheme()) Color(0xFF191919) else Color(0xFFF7F7F7)
+                            val theme = ThemeOwnedAppearance.current()
+                            val defaultBackground = if (isSystemInDarkTheme()) Color(0xFF191919) else Color(0xFFF7F7F7)
+                            val backgroundColor = (theme?.profile?.background("fab", "background") as? BackgroundRule.Solid)?.let { Color(it.argb) } ?: defaultBackground
                             val activeColor = MaterialTheme.colorScheme.primary
+                            val labelColor = ThemeOwnedAppearance.color(theme, "fab", "label", activeColor)
+                            val iconColor = ThemeOwnedAppearance.color(theme, "fab", "icon", activeColor)
 
                             val expanded by fabExpandedState
                             val currentTab by currentTabState
@@ -446,7 +450,7 @@ object AddMainScreenFab : ClickableFeature() {
                                                             Text(
                                                                 text = name,
                                                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                                                color = activeColor,
+                                                                color = labelColor,
                                                                 fontSize = 14.sp,
                                                                 fontWeight = FontWeight.Medium
                                                             )
@@ -461,7 +465,7 @@ object AddMainScreenFab : ClickableFeature() {
                                                             shape = CircleShape,
                                                             elevation = FloatingActionButtonDefaults.elevation(2.dp)
                                                         ) {
-                                                            Icon(pair.first, contentDescription = null, tint = activeColor)
+                                                            Icon(pair.first, contentDescription = null, tint = iconColor, modifier = Modifier.size(24.dp))
                                                         }
                                                     }
                                                 }
@@ -474,12 +478,7 @@ object AddMainScreenFab : ClickableFeature() {
                                             shape = CircleShape
                                         ) {
                                             val rotation by animateFloatAsState(if (expanded) 45f else 0f)
-                                            Icon(
-                                                MaterialSymbols.OutlinedFilled.Add,
-                                                contentDescription = null,
-                                                tint = activeColor,
-                                                modifier = Modifier.rotate(rotation)
-                                            )
+                                            ThemeOwnedFabIcon(theme, MaterialSymbols.OutlinedFilled.Add, iconColor, Modifier.size(24.dp).rotate(rotation))
                                         }
                                     }
                                 }

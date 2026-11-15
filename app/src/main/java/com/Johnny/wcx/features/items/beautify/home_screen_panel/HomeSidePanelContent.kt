@@ -1,6 +1,10 @@
 package com.Johnny.wcx.features.items.beautify.home_screen_panel
 
 import android.view.ViewParent
+import com.Johnny.wcx.features.items.beautify.ThemeOwnedAppearance
+import com.Johnny.wcx.features.items.beautify.ThemeOwnedBackground
+import com.Johnny.wcx.features.items.beautify.BackgroundRule
+import androidx.compose.ui.graphics.Color
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.EnterTransition
@@ -84,11 +88,14 @@ internal fun HomeSidePanelContent(
         }
     }
     val listState = rememberLazyListState()
+    val theme = ThemeOwnedAppearance.current()
+    val whole = theme?.profile?.background("drawer", "whole")
     Surface(
         modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.surface,
+        color = if (whole is BackgroundRule.Solid || whole === BackgroundRule.Transparent) Color.Transparent else MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp),
     ) {
+        ThemeOwnedBackground(theme, "drawer", "whole", Modifier.fillMaxSize()) {
         HomeSidePanelDragHost(
             dragState = dragState,
             listState = listState,

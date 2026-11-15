@@ -186,7 +186,66 @@ internal object ThemeSurface {
     @Volatile
     private var lastChatCheckAt = 0L
 
-    private val chatWatched = java.util.WeakHashMap<ViewGroup, Boolean>()
+    private class MainWatcher(activity: Activity, decor: ViewGroup) {
+        val activity = WeakReference(activity)
+        val decor = WeakReference(decor)
+        var observer: WeakReference<android.view.ViewTreeObserver>? = null
+        var layout: android.view.ViewTreeObserver.OnGlobalLayoutListener? = null
+        var focus: android.view.ViewTreeObserver.OnWindowFocusChangeListener? = null
+        var attach: View.OnAttachStateChangeListener? = null
+    }
+
+    private val mainWatchers = java.util.WeakHashMap<ViewGroup, MainWatcher>()
+
+    private fun stopObserving(watcher: MainWatcher) {
+        watcher.observer?.get()?.takeIf { it.isAlive }?.let { observer ->
+            watcher.layout?.let(observer::removeOnGlobalLayoutListener)
+            watcher.focus?.let(observer::removeOnWindowFocusChangeListener)
+        }
+        watcher.observer = null
+        watcher.layout = null
+        watcher.focus = null
+    }
+
+    private fun observeMain(watcher: MainWatcher) {
+        val decor = watcher.decor.get() ?: return
+        val observer = decor.viewTreeObserver
+        if (watcher.observer?.get() === observer) return
+        stopObserving(watcher)
+        val layout = android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            if (ThemeStore.wallpaperSwitchOn()) watcher.activity.get()?.let { runCatching { checkChatPage(it) } }
+        }
+        val focus = android.view.ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
+            if (hasFocus && ThemeStore.wallpaperSwitchOn() && !chatPageVisible) {
+                watcher.activity.get()?.let { applyNow(it) }
+            }
+        }
+        watcher.observer = WeakReference(observer)
+        watcher.layout = layout
+        watcher.focus = focus
+        observer.addOnGlobalLayoutListener(layout)
+        observer.addOnWindowFocusChangeListener(focus)
+    }
+
+    private fun ensureMainWatcher(activity: Activity, decor: ViewGroup) {
+        val watcher = mainWatchers.getOrPut(decor) {
+            MainWatcher(activity, decor).also { state ->
+                val attach = object : View.OnAttachStateChangeListener {
+                    override fun onViewAttachedToWindow(view: View) { observeMain(state) }
+                    override fun onViewDetachedFromWindow(view: View) { stopObserving(state) }
+                }
+                state.attach = attach
+                decor.addOnAttachStateChangeListener(attach)
+            }
+        }
+        observeMain(watcher)
+    }
+
+    private fun removeMainWatcher(decor: ViewGroup) {
+        val watcher = mainWatchers.remove(decor) ?: return
+        stopObserving(watcher)
+        watcher.attach?.let(decor::removeOnAttachStateChangeListener)
+    }
 
     /**
      * 锚点「已离开」的起始时间戳（**基于时间**防抖）。
@@ -226,15 +285,7 @@ internal object ThemeSurface {
      * 聊天页若是主界面内部 Fragment（用户实机确认），切换页面不会走 Activity 生命周期，
      * 但一定会触发一次布局 —— 所以 GlobalLayout 是最可靠的时机；再叠 400ms 节流防抖。
      */
-    private fun ensureChatWatcher(activity: Activity, decor: ViewGroup) {
-        if (chatWatched[decor] == true) return
-        chatWatched[decor] = true
-        runCatching {
-            decor.viewTreeObserver.addOnGlobalLayoutListener {
-                runCatching { checkChatPage(activity) }
-            }
-        }.onFailure { WeLogger.w(TAG, "注册聊天页检测监听失败：${it.message}") }
-    }
+    private fun ensureChatWatcher(activity: Activity, decor: ViewGroup) = ensureMainWatcher(activity, decor)
 
     /** 跑一次聊天页检测；状态切换时做对应动作。 */
     fun checkChatPage(activity: Activity, force: Boolean = false) {
@@ -299,11 +350,14 @@ internal object ThemeSurface {
 
         if (!onMainPage || !ThemeStore.wallpaperSwitchOn()) return
         val attached = isAttached(activity)
+        val profile = ThemeRuntime.current(activity)?.profile
+        val pageRule = profile?.background(listOf("chats", "contacts", "discover", "me").getOrElse(currentTabIndex(activity)) { "chats" })
         val hasWallpaper = ThemeStore.mainWallpaperEnabled() && (attached ||
-            fileForTab(ThemeMaterials.tabWallpaperFiles(ThemeStore.activeThemeIdOrEmpty()), currentTabIndex(activity)) != null)
+            pageRule is BackgroundRule.Image || pageRule is BackgroundRule.Solid || pageRule === BackgroundRule.Transparent ||
+            (profile == null && fileForTab(ThemeMaterials.tabWallpaperFiles(ThemeStore.activeThemeIdOrEmpty()), currentTabIndex(activity)) != null))
         val needsWallpaper = hasWallpaper && !attached
         val needsText = ThemeStore.mainTextColorEnabled() && !MainPageAppearance.isApplied(activity) &&
-            (ThemeStore.mainTitleColor() != null || (hasWallpaper && ThemeStore.usePageBackground()))
+            (ThemeStore.mainTitleColor() != null || MainPageAppearance.hasProfileColors(profile) || MainTabAssets.configured(profile) || MainSurfaceBackgrounds.configured(profile) || (hasWallpaper && ThemeStore.usePageBackground()))
         if (onMainPage && (wasVisible || ((needsWallpaper || needsText) && activity.window?.decorView?.hasWindowFocus() == true))) {
             noteEvent("主页面图层缺失或离开聊天页 → 重挂壁纸")
             runCatching { applyTabWallpapers(activity) }
@@ -390,6 +444,7 @@ internal object ThemeSurface {
             noteEvent("前台 → ${activity.javaClass.simpleName}")
             // 总开关关掉时一个字节都不动，避免「关了主题还在改窗口 / 还在挂背景」
             if (!ThemeStore.wallpaperSwitchOn()) return
+            if (ThemePages.isLauncher(activity)) ThemeScheduleController.onLauncherEntry(activity)
             // 非主界面进前台：先把主界面遮罩藏掉（聊天页半透明时会透出后面这张壁纸）
             if (!ThemePages.isLauncher(activity)) hideLauncherWallpapers()
             // 回前台若判定「还在聊天页」（如相册 → 聊天页返回），不挂壁纸，免得闪一帧又浸透。
@@ -423,12 +478,16 @@ internal object ThemeSurface {
         override fun onActivityStopped(activity: Activity) {}
         override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
         override fun onActivityDestroyed(activity: Activity) {
-            if (ThemePages.isLauncher(activity)) TabWallpaperRenderer.clear(activity)
+            if (ThemePages.isLauncher(activity)) {
+                TabWallpaperRenderer.clear(activity)
+                (activity.window?.decorView as? ViewGroup)?.let(::removeMainWatcher)
+            }
             windowBackups.remove(System.identityHashCode(activity))
         }
     }
 
     fun registerCallbacks(register: Boolean) {
+        if (!register) mainWatchers.keys.toList().forEach(::removeMainWatcher)
         try {
             val app = hostApp ?: return
             if (register && !callbacksRegistered) {
@@ -652,30 +711,7 @@ internal object ThemeSurface {
      * 主界面可能不 pause，`onActivityPaused` 里那次撤遮罩就不会执行 →
      * 聊天页就会透出主界面壁纸。窗口焦点变化在两种情况下都会触发。
      */
-    private val focusWatched = java.util.WeakHashMap<ViewGroup, Boolean>()
-
-    private fun ensureWindowFocusWatcher(activity: Activity, decor: ViewGroup) {
-        if (focusWatched[decor] == true) return
-        focusWatched[decor] = true
-        runCatching {
-            decor.viewTreeObserver.addOnWindowFocusChangeListener { hasFocus ->
-                // 注意：**失焦一律不撤壁纸**。
-                // 微信里 window 焦点会被输入法弹出、Fragment 切换、页面转场反复触发 true/false，
-                // 且「获得焦点」回调不保证与失焦对称（实测日志：丢一次就永久没图）。
-                // 撤壁纸只由「聊天页状态」与「非 Launcher 的 Activity 到前台」决定，见 hideLauncherWallpapers()。
-                if (hasFocus) {
-                    if (ThemeStore.wallpaperSwitchOn() && !chatPageVisible) {
-                        noteEvent("主界面获得焦点 → 补挂")
-                        WeLogger.i(TAG, "主界面重新获得窗口焦点 → 补挂壁纸遮罩")
-                        runCatching { applyTabWallpapers(activity) }
-                            .onFailure { WeLogger.w(TAG, "补挂失败：${it.message}") }
-                    }
-                } else {
-                    WeLogger.i(TAG, "主界面失焦（不撤壁纸，交给聊天页状态/Activity 切换处理）")
-                }
-            }
-        }.onFailure { WeLogger.w(TAG, "注册窗口焦点监听失败：${it.message}") }
-    }
+    private fun ensureWindowFocusWatcher(activity: Activity, decor: ViewGroup) = ensureMainWatcher(activity, decor)
 
     /** 主界面 doOnCreate / 返回主界面时：挂一次 4 页背景（给 Feature 侧 hook 调用）。 */
     fun applyNow(activity: Activity) {
@@ -705,6 +741,7 @@ internal object ThemeSurface {
      * 现在两条信号都接，页码取不到时还有 getCurrentItem()/ViewPager2 兜底。
      */
     fun onTabSelected(activity: Activity, position: Int) {
+        (activity.window?.decorView as? ViewGroup)?.let { ThemeHostAdapter.pageObserved(it, position) }
         runCatching { checkChatPage(activity) }
         if (position == TabWallpaperRenderer.lastTab && isAttached(activity)) return
         lastTabIndex = position
@@ -735,39 +772,59 @@ internal object ThemeSurface {
             return
         }
         val tab = tabHint?.takeIf { it in 0..3 } ?: currentTabIndex(activity)
+        ThemeHostAdapter.pageObserved(decor, tabHint?.takeIf { it in 0..3 } ?: readRealTabIndex(activity))
         lastTabIndex = tab
-        val files = if (ThemeStore.mainWallpaperEnabled()) {
+        val effective = ThemeRuntime.current(activity)
+        val profile = effective?.profile
+        val background = if (ThemeStore.mainWallpaperEnabled()) {
+            profile?.background(listOf("chats", "contacts", "discover", "me").getOrElse(tab) { "chats" })
+        } else BackgroundRule.Native
+        val files = if (ThemeStore.mainWallpaperEnabled() && profile == null) {
             runCatching { ThemeMaterials.tabWallpaperFiles(ThemeStore.activeThemeIdOrEmpty()) }.getOrDefault(emptyList())
         } else emptyList()
-        val file = fileForTab(files, tab)
-        if (file == null || wallpaperFailStreak >= 3) {
+        val file = if (background is BackgroundRule.Image) effective?.asset(background.asset) else fileForTab(files, tab)
+        val color = when (background) {
+            is BackgroundRule.Solid -> background.argb
+            BackgroundRule.Transparent -> AndroidColor.TRANSPARENT
+            else -> null
+        }
+        if ((file == null && color == null) || wallpaperFailStreak >= 3) {
             TabWallpaperRenderer.clear(activity)
             restoreWindow(activity)
-            MainPageAppearance.apply(activity, null, ThemeStore.mainTextColorEnabled(), ThemeStore.mainTitleColor()) {
+            MainPageAppearance.apply(activity, null, ThemeStore.mainTextColorEnabled(), ThemeStore.mainTitleColor(), profile) {
                 canDrawWallpaper()
             }
-            if (file == null) wallpaperFailStreak = 0
+            if (file == null && color == null) wallpaperFailStreak = 0
             return
         }
-        val fullscreen = ThemeStore.usePageBackground()
+        val fullscreen = color != null || ThemeStore.usePageBackground()
         if (fullscreen) restoreWindow(activity)
-        val result = TabWallpaperRenderer.apply(
+        val result = if (color != null) TabWallpaperRenderer.applyColor(
+            activity, color, tab, ThemeStore.mainTextColorEnabled(), ThemeStore.mainTitleColor(), profile
+        ) { canDrawWallpaper() } else TabWallpaperRenderer.apply(
             activity, file, tab, ThemeStore.overlayOpacity(), fullscreen,
-            ThemeStore.mainTextColorEnabled(), ThemeStore.mainTitleColor()
+            ThemeStore.mainTextColorEnabled(), ThemeStore.mainTitleColor(), profile,
+            (background as? BackgroundRule.Image)?.opacity ?: 1f
         ) { canDrawWallpaper() }
         if (result != "ok") {
+            if (result.startsWith("等待底图：")) return
+            restoreWindow(activity)
+            MainPageAppearance.apply(activity, null, ThemeStore.mainTextColorEnabled(), ThemeStore.mainTitleColor(), profile) {
+                canDrawWallpaper()
+            }
             wallpaperFailStreak += 1
             WeLogger.w(TAG, "挂载 4 页背景失败（第 $wallpaperFailStreak 次）：$result")
             return
         }
         if (!fullscreen) applyImmersive(activity)
         wallpaperFailStreak = 0
-        noteEvent("挂上 Tab=$tab ${file.name}")
+        val source = file?.absolutePath ?: String.format("solid:#%08X", color)
+        noteEvent("挂上 Tab=$tab ${file?.name ?: source}")
         val info = files.mapIndexed { i, f -> "${TAB_NAMES[i]}=${f != null}" }.joinToString("，")
-        val logKey = "$info|tab=$tab|${file.absolutePath}"
+        val logKey = "$info|tab=$tab|$source"
         if (logKey != lastLoggedWallpaper) {
             lastLoggedWallpaper = logKey
-            WeLogger.i(TAG, "4 页背景已写入（$info），Tab=$tab，文件=${file.absolutePath}")
+            WeLogger.i(TAG, "4 页背景已写入（$info），Tab=$tab，来源=$source")
         }
     }
 

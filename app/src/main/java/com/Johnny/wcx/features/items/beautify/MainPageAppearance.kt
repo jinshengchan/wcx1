@@ -58,7 +58,13 @@ internal object MainPageAppearance {
         val texts = WeakHashMap<TextView, TextPatch>()
         val icons = WeakHashMap<ImageView, IconPatch>()
         var bitmap: Bitmap? = null
+        var opacity = 1f
+        var backdrop: Int? = null
         var titleColor: Int? = null
+        var profile: ThemeProfile? = null
+        var textEnabled = true
+        val tabAssets = MainTabAssets()
+        val backgrounds = MainSurfaceBackgrounds()
         var observer: WeakReference<ViewTreeObserver>? = null
         var listener: ViewTreeObserver.OnPreDrawListener? = null
         var attachListener: View.OnAttachStateChangeListener? = null
@@ -72,7 +78,15 @@ internal object MainPageAppearance {
     private val states = WeakHashMap<View, WeakReference<State>>()
 
     fun apply(activity: Activity, bitmap: Bitmap?, enabled: Boolean, titleColor: Int?, shouldDraw: () -> Boolean) {
-        if (!enabled || (bitmap?.takeUnless { it.isRecycled } == null && titleColor == null)) {
+        apply(activity, bitmap, enabled, titleColor, null, shouldDraw)
+    }
+
+    fun apply(activity: Activity, bitmap: Bitmap?, enabled: Boolean, titleColor: Int?, profile: ThemeProfile?, shouldDraw: () -> Boolean) {
+        apply(activity, bitmap, enabled, titleColor, profile, 1f, null, ThemeStore.mainWallpaperEnabled(), shouldDraw)
+    }
+
+    fun apply(activity: Activity, bitmap: Bitmap?, enabled: Boolean, titleColor: Int?, profile: ThemeProfile?, opacity: Float, backdrop: Int?, backgroundsEnabled: Boolean, shouldDraw: () -> Boolean) {
+        if ((!enabled || (bitmap?.takeUnless { it.isRecycled } == null && titleColor == null && !hasProfileColors(profile))) && !MainTabAssets.configured(profile) && !MainSurfaceBackgrounds.configured(profile)) {
             clear(activity)
             return
         }
@@ -94,8 +108,17 @@ internal object MainPageAppearance {
             decor.addOnAttachStateChangeListener(listener)
         }
         state.bitmap = bitmap?.takeUnless { it.isRecycled }
+        state.opacity = opacity.coerceIn(0f, 1f)
+        state.backdrop = backdrop
         state.titleColor = titleColor?.or(0xff000000.toInt())
+        state.profile = profile
+        state.textEnabled = enabled
+        state.tabAssets.configure(profile)
+        state.tabAssets.resolve = ThemeRuntime.current(activity)?.let { runtime -> { path -> runtime.asset(path) } }
+        state.backgrounds.configure(if (backgroundsEnabled) profile else null)
+        state.backgrounds.resolve = state.tabAssets.resolve
         state.shouldDraw = shouldDraw
+        (decor as? ViewGroup)?.let { ThemeHostAdapter.trackAppearance(it, state.shouldDraw) }
         observe(state, decor)
         refresh(state)
     }
@@ -127,7 +150,7 @@ internal object MainPageAppearance {
         decor.getLocationOnScreen(location)
         val bounds = Rect(location[0], location[1], location[0] + decor.width, location[1] + decor.height)
         val bitmap = state.bitmap?.takeUnless { it.isRecycled }
-        if (bitmap == null && state.titleColor == null) {
+        if (bitmap == null && state.titleColor == null && !hasProfileColors(state.profile) && !MainTabAssets.configured(state.profile) && !MainSurfaceBackgrounds.configured(state.profile)) {
             restore(state)
             return
         }
@@ -142,8 +165,10 @@ internal object MainPageAppearance {
             state.visited++
             if (node.depth > MAX_DEPTH || view.visibility != View.VISIBLE || !view.getGlobalVisibleRect(rect)) continue
             val inTab = node.inTab || isNativeTab(view)
-            if (view is TextView) styleText(state, view, rect, bounds, bitmap, inTab)
-            if (view is ImageView && (inTab || isHeaderIcon(view, rect, bounds))) {
+            state.backgrounds.apply(view)
+            if (view is TextView && inTab) state.tabAssets.apply(view, selectedTab(view))
+            if (state.textEnabled && view is TextView) styleText(state, view, rect, bounds, bitmap, inTab)
+            if (state.textEnabled && view is ImageView && (inTab || isHeaderIcon(view, rect, bounds))) {
                 styleIcon(state, view, rect, bounds, bitmap, inTab)
             }
             if (view is ViewGroup && node.depth < MAX_DEPTH) {
@@ -170,7 +195,7 @@ internal object MainPageAppearance {
                 icons.remove()
             }
         }
-        styleSystemIcons(state, decor, bounds, bitmap)
+        if (state.textEnabled) styleSystemIcons(state, decor, bounds, bitmap) else restoreSystemIcons(state, decor)
     }
 
     private fun styleText(state: State, view: TextView, rect: Rect, bounds: Rect, bitmap: Bitmap?, inTab: Boolean) {
@@ -178,12 +203,25 @@ internal object MainPageAppearance {
         if (existing != null && view.textColors !== existing.installed) existing.original = view.textColors
         val original = existing?.original ?: view.textColors
         val nativeColor = original.getColorForState(view.drawableState, original.defaultColor)
-        if (inTab && state.titleColor == null && hasFeedback(view)) return
         val sp = view.textSize / view.resources.displayMetrics.scaledDensity
-        val tabLabel = inTab && view.text.toString().trim() in tabLabels
-        if (sp < 14.5f && !isNeutral(nativeColor) && !(tabLabel && state.titleColor != null)) return
+        val text = view.text.toString().trim()
+        val tabLabel = inTab && (text in tabLabels || (0..3).any { state.profile?.tabLabel(it) == text })
         val primary = sp >= 14.5f || tabLabel || rect.bottom <= bounds.top + bounds.height() * 0.13f
-        val color = if (primary && state.titleColor != null) state.titleColor else automaticColor(state, view, bitmap, bounds, rect)
+        val slot = textSlot(view, rect, bounds, inTab, primary)
+        val rule = if (inTab && !tabLabel) {
+            if (text.matches(Regex("[0-9]+\\+?"))) {
+                (state.profile?.color("chrome", "unreadText") ?: ColorRule.Native).let {
+                    if (it === ColorRule.Inherit) ColorRule.Native else it
+                }
+            } else ColorRule.Native
+        } else profileColor(state.profile, slot.first, slot.second, if (inTab && selectedTab(view)) "focused" else if (primary) "normal" else "middle")
+        if (rule === ColorRule.Inherit) {
+            if (inTab && state.titleColor == null && hasFeedback(view)) return
+            if (sp < 14.5f && !isNeutral(nativeColor) && !(tabLabel && state.titleColor != null)) return
+        }
+        val color = ruleColor(rule, state, view, bitmap, bounds, rect) {
+            if (primary && state.titleColor != null) state.titleColor else automaticColor(state, view, bitmap, bounds, rect)
+        }
         if (color == null) return
         val patch = existing ?: TextPatch(original).also { state.texts[view] = it }
         patch.seen = state.generation
@@ -195,7 +233,11 @@ internal object MainPageAppearance {
     }
 
     private fun styleIcon(state: State, view: ImageView, rect: Rect, bounds: Rect, bitmap: Bitmap?, inTab: Boolean) {
-        if (isAvatar(view) || (inTab && state.titleColor == null && hasFeedback(view))) return
+        if (isAvatar(view)) return
+        val slot = if (inTab) if (selectedTab(view)) "tabSelectedIcon" else "tabIcon" else "toolbarIcon"
+        val rule = profileColor(state.profile, "chrome", slot, if (inTab && selectedTab(view)) "focused" else "normal")
+        if (state.tabAssets.ownsIcon(view) && rule === ColorRule.Inherit) return
+        if (rule === ColorRule.Inherit && inTab && state.titleColor == null && hasFeedback(view)) return
         val existing = state.icons[view]
         val native = if (existing != null) existing.native else nativeIcon(view)
         val currentColor = native?.color(view)
@@ -204,7 +246,7 @@ internal object MainPageAppearance {
             if (native != null && currentColor != existing.installedColor) existing.originalColor = currentColor
             if (native == null && view.colorFilter !== existing.installedFilter) existing.originalFilter = view.colorFilter
         }
-        if (state.titleColor == null) {
+        if (rule === ColorRule.Inherit && state.titleColor == null) {
             val nativeColor = if (native != null) existing?.originalColor ?: currentColor else {
                 val tint = view.imageTintList
                 val originalFilter = if (existing != null) existing.originalFilter else view.colorFilter
@@ -212,7 +254,9 @@ internal object MainPageAppearance {
             }
             if (nativeColor != null && !isNeutral(nativeColor)) return
         }
-        val color = state.titleColor ?: automaticColor(state, view, bitmap, bounds, rect) ?: return
+        val color = ruleColor(rule, state, view, bitmap, bounds, rect) {
+            state.titleColor ?: automaticColor(state, view, bitmap, bounds, rect)
+        } ?: return
         val patch = existing ?: IconPatch(native, currentColor, view.colorFilter).also { state.icons[view] = it }
         patch.seen = state.generation
         if (native != null) {
@@ -225,6 +269,58 @@ internal object MainPageAppearance {
             patch.installedFilter = filter
             patch.installedColor = color
         }
+    }
+
+    private val profileSlots = mapOf(
+        "chrome" to listOf("toolbarText", "toolbarIcon", "tabText", "tabSelectedText", "tabIcon", "tabSelectedIcon", "unreadText"),
+        "lists" to listOf("title", "subtitle", "time", "accountInfo", "newMessage"),
+        "palette" to listOf("normal", "middle", "focused")
+    )
+
+    fun hasProfileColors(profile: ThemeProfile?): Boolean =
+        profile != null && profileSlots.any { (section, keys) ->
+            keys.any { key -> profile.color(section, key).let { it is ColorRule.Value || it === ColorRule.Auto } }
+        }
+
+    fun updateBackdrop(decor: View, color: Int?) { states[decor]?.get()?.backdrop = color }
+
+    private fun profileColor(profile: ThemeProfile?, section: String, key: String, palette: String): ColorRule {
+        val specific = profile?.color(section, key) ?: ColorRule.Inherit
+        return if (specific === ColorRule.Inherit) profile?.color("palette", palette) ?: ColorRule.Inherit else specific
+    }
+
+    private fun ruleColor(rule: ColorRule, state: State, view: View, bitmap: Bitmap?, bounds: Rect, rect: Rect, fallback: () -> Int?): Int? =
+        when (rule) {
+            ColorRule.Native -> null
+            ColorRule.Auto -> automaticColor(state, view, bitmap, bounds, rect)
+            ColorRule.Inherit -> fallback()
+            is ColorRule.Value -> rule.argb
+        }
+
+    private fun textSlot(view: TextView, rect: Rect, bounds: Rect, inTab: Boolean, primary: Boolean): Pair<String, String> {
+        if (inTab) return "chrome" to if (selectedTab(view)) "tabSelectedText" else "tabText"
+        if (rect.bottom <= bounds.top + bounds.height() * 0.13f) return "chrome" to "toolbarText"
+        val entry = if (view.id > 0) runCatching { view.resources.getResourceEntryName(view.id) }.getOrNull() else null
+        val key = when (entry) {
+            "time", "update_time", "last_update_time", "msg_time", "conversation_time", "datetime" -> "time"
+            "summary", "subtitle", "description", "content_summary" -> "subtitle"
+            "account_info", "wechat_id", "username_info" -> "accountInfo"
+            "new_message", "unread_text" -> "newMessage"
+            else -> if (primary) "title" else "subtitle"
+        }
+        return "lists" to key
+    }
+
+    private fun selectedTab(view: View): Boolean {
+        var current: View? = view
+        var depth = 0
+        while (current != null && depth++ < MAX_DEPTH) {
+            if (current.drawableState.any { it == android.R.attr.state_selected ||
+                    it == android.R.attr.state_activated || it == android.R.attr.state_checked }) return true
+            if (isNativeTab(current)) break
+            current = current.parent as? View
+        }
+        return false
     }
 
     private fun nativeIcon(view: ImageView): NativeIcon? = runCatching {
@@ -286,7 +382,7 @@ internal object MainPageAppearance {
         var depth = 0
         while (current != null && depth++ <= MAX_DEPTH) {
             // The supplied bitmap is the decor's full-window backdrop, not a covering host card.
-            if (current === decor && bitmap != null) return contrastColor(bitmap, bounds, region)
+            if (current === decor && bitmap != null) return contrastColor(bitmap, bounds, region, state.opacity, state.backdrop)
             val background = current.background
             if (background != null && background.opacity != PixelFormat.TRANSPARENT) {
                 val active = background.current
@@ -298,14 +394,14 @@ internal object MainPageAppearance {
                     return null
                 }
             }
-            if (current === decor) return contrastColor(bitmap, bounds, region)
+            if (current === decor) return contrastColor(bitmap, bounds, region, state.opacity, state.backdrop)
             current = current.parent as? View
         }
         return null
     }
 
     /** 使用整张 decor 的 CENTER_CROP 映射，而不是把图片重新拉伸到每个控件。 */
-    private fun contrastColor(bitmap: Bitmap?, bounds: Rect, region: Rect): Int? {
+    private fun contrastColor(bitmap: Bitmap?, bounds: Rect, region: Rect, opacity: Float = 1f, backdrop: Int? = null): Int? {
         if (bitmap == null || bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return null
         val scale = max(bounds.width().toFloat() / bitmap.width, bounds.height().toFloat() / bitmap.height)
         val left = bounds.left + (bounds.width() - bitmap.width * scale) / 2f
@@ -316,11 +412,15 @@ internal object MainPageAppearance {
             for (y in 0..2) for (x in 0..2) {
                 val px = ((region.left + region.width() * (x + 0.5f) / 3 - left) / scale).toInt().coerceIn(0, bitmap.width - 1)
                 val py = ((region.top + region.height() * (y + 0.5f) / 3 - top) / scale).toInt().coerceIn(0, bitmap.height - 1)
-                val color = bitmap.getPixel(px, py)
-                if (Color.alpha(color) >= 128) {
-                    light += luminance(color)
-                    samples++
-                }
+                val source = bitmap.getPixel(px, py)
+                val alpha = Color.alpha(source) / 255.0 * opacity
+                if (alpha < 1.0 && (backdrop == null || Color.alpha(backdrop) != 255)) return@runCatching null
+                fun channel(value: Int, base: Int) = (value * alpha + base * (1 - alpha)).toInt()
+                val base = backdrop ?: source
+                val color = (0xff000000.toInt() or (channel(Color.red(source), Color.red(base)) shl 16) or
+                    (channel(Color.green(source), Color.green(base)) shl 8) or channel(Color.blue(source), Color.blue(base)))
+                light += luminance(color)
+                samples++
             }
             if (samples == 0) null else if (light / samples > 0.179) Color.BLACK else Color.WHITE
         }.getOrNull()
@@ -336,8 +436,16 @@ internal object MainPageAppearance {
 
     private fun styleSystemIcons(state: State, decor: View, bounds: Rect, bitmap: Bitmap?) {
         val height = (bounds.height() * 0.04f).toInt().coerceAtLeast(1)
-        val status = state.titleColor ?: contrastColor(bitmap, bounds, Rect(bounds.left, bounds.top, bounds.right, bounds.top + height))
-        val nav = state.titleColor ?: contrastColor(bitmap, bounds, Rect(bounds.left, bounds.bottom - height, bounds.right, bounds.bottom))
+        fun iconColor(rule: ColorRule, region: Rect): Int? = when (rule) {
+            ColorRule.Native -> null
+            ColorRule.Auto -> contrastColor(bitmap, bounds, region, state.opacity, state.backdrop)
+            ColorRule.Inherit -> state.titleColor ?: contrastColor(bitmap, bounds, region, state.opacity, state.backdrop)
+            is ColorRule.Value -> rule.argb
+        }
+        val status = iconColor(profileColor(state.profile, "chrome", "toolbarText", "normal"),
+            Rect(bounds.left, bounds.top, bounds.right, bounds.top + height))
+        val nav = iconColor(profileColor(state.profile, "chrome", "tabText", "normal"),
+            Rect(bounds.left, bounds.bottom - height, bounds.right, bounds.bottom))
         if (status == null && nav == null) {
             restoreSystemIcons(state, decor)
             return
@@ -346,7 +454,9 @@ internal object MainPageAppearance {
         rememberSystemBits(state, current)
         var bits = current and SYSTEM_ICON_MASK
         if (status != null) bits = if (luminance(status) < 0.5) bits or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR else bits and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
+        else bits = (bits and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()) or ((state.originalSystemBits ?: 0) and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR)
         if (nav != null) bits = if (luminance(nav) < 0.5) bits or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR else bits and View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR.inv()
+        else bits = (bits and View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR.inv()) or ((state.originalSystemBits ?: 0) and View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR)
         state.installedSystemBits = bits
         val desired = (current and SYSTEM_ICON_MASK.inv()) or bits
         if (current != desired) decor.systemUiVisibility = desired
@@ -388,6 +498,8 @@ internal object MainPageAppearance {
     }
 
     private fun restore(state: State) {
+        state.tabAssets.clear()
+        state.backgrounds.clear()
         state.texts.forEach { (view, patch) -> restoreText(view, patch) }
         state.texts.clear()
         state.icons.forEach { (view, patch) -> restoreIcon(view, patch) }

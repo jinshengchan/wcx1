@@ -6,6 +6,11 @@ import com.Johnny.wcx.utils.fs.KnownPaths
 import org.json.JSONObject
 import android.content.Context
 import android.net.Uri
+import android.graphics.BitmapFactory
+import org.json.JSONArray
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.util.UUID
 import java.io.File
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
@@ -40,6 +45,8 @@ object ThemePack {
     private const val TAG = "ThemePack"
     private const val MANIFEST = "manifest.json"
     private const val PREF_CURRENT = "theme_pack_current"
+    internal var snapshotProvider: ((String) -> ThemeProfileRepository.Snapshot?)? = null
+    internal var onChanged: ((Pack, String) -> Unit)? = null
 
     /** 一个已安装的主题包。 */
     data class Pack(
@@ -66,7 +73,9 @@ object ThemePack {
         fun text(key: String): String? =
             manifest.optJSONObject("strings")?.optString(key)?.takeIf { it.isNotBlank() }
 
-        fun wallpaper(): File? = asset(manifest.optString("wallpaper"))
+        internal val profile: ThemeProfile by lazy { ThemeProfile.parse(manifest) }
+
+        fun wallpaper(): File? = (profile.background("chats") as? BackgroundRule.Image)?.let { asset(it.asset) }
 
         /**
          * 分页面壁纸：某个页面单独设了就用它，没设就退回全局壁纸。
@@ -74,8 +83,7 @@ object ThemePack {
          * @param key chats / contacts / discover / me / chatting
          */
         fun wallpaperFor(key: String): File? {
-            val specific = asset(manifest.optString("wallpaper_$key"))
-            return specific ?: wallpaper()
+            return (profile.background(key) as? BackgroundRule.Image)?.let { asset(it.asset) }
         }
 
         fun bubbleOther(): File? = asset(manifest.optString("bubble_left"))
@@ -86,14 +94,13 @@ object ThemePack {
 
         /** 底部四个 Tab（会话/通讯录/发现/我）的图标，下标与微信一致。 */
         fun tabIcon(index: Int): File? {
-            val arr = manifest.optJSONArray("tab") ?: return null
-            return asset(arr.optString(index))
+            return asset(profile.tabIcon(index, false))
         }
 
         /** 表情面板图标目录下的第 index 张（按文件名排序，保证稳定）。 */
         fun panelIcons(): List<File> {
             val rel = manifest.optString("panel").takeIf { it.isNotBlank() } ?: return emptyList()
-            val dir = File(this.dir, rel)
+            val dir = safeAsset(this.dir, rel) ?: return emptyList()
             return dir.listFiles { f -> f.isFile && f.name.endsWith(".png", ignoreCase = true) }
                 ?.sortedBy { it.name }
                 ?: emptyList()
@@ -112,7 +119,9 @@ object ThemePack {
 
     fun find(id: String): Pack? {
         if (id.isBlank()) return null
-        return load(File(root, id))
+        val dir = File(root, id).canonicalFile
+        if (dir.parentFile != root.canonicalFile) return null
+        return load(dir)
     }
 
     private fun load(dir: File): Pack? {
@@ -122,6 +131,7 @@ object ThemePack {
             WeLogger.w(TAG, "主题包清单解析失败：${dir.name} / ${it.message}")
             return null
         }
+        if (runCatching { ThemeProfile.parse(json) }.isFailure) return null
         return Pack(
             id = dir.name,
             name = json.optString("name").takeIf { it.isNotBlank() } ?: dir.name,
@@ -157,10 +167,11 @@ object ThemePack {
      */
     fun importZip(zip: File): Result<Pack> = runCatching {
         require(zip.isFile) { "文件不存在" }
-        val id = "pack_" + System.currentTimeMillis().toString(36)
+        val id = "pack_" + UUID.randomUUID()
         val target = File(root, id)
         target.mkdirs()
 
+        try {
         var entries = 0
         ZipInputStream(zip.inputStream().buffered()).use { input ->
             while (true) {
@@ -170,8 +181,7 @@ object ThemePack {
                 val out = File(target, name)
                 val canonical = out.canonicalFile
                 if (!canonical.path.startsWith(target.canonicalFile.path + File.separator)) {
-                    WeLogger.w(TAG, "跳过越界条目：$name")
-                    continue
+                    error("压缩包条目越界：$name")
                 }
                 if (entry.isDirectory) {
                     canonical.mkdirs()
@@ -198,12 +208,17 @@ object ThemePack {
             target.deleteRecursively()
             error("缺少 $MANIFEST 或格式不正确")
         }
+        validateAssets(ThemeProfile.parse(pack.manifest)) { safeAsset(pack.dir, it) }
         WeLogger.i(TAG, "主题包已导入：${pack.name}（${pack.id}），共 $entries 个文件")
         pack
+        } catch (failure: Throwable) {
+            target.deleteRecursively()
+            throw failure
+        }
     }
 
     fun delete(id: String): Boolean {
-        if (id.isBlank()) return false
+        if (id.isBlank() || File(root, id).canonicalFile.parentFile != root.canonicalFile) return false
         if (currentId == id) currentId = ""
         val dir = File(root, id)
         val ok = dir.exists() && dir.deleteRecursively()
@@ -232,22 +247,61 @@ object ThemePack {
      * 把主题包打成 zip，直接分享给别人导入即可。
      * 输出到 `themes/exported/`，文件名取自主题名（非法字符替换掉）。
      */
-    fun exportZip(pack: Pack): Result<File> = runCatching {
-        val outDir = File(root, "exported").apply { mkdirs() }
-        val safeName = pack.name.replace(Regex("[\\\\/:*?\"<>|]"), "_").ifBlank { pack.id }
-        val out = File(outDir, "$safeName.zip")
-        ZipOutputStream(out.outputStream().buffered()).use { zos ->
-            pack.dir.walkTopDown()
-                .filter { it.isFile && it.name != out.name }
-                .forEach { file ->
-                    val entryName = file.relativeTo(pack.dir).invariantSeparatorsPath
-                    zos.putNextEntry(ZipEntry(entryName))
-                    file.inputStream().use { input -> input.copyTo(zos) }
+    fun exportZip(pack: Pack): Result<File> {
+        snapshotProvider?.invoke(pack.id)?.let { return exportProfile(pack.name, it.profile, it::asset) }
+        return exportProfile(pack.name, pack.profile) { safeAsset(pack.dir, it) }
+    }
+
+    internal fun exportProfile(name: String, profile: ThemeProfile, asset: (String) -> File?): Result<File> = runCatching {
+        validateAssets(profile, asset)
+        val safeName = name.replace(Regex("[^\\p{L}\\p{N}._ -]"), "_").ifBlank { "theme" }
+        val out = File(exportDir(), "$safeName.zip")
+        val staged = File.createTempFile("export-", ".zip", exportDir())
+        try {
+            ZipOutputStream(staged.outputStream().buffered()).use { zos ->
+                zos.putNextEntry(ZipEntry(MANIFEST))
+                zos.write(profile.toJson().toString(2).toByteArray(Charsets.UTF_8))
+                zos.closeEntry()
+                profile.toJson().optString("panel").takeIf { it.isNotBlank() }?.let { relative ->
+                    zos.putNextEntry(ZipEntry(ThemeProfile.assetPath(relative) + "/"))
                     zos.closeEntry()
                 }
+                resourcePaths(profile.toJson(), asset).keys.forEach { relative ->
+                    val source = requireNotNull(asset(relative)) { "缺少素材：$relative" }
+                    zos.putNextEntry(ZipEntry(relative))
+                    source.inputStream().use { it.copyTo(zos) }
+                    zos.closeEntry()
+                }
+            }
+            Files.move(staged.toPath(), out.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            staged.delete()
         }
-        WeLogger.i(TAG, "主题包已导出：${out.absolutePath}（${out.length() / 1024} KB）")
         out
+    }
+
+    internal fun cloneProfile(name: String, profile: ThemeProfile, asset: (String) -> File?): Result<Pack> = runCatching {
+        validateAssets(profile, asset)
+        val dir = File(root, "pack_" + UUID.randomUUID()).apply { mkdirs() }
+        try {
+            resourcePaths(profile.toJson(), asset).keys.forEach { relative ->
+                val dest = requireNotNull(safeAsset(dir, relative))
+                dest.parentFile?.mkdirs()
+                requireNotNull(asset(relative)).copyTo(dest)
+            }
+            ensurePanelDirectory(profile, dir)
+            val manifest = profile.toJson().put("name", name)
+            File(dir, MANIFEST).writeText(manifest.toString(2))
+            load(dir) ?: error("复制主题失败")
+        } catch (failure: Throwable) {
+            dir.deleteRecursively()
+            throw failure
+        }
+    }
+
+    fun clone(pack: Pack, name: String = "${pack.name} 副本"): Result<Pack> {
+        snapshotProvider?.invoke(pack.id)?.let { return cloneProfile(name, it.profile, it::asset) }
+        return cloneProfile(name, pack.profile) { safeAsset(pack.dir, it) }
     }
 
     /**
@@ -259,7 +313,7 @@ object ThemePack {
         bubbleLeft: File?,
         bubbleRight: File?,
     ): Result<Pack> = runCatching {
-        val id = "pack_" + System.currentTimeMillis().toString(36)
+        val id = "pack_" + UUID.randomUUID()
         val dir = File(root, id).apply { mkdirs() }
         val manifest = JSONObject().apply {
             put("name", name)
@@ -289,7 +343,7 @@ object ThemePack {
      * 其余项留空即保持微信原样，不会因为缺图整套失效。
      */
     fun createEmptyPack(name: String, author: String = "我"): Result<Pack> = runCatching {
-        val id = "pack_" + System.currentTimeMillis().toString(36)
+        val id = "pack_" + UUID.randomUUID()
         val dir = File(root, id).apply { mkdirs() }
         val manifest = JSONObject().apply {
             put("name", name)
@@ -306,50 +360,78 @@ object ThemePack {
      * @param role wallpaper / bubble_left / bubble_right
      * @param ninePatch 气泡必须是 9-patch（.9.png），由调用方决定文件后缀
      */
-    fun writeImage(pack: Pack, context: Context, uri: Uri, role: String, ninePatch: Boolean = false): Pack? {
-        val fileName = when (role) {
-            "wallpaper" -> "wallpaper.png"
-            "wallpaper_chats" -> "wallpaper_chats.png"
-            "wallpaper_contacts" -> "wallpaper_contacts.png"
-            "wallpaper_discover" -> "wallpaper_discover.png"
-            "wallpaper_me" -> "wallpaper_me.png"
-            "wallpaper_chatting" -> "wallpaper_chatting.png"
-            "wallpaper_panel" -> "wallpaper_panel.png"
-            "bubble_left" -> if (ninePatch) "bubble_left.9.png" else "bubble_left.png"
-            "bubble_right" -> if (ninePatch) "bubble_right.9.png" else "bubble_right.png"
-            else -> return null
-        }
-        val ok = runCatching {
-            val dest = File(pack.dir, fileName)
+    fun writeImage(pack: Pack, context: Context, uri: Uri, role: String, ninePatch: Boolean = false): Pack? = runCatching {
+        require(role in listOf("wallpaper", "wallpaper_chats", "wallpaper_contacts", "wallpaper_discover", "wallpaper_me", "wallpaper_chatting", "wallpaper_panel", "bubble_left", "bubble_right"))
+        val suffix = if (ninePatch) ".9.png" else ".png"
+        val fileName = "image-" + UUID.randomUUID() + suffix
+        val dest = File(pack.dir, fileName)
+        try {
             context.contentResolver.openInputStream(uri)?.use { input ->
-                dest.outputStream().use { output -> input.copyTo(output) }
-            } != null
-        }.onFailure { WeLogger.w(TAG, "写入图片失败：$role / ${it.message}") }.getOrDefault(false)
-        if (!ok) return null
+                dest.outputStream().use { input.copyTo(it) }
+            } ?: error("读不到这张图片")
+            val manifest = JSONObject(File(pack.dir, MANIFEST).readText()).put(role, fileName)
+            val page = if (role == "wallpaper") "common" else role.removePrefix("wallpaper_")
+            if (page == "common" || page in ThemeProfile.PAGE_KEYS) {
+                val canonical = ThemeProfile.parse(manifest).toJson()
+                canonical.getJSONObject("appearance").getJSONObject("pages").put(page,
+                    JSONObject().put("kind", "image").put("asset", fileName))
+                saveManifest(pack, canonical, role)
+            } else saveManifest(pack, manifest, role)
+        } catch (failure: Throwable) {
+            val stillReferenced = runCatching {
+                File(pack.dir, MANIFEST).readText().contains("\"$fileName\"")
+            }.getOrDefault(true)
+            if (!stillReferenced) dest.delete()
+            throw failure
+        }
+    }.onFailure { WeLogger.w(TAG, "写入图片失败：$role / ${it.message}") }.getOrNull()
 
-        val manifestFile = File(pack.dir, MANIFEST)
-        val manifest = runCatching { JSONObject(manifestFile.readText()) }.getOrElse { JSONObject() }
-        manifest.put(role, fileName)
-        manifestFile.writeText(manifest.toString(2))
-        WeLogger.i(TAG, "主题包 ${pack.name} 已更新 $role -> $fileName")
-        return load(pack.dir)
-    }
-
-    /**
-     * 把某个素材位恢复成微信原生（删掉文件并清掉清单里的键）。
-     * 返回更新后的主题包；该位本来就没素材时原样返回。
-     */
+    /** 清单使用显式 native 阻断公共壁纸回退；旧素材保留，不影响已发布快照。 */
     fun resetRole(pack: Pack, role: String): Pack? = runCatching {
-        val manifestFile = File(pack.dir, MANIFEST)
-        val manifest = JSONObject(manifestFile.readText())
-        val fileName = manifest.optString(role).takeIf { it.isNotBlank() }
-            ?: return@runCatching pack
-        File(pack.dir, fileName).takeIf { it.exists() }?.delete()
+        require(role in listOf("wallpaper", "wallpaper_chats", "wallpaper_contacts", "wallpaper_discover", "wallpaper_me", "wallpaper_chatting", "wallpaper_panel", "bubble_left", "bubble_right"))
+        val manifest = ThemeProfile.parse(JSONObject(File(pack.dir, MANIFEST).readText())).toJson()
         manifest.remove(role)
-        manifestFile.writeText(manifest.toString(2))
-        WeLogger.i(TAG, "主题包 ${pack.name} 已重置 $role（恢复微信原生）")
-        load(pack.dir)
+        val page = if (role == "wallpaper") "common" else role.removePrefix("wallpaper_")
+        if (page == "common" || page in ThemeProfile.PAGE_KEYS) {
+            manifest.getJSONObject("appearance").getJSONObject("pages").put(page, JSONObject().put("kind", "native"))
+        }
+        saveManifest(pack, manifest, role)
     }.getOrNull()
+
+    private fun saveManifest(pack: Pack, manifest: JSONObject, role: String): Pack {
+        snapshotProvider?.let { requireNotNull(it(pack.id)) { "无法读取编辑前的主题配置" } }
+        val profile = ThemeProfile.parse(manifest)
+        validateAssets(profile) { safeAsset(pack.dir, it) }
+        val manifestFile = File(pack.dir, MANIFEST)
+        val previous = manifestFile.readBytes()
+        val canonical = profile.toJson()
+        val updated = pack.copy(
+            name = canonical.optString("name").ifBlank { pack.id },
+            author = canonical.optString("author"), version = canonical.optString("version"), manifest = canonical
+        )
+        val staged = File.createTempFile("manifest-", ".tmp", pack.dir)
+        var committed = false
+        try {
+            staged.writeText(canonical.toString(2))
+            ThemeProfile.parse(JSONObject(staged.readText()))
+            Files.move(staged.toPath(), manifestFile.toPath(),
+                StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            committed = true
+            onChanged?.invoke(updated, role)
+            return updated
+        } catch (failure: Throwable) {
+            if (committed) {
+                runCatching {
+                    staged.writeBytes(previous)
+                    Files.move(staged.toPath(), manifestFile.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+                }.onFailure(failure::addSuppressed)
+            }
+            throw failure
+        } finally {
+            staged.delete()
+        }
+    }
 
     /** 修改主题名称 / 描述（只改清单，不动素材目录）。 */
     fun updateMeta(pack: Pack, name: String?, description: String?): Pack? = runCatching {
@@ -357,8 +439,7 @@ object ThemePack {
         val manifest = JSONObject(manifestFile.readText())
         name?.takeIf { it.isNotBlank() }?.let { manifest.put("name", it) }
         description?.let { manifest.put("description", it) }
-        manifestFile.writeText(manifest.toString(2))
-        load(pack.dir)
+        saveManifest(pack, manifest, "metadata")
     }.getOrNull()
 
     /** 保存这套主题对应的美化开关快照（切换主题时用来同步页面开关）。 */
@@ -368,8 +449,7 @@ object ThemePack {
         val obj = JSONObject()
         switches.forEach { (key, value) -> obj.put(key, value) }
         manifest.put("switches", obj)
-        manifestFile.writeText(manifest.toString(2))
-        load(pack.dir)
+        saveManifest(pack, manifest, "switches")
     }.getOrNull()
 
     /** 读取开关快照；没有记录时返回空表（调用方保持当前状态）。 */
@@ -399,6 +479,81 @@ object ThemePack {
 
     /** 主题根目录，供设置页展示/引导用户放素材。 */
     fun themesDir(): File = root
+
+    /** 只收集格式约定的素材位；扩展元数据保持原样。值表示是否需要图像解码校验。 */
+    internal fun resourcePaths(manifest: JSONObject, asset: (String) -> File?): Map<String, Boolean> {
+        val paths = linkedMapOf<String, Boolean>()
+        fun add(value: Any?, image: Boolean) {
+            if (value is String && value.isNotBlank()) {
+                val path = ThemeProfile.assetPath(value)
+                paths[path] = paths[path] == true || image
+            }
+        }
+        for (key in listOf("wallpaper", "bubble_left", "bubble_right") + ThemeProfile.PAGE_KEYS.map { "wallpaper_$it" } + "wallpaper_panel") {
+            add(manifest.opt(key), true)
+        }
+        add(manifest.opt("font"), false)
+        manifest.optJSONArray("tab")?.let { values -> for (i in 0 until values.length()) add(values.opt(i), true) }
+        fun visit(value: Any?) {
+            when (value) {
+                is JSONObject -> {
+                    if (value.optString("kind") == "image") add(value.opt("asset"), true)
+                    value.keys().forEach { key ->
+                        if (key == "fab") {
+                            add(value.optJSONObject(key)?.opt("iconAsset"), true)
+                            visit(value.opt(key))
+                        } else if (key == "tabIcons") {
+                            val icons = value.optJSONObject(key)
+                            for (state in listOf("normal", "selected")) icons?.optJSONArray(state)?.let { a ->
+                                for (i in 0 until a.length()) add(a.opt(i), true)
+                            }
+                        } else visit(value.opt(key))
+                    }
+                }
+                is JSONArray -> for (i in 0 until value.length()) visit(value.opt(i))
+            }
+        }
+        visit(manifest.optJSONObject("appearance"))
+        manifest.optString("panel").takeIf { it.isNotBlank() }?.let { relative ->
+            val path = ThemeProfile.assetPath(relative)
+            val directory = asset(path)
+            require(directory != null && directory.isDirectory) { "缺少面板目录：$relative" }
+            directory.walkTopDown().filter { it.isFile }.forEach {
+                add("$path/" + it.relativeTo(directory).invariantSeparatorsPath, it.extension.equals("png", true))
+            }
+        }
+        return paths
+    }
+
+    internal fun safeAsset(dir: File, relative: String): File? = runCatching {
+        val path = ThemeProfile.assetPath(relative)
+        File(dir, path).canonicalFile.takeIf { it.path.startsWith(dir.canonicalPath + File.separator) }
+    }.getOrNull()
+
+    internal fun ensurePanelDirectory(profile: ThemeProfile, destination: File) {
+        profile.toJson().optString("panel").takeIf { it.isNotBlank() }?.let { relative ->
+            val directory = requireNotNull(safeAsset(destination, relative))
+            check(directory.isDirectory || directory.mkdirs()) { "无法创建面板目录" }
+        }
+    }
+
+    internal fun validateAssets(profile: ThemeProfile, asset: (String) -> File?) {
+        for ((relative, image) in resourcePaths(profile.toJson(), asset)) {
+            val file = asset(relative)
+            require(file != null && file.isFile && file.length() > 0L) { "缺少素材：$relative" }
+            if (image) {
+                val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(file.absolutePath, options)
+                require(options.outWidth > 0 && options.outHeight > 0) { "无效图片：$relative" }
+                options.inJustDecodeBounds = false
+                options.inSampleSize = 1
+                while (maxOf(options.outWidth, options.outHeight) / options.inSampleSize > 512) options.inSampleSize *= 2
+                val bitmap = BitmapFactory.decodeFile(file.absolutePath, options)
+                require(bitmap != null) { "图片无法解码：$relative" }
+                bitmap.recycle()
+            }
+        }
+    }
 
     // ══════════════════════════════════════════════════════════
     // 随机背景图池（"随机聊天背景"开关用，最多 5 张）
