@@ -41,15 +41,12 @@ import kotlin.io.path.listDirectoryEntries
  * | [ThemePages] / [ThemeSurface] | 页面分类、沉浸式窗口、生命周期挂载与还原 |
  * | [TabWallpaperRenderer] | DecorView 前景遮罩渲染（不塞子 View、不依赖布局、不拦点击） |
  *
- * **外观 / 入口 / 布局完全不变**：主题工坊页面仍是原来那套 UI，只是它背后调的东西换了。
- *
- * 历史：v245 起的六款内置主题（Hello Kitty / 小熊 / 线条小狗 / 吉伊卡哇 / 美食小狗 / 小兔子）、
- * 主题包导入导出、透明度 5~70%、气泡写入模块 assets、恢复默认自动还原备份 —— 全部保留。
+ * 仅提供用户创建或导入的主题；旧版六款内置主题及其随包素材已移除。
  */
 @Feature(
     name = "主题工坊",
     categories = ["界面美化"],
-    description = "内置 6 款全局主题，全局沉浸壁纸（主页/通讯录/发现/我的 等 4 个界面，或全部界面）+ 对应气泡，支持透明度调节与备份恢复"
+    description = "自定义主题包、四页背景、文字图标及聊天气泡，支持主题导入导出与原生外观恢复"
 )
 object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener {
 
@@ -95,6 +92,11 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     private val profileRepository by lazy { ThemeProfileRepository(File(ThemePaths.storeDir.toFile(), "profiles")) }
 
     init {
+        if (activeThemeId in BuiltinThemes.retiredIds) {
+            activeThemeId = ""
+            mainTitleColorHex = ""
+        }
+        if (ThemePack.currentId in BuiltinThemes.retiredIds) ThemePack.currentId = ""
         ThemePack.snapshotProvider = { id -> profileSnapshot(id) }
         ThemePack.onChanged = { pack, role -> syncPackEdit(pack, role) }
     }

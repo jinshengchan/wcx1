@@ -18,7 +18,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.Johnny.wcx.features.items.beautify.BuiltinThemes
 import com.Johnny.wcx.features.items.beautify.ThemePack
 import com.Johnny.wcx.features.items.beautify.ThemeSchedule
 import com.Johnny.wcx.features.items.beautify.ThemeScheduleController
@@ -30,18 +29,16 @@ import top.yukonga.miuix.kmp.basic.Switch
 
 /** 模式跟随主题；自动切换规则只保存在当前设备。 */
 @Composable
-internal fun ThemeModeSettings(id: String, revision: Int, onEditCopy: (ThemePack.Pack) -> Unit, onChanged: () -> Unit) {
+internal fun ThemeModeSettings(id: String, revision: Int, onChanged: () -> Unit) {
     val context = LocalContext.current
     var showMode by remember { mutableStateOf(false) }
     var showSchedule by remember { mutableStateOf(false) }
     val profile = remember(id, revision) { ThemeStore.profileSnapshot(id)?.profile }
-    TextButton(onClick = {
-        if (BuiltinThemes.find(id) != null) {
-            ThemeStore.cloneTheme(id).onSuccess { onEditCopy(it); showToast(context, "已复制，请编辑副本的深浅模式") }
-                .onFailure { showToast(context, "复制失败：${it.message}") }
-        } else showMode = true
-    }, enabled = profile != null) { Text("深浅模式（所选主题）") }
-    TextButton(onClick = { showSchedule = true }) { Text("日夜自动切换（本设备）") }
+    val policy = when (profile?.mode?.policy) {
+        "light" -> "浅色"; "dark" -> "深色"; "time" -> "跟随时间"; else -> "跟随系统"
+    }
+    if (profile != null) ThemeSettingRow("所选主题的深浅模式", policy) { showMode = true }
+    ThemeSettingRow("日夜自动切换", "本设备 · 分别选择日间与夜间主题") { showSchedule = true }
     if (showMode && profile != null) {
         var policy by remember(id) { mutableStateOf(profile.mode.policy) }
         var day by remember(id) { mutableStateOf(ThemeSchedule.formatTime(profile.mode.dayStart)) }
@@ -73,7 +70,7 @@ internal fun ThemeModeSettings(id: String, revision: Int, onEditCopy: (ThemePack
     }
     if (showSchedule) {
         val existing = remember { ThemeScheduleController.rule() }
-        val themes = remember(revision) { BuiltinThemes.all.map { it.id to it.name } + ThemePack.list().map { it.id to it.name } }
+        val themes = remember(revision) { ThemePack.list().map { it.id to it.name } }
         var enabled by remember { mutableStateOf(existing != null) }
         var dayId by remember { mutableStateOf(existing?.dayThemeId.orEmpty()) }
         var nightId by remember { mutableStateOf(existing?.nightThemeId.orEmpty()) }

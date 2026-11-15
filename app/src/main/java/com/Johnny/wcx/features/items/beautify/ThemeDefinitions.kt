@@ -24,55 +24,10 @@ data class ThemeInfo(
     val previewColor: Long
 )
 
-/** 内置主题清单（唯一真理源）。 */
+/** 已移除内置主题；保留旧标识用于清理升级前的主题选择。 */
 internal object BuiltinThemes {
-
-    private const val TAG = "BuiltinThemes"
-
-    val all: List<ThemeInfo> = listOf(
-        ThemeInfo(
-            id = "hellokitty", name = "Hello Kitty",
-            wallpaperAsset = "theme_store/wallpaper/hellokitty.jpg",
-            bubbleOtherAsset = "theme_store/bubbles/hellokitty/left_bubble.9.png",
-            bubbleSelfAsset = "theme_store/bubbles/hellokitty/right_bubble.9.png",
-            previewColor = 0xFFFFB6C1L
-        ),
-        ThemeInfo(
-            id = "bear", name = "小熊",
-            wallpaperAsset = "theme_store/wallpaper/bear.jpg",
-            bubbleOtherAsset = "theme_store/bubbles/bear/left_bubble.9.png",
-            bubbleSelfAsset = "theme_store/bubbles/bear/right_bubble.9.png",
-            previewColor = 0xFFD7A76FL
-        ),
-        ThemeInfo(
-            id = "puppy", name = "线条小狗",
-            wallpaperAsset = "theme_store/wallpaper/puppy.jpg",
-            bubbleOtherAsset = "theme_store/bubbles/puppy/left_bubble.9.png",
-            bubbleSelfAsset = "theme_store/bubbles/puppy/right_bubble.9.png",
-            previewColor = 0xFFFFE082L
-        ),
-        ThemeInfo(
-            id = "chiikawa", name = "吉伊卡哇",
-            wallpaperAsset = "theme_store/wallpaper/chiikawa.jpg",
-            bubbleOtherAsset = "theme_store/bubbles/chiikawa/left_bubble.9.png",
-            bubbleSelfAsset = "theme_store/bubbles/chiikawa/right_bubble.9.png",
-            previewColor = 0xFFA8D8F0L
-        ),
-        ThemeInfo(
-            id = "food_puppy", name = "美食小狗",
-            wallpaperAsset = "theme_store/wallpaper/food_puppy.jpg",
-            bubbleOtherAsset = "theme_store/bubbles/food_puppy/left_bubble.9.png",
-            bubbleSelfAsset = "theme_store/bubbles/food_puppy/right_bubble.9.png",
-            previewColor = 0xFFF7E0B0L
-        ),
-        ThemeInfo(
-            id = "bunny", name = "小兔子",
-            wallpaperAsset = "theme_store/wallpaper/bunny.jpg",
-            bubbleOtherAsset = "theme_store/bubbles/bunny/left_bubble.9.png",
-            bubbleSelfAsset = "theme_store/bubbles/bunny/right_bubble.9.png",
-            previewColor = 0xFFFAD0DCL
-        )
-    )
+    val retiredIds = setOf("hellokitty", "bear", "puppy", "chiikawa", "food_puppy", "bunny")
+    val all: List<ThemeInfo> = emptyList()
 
     fun find(id: String): ThemeInfo? = all.firstOrNull { it.id == id }
 
