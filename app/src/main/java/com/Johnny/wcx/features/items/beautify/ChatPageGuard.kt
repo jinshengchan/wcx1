@@ -153,6 +153,9 @@ internal object ChatPageGuard {
     var mainPageInfo: String = "未检测"
         private set
 
+    var mainPageHasInput: Boolean = false
+        private set
+
     /**
      * **正向识别「当前是不是 4 个 Tab 主页面」** —— 主题背景的唯一放行条件。
      *
@@ -168,6 +171,7 @@ internal object ChatPageGuard {
      *    这是关键反证：聊天页无论别的怎么变，底部输入框一定在。
      */
     fun detectMainPage(activity: Activity, chatPageVisible: Boolean): Boolean = runCatching {
+        mainPageHasInput = false
         val decor = activity.window?.decorView as? ViewGroup ?: return false
         val content = decor.findViewById<ViewGroup>(android.R.id.content) ?: return false
         val screenH = decor.height.takeIf { it > 0 } ?: return false
@@ -189,6 +193,7 @@ internal object ChatPageGuard {
                 // 反证 1：底部输入框（聊天页铁证）
                 if (v is EditText && rect.top > screenH * 0.70f && rect.height() > 10) {
                     bottomInput = true
+                    mainPageHasInput = true
                 }
                 // 正证据 A：大面积会话列表（主页面内容区）
                 if (!bigList && isRecyclerLike(v) &&

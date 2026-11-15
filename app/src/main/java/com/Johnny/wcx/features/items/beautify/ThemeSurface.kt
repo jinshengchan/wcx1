@@ -180,6 +180,8 @@ internal object ThemeSurface {
     var onMainPage = true
         private set
 
+    private var confirmedMainRef: WeakReference<Activity>? = null
+
     @Volatile
     private var lastChatHit: ChatPageGuard.Hit? = null
 
@@ -298,10 +300,11 @@ internal object ThemeSurface {
         lastChatHit = hit
 
         // ── ⓪ 正向判定：先问「这里是不是主页面」（放行条件之一，先算以便本次事件就用上） ──
-        onMainPage = ChatPageGuard.detectMainPage(activity, chatPageVisible)
+        updateMainPage(activity, visible)
 
         // ── ① 实时特征命中 = 在聊天页（最高优先，特征命中就绝不放行）──
         if (visible) {
+            confirmedMainRef = null
             anchorLeaveSince = 0L
             val entered = !viewChatActive
             viewChatActive = true
@@ -754,6 +757,16 @@ internal object ThemeSurface {
      *
      * 由 [TabWallpaperRenderer] 选择全屏窗口底图或兼容的 foreground 遮罩。
      */
+    private fun updateMainPage(activity: Activity, detectedChat: Boolean = false) {
+        val detected = ChatPageGuard.detectMainPage(activity, chatPageVisible)
+        if (detected && ThemePages.isLauncher(activity) && !detectedChat) confirmedMainRef = WeakReference(activity)
+        val retained = !detected && onMainPage && ThemePages.isLauncher(activity) && confirmedMainRef?.get() === activity &&
+            !detectedChat && !chatPageVisible && !ChatPageGuard.mainPageHasInput
+        if (detectedChat || chatPageVisible || ChatPageGuard.mainPageHasInput) confirmedMainRef = null
+        if (retained) noteEvent("主页特征暂缺，保留已挂载背景：${ChatPageGuard.mainPageInfo}")
+        onMainPage = !detectedChat && !ChatPageGuard.mainPageHasInput && (detected || retained)
+    }
+
     private fun applyTabWallpapers(activity: Activity, tabHint: Int? = null) {
         if (!ThemeStore.wallpaperSwitchOn()) {
             TabWallpaperRenderer.clear(activity)
@@ -764,7 +777,7 @@ internal object ThemeSurface {
         // 首次布局可能还没有 Tab；先安装监听，布局完成后才能补挂。
         ensureWindowFocusWatcher(activity, decor)
         ensureChatWatcher(activity, decor)
-        runCatching { onMainPage = ChatPageGuard.detectMainPage(activity, chatPageVisible) }
+        runCatching { updateMainPage(activity) }
         if (!onMainPage || chatPageVisible) {
             TabWallpaperRenderer.clear(activity)
             restoreWindow(activity)
@@ -845,6 +858,7 @@ internal object ThemeSurface {
      * 明文未混淆；而 ChattingUI 是外部/通知进入时才用的 Activity）。
      */
     fun onChattingFragmentShown(fragmentView: View?) {
+        confirmedMainRef = null
         if (!fragmentChatActive) {
             noteEvent("聊天页 Fragment 出现 → 撤壁纸 + 容器兜底")
         }
@@ -882,6 +896,7 @@ internal object ThemeSurface {
      * 聊天页一出现就把主界面的壁纸遮罩**整个撤掉** —— 不存在就无从透出。
      */
     fun onChattingPageShown(activity: Activity?) {
+        confirmedMainRef = null
         noteEvent("聊天页出现(${activity?.javaClass?.simpleName ?: "?"}) → 撤遮罩")
         // 聊天页自己窗口上也清一遍：万一历史上被误挂过，一并不留
         if (activity != null) runCatching { TabWallpaperRenderer.clear(activity) }
