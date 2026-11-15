@@ -11,8 +11,10 @@ import android.graphics.Rect
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.DrawableWrapper
+import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.NinePatchDrawable
+import android.graphics.drawable.StateListDrawable
 import android.os.Build
 import android.view.View
 import android.view.ViewGroup
@@ -229,7 +231,7 @@ internal object PageWallpaperUnderlay {
                 if (structural || isNeutralSurface(background)) {
                     makeTransparent(state, view, structural)
                 } else if (background != null && background !is SurfaceBackground && state.retainedRows.size < 6) {
-                    state.retainedRows.add("${view.javaClass.simpleName}/${background.javaClass.simpleName}")
+                    state.retainedRows.add("${view.javaClass.simpleName}/${background.javaClass.simpleName}${retainedDetail(background)}")
                 }
             }
             if (view is ViewGroup) for (i in 0 until view.childCount) {
@@ -322,19 +324,36 @@ internal object PageWallpaperUnderlay {
         if (transparent is SurfaceBackground) original.callback = transparent
     }
 
+    /** 单色是否中性：全透明，或全不透明且 RGB 三通道极差 ≤ 10（近灰）。 */
+    private fun isNeutralColor(color: Int): Boolean =
+        Color.alpha(color) == 0 || (Color.alpha(color) == 255 &&
+            maxOf(Color.red(color), Color.green(color), Color.blue(color)) -
+            minOf(Color.red(color), Color.green(color), Color.blue(color)) <= 10)
+
+    /** 保留原因诊断：纯色给色值+色偏，状态列表给当前态子类；进现有诊断的“保留行背景”里，不另起日志。 */
+    private fun retainedDetail(drawable: Drawable): String = when (drawable) {
+        is ColorDrawable -> {
+            val color = drawable.color
+            String.format("(#%08X~%d)", color,
+                maxOf(Color.red(color), Color.green(color), Color.blue(color)) -
+                minOf(Color.red(color), Color.green(color), Color.blue(color)))
+        }
+        is StateListDrawable -> "（current=${drawable.current?.javaClass?.simpleName ?: "null"}）"
+        else -> ""
+    }
+
     private fun isNeutralSurface(drawable: Drawable?, depth: Int = 0): Boolean {
         if (drawable == null || depth > 4) return false
         val current = drawable.current
         if (current !== drawable) return isNeutralSurface(current, depth + 1)
         return when (drawable) {
-            is ColorDrawable -> {
-                val color = drawable.color
-                Color.alpha(color) == 0 || (Color.alpha(color) == 255 &&
-                    maxOf(Color.red(color), Color.green(color), Color.blue(color)) -
-                    minOf(Color.red(color), Color.green(color), Color.blue(color)) <= 10)
-            }
+            is ColorDrawable -> isNeutralColor(drawable.color)
             is DrawableWrapper -> isNeutralSurface(drawable.drawable, depth + 1)
             is NinePatchDrawable -> isNeutralNinePatch(drawable)
+            is GradientDrawable -> runCatching {
+                val colors = drawable.colors
+                colors != null && colors.isNotEmpty() && colors.all { isNeutralColor(it) }
+            }.getOrDefault(false)
             is LayerDrawable -> {
                 val layers = (0 until drawable.numberOfLayers).filter { drawable.getId(it) != android.R.id.mask }
                 layers.isNotEmpty() && layers.all { isNeutralSurface(drawable.getDrawable(it), depth + 1) }
@@ -343,7 +362,11 @@ internal object PageWallpaperUnderlay {
         }
     }
 
-    /** Inspect a copy so probing never changes the host's bounds, callback or drawable state. */
+    /**
+     * Inspect a copy so probing never changes the host's bounds, callback or drawable state.
+     * 只采中心填充区：九宫格边缘常带 1px 分割线/阴影/半透明描边，全图采样会把整张底色
+     * 误判为非中性；真正盖住底图的是中间填充，边缘色偏不影响透底。
+     */
     private fun isNeutralNinePatch(drawable: NinePatchDrawable): Boolean {
         val source = drawable.constantState ?: return false
         ninePatchChecks[drawable]?.let { check ->
@@ -364,7 +387,8 @@ internal object PageWallpaperUnderlay {
                 probe.draw(Canvas(bitmap))
                 var darkest = 255
                 var lightest = 0
-                for (y in 0 until bitmap.height) for (x in 0 until bitmap.width) {
+                val inset = 4
+                for (y in inset until bitmap.height - inset) for (x in inset until bitmap.width - inset) {
                     val color = bitmap.getPixel(x, y)
                     if (Color.alpha(color) == 0) continue
                     if (Color.alpha(color) != 255) return@runCatching false
