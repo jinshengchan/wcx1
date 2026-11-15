@@ -144,8 +144,9 @@ internal object TabWallpaperRenderer {
         PageWallpaperUnderlay.clear(activity)
         MainPageAppearance.apply(activity, null, textColorEnabled, titleColor, profile, shouldDraw)
 
+        val effectiveAlpha = (alphaPct.coerceIn(MIN_ALPHA_PCT, MAX_ALPHA_PCT) * opacity.coerceIn(0f, 1f)).toInt()
         val mask = WallpaperMaskDrawable(bmp, shouldDraw)
-        mask.setAlpha(alphaPct.coerceIn(MIN_ALPHA_PCT, MAX_ALPHA_PCT) * 255 / 100)
+        mask.setAlpha(effectiveAlpha * 255 / 100)
         if (!savedForeground.containsKey(decor)) savedForeground[decor] = decor.foreground
         runCatching { decor.foreground = mask }
             .onFailure { return fail("setForeground 抛异常：${it.message}") }
@@ -158,8 +159,8 @@ internal object TabWallpaperRenderer {
             runCatching { mask.setBounds(0, 0, decor.width, decor.height) }
         }
         runCatching { decor.invalidate() }
-        reassertLater(activity, mask, alphaPct)
-        val result = ok(activity, source, tab, alphaPct)
+        reassertLater(activity, mask, effectiveAlpha)
+        val result = ok(activity, source, tab, effectiveAlpha)
         if (underlayFailure != null) lastResult = "回退前景遮罩：$underlayFailure"
         return result
     }
@@ -180,7 +181,7 @@ internal object TabWallpaperRenderer {
                 if (decor.foreground === mask) return@postDelayed
                 // 被微信换掉了 → 写回我们的遮罩（原 foreground 早在第一次 apply 时备份过）
                 runCatching {
-                    mask.setAlpha(alphaPct.coerceIn(MIN_ALPHA_PCT, MAX_ALPHA_PCT) * 255 / 100)
+                    mask.setAlpha(alphaPct.coerceIn(0, MAX_ALPHA_PCT) * 255 / 100)
                     if (decor.width > 0 && decor.height > 0) mask.setBounds(0, 0, decor.width, decor.height)
                     decor.foreground = mask
                     decor.invalidate()

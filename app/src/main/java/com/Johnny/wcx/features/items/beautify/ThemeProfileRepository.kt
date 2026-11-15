@@ -91,6 +91,28 @@ internal class ThemeProfileRepository(private val root: File) {
         }
     }
 
+    /** 先暂存配置，包暂存失败时恢复原目录和缓存。 */
+    @Synchronized
+    fun delete(id: String, stagePack: () -> Unit) {
+        val dir = directory(id)
+        val staged = File(root, ".delete-" + UUID.randomUUID())
+        val hadProfile = dir.exists()
+        if (hadProfile) Files.move(dir.toPath(), staged.toPath())
+        try {
+            stagePack()
+        } catch (failure: Throwable) {
+            if (hadProfile) {
+                try { Files.move(staged.toPath(), dir.toPath()) }
+                catch (rollback: Throwable) { failure.addSuppressed(rollback) }
+            }
+            throw failure
+        }
+        cache.remove(id)
+        if (hadProfile && !runCatching { staged.deleteRecursively() }.getOrDefault(false)) {
+            com.Johnny.wcx.utils.WeLogger.w("ThemeProfileRepository", "主题配置临时目录清理失败：$staged")
+        }
+    }
+
     private fun directory(id: String): File {
         require(id.isNotBlank()) { "主题标识为空" }
         val dir = File(root, id).canonicalFile

@@ -217,13 +217,14 @@ object ThemePack {
         }
     }
 
-    fun delete(id: String): Boolean {
-        if (id.isBlank() || File(root, id).canonicalFile.parentFile != root.canonicalFile) return false
-        if (currentId == id) currentId = ""
-        val dir = File(root, id)
-        val ok = dir.exists() && dir.deleteRecursively()
-        if (ok) WeLogger.i(TAG, "主题包已删除：$id")
-        return ok
+    /** 将包移出列表；同一文件系统内移动失败时保留原目录。 */
+    internal fun stageDelete(id: String): File {
+        require(id.isNotBlank()) { "主题标识为空" }
+        val dir = File(root, id).canonicalFile
+        require(dir.parentFile == root.canonicalFile && dir.isDirectory) { "主题包不存在" }
+        val staged = File(root.parentFile, ".theme-delete-" + UUID.randomUUID())
+        Files.move(dir.toPath(), staged.toPath())
+        return staged
     }
 
     /**

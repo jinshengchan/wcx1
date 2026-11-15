@@ -509,7 +509,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                     val backgroundOn = remember(tick) { ThemeStore.mainWallpaperEnabled() }
                     SwitchRow(
                         title = "开启主界面背景",
-                        summary = "只控制最近聊天、通讯录、发现、我四页背景，关闭后恢复原生背景",
+                        summary = "控制当前使用主题的四页背景；下方主题配置编辑所选主题，可能与当前主题不同",
                         checked = backgroundOn,
                     ) { enabled ->
                         if (!editableActive()) return@SwitchRow
@@ -554,7 +554,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                     val textColorOn = remember(tick) { ThemeStore.mainTextColorEnabled() }
                     val customTitleColor = remember(tick) { ThemeStore.mainTitleColor() }
                     SwitchRow(
-                        title = "开启主界面文字颜色",
+                        title = "主界面文字总开关（当前主题）",
                         summary = "随主题功能总开关生效；关闭后恢复微信原生文字和图标颜色，开启后即时应用下方设置",
                         checked = textColorOn,
                     ) { enabled ->
@@ -570,7 +570,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                         Column(
                             modifier = Modifier.weight(1f).clickable { if (editableActive()) showTitleColor = true }.padding(vertical = 4.dp),
                         ) {
-                            Text("标题颜色", fontSize = 15.sp, color = titleColor())
+                            Text("默认文字与图标颜色", fontSize = 15.sp, color = titleColor())
                             Spacer(Modifier.height(2.dp))
                             Text(
                                 customTitleColor?.let { rgbHex(it) } ?: "自动（按背景调整清晰文字）",
@@ -590,14 +590,14 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                             refreshAll()
                         }) { Text("恢复") }
                     }
-                    HintRow("应用于四页主要标题、顶部标题/搜索/加号及底部标签文字和图标。状态栏图标随标题颜色自动切换深浅。")
+                    HintRow("只设置当前主题的默认颜色；各角色的独立配色优先，不会被此项覆盖。下方所选主题的分组关闭或深色禁用时，该分组不着色。")
                 }
             }
 
             // ── 卡片1 主题基础 ───────────────────────────────
             item {
                 GroupCard(title = "主题基础") {
-                    ThemeModeSettings(selectedId, tick) { refreshAll() }
+                    ThemeModeSettings(selectedId, tick, onEditCopy = { refreshAll(); select(it.id) }) { refreshAll() }
                     RowDivider()
                     // 随机聊天背景：开关 + 齿轮（管理图池，最多 5 张）
                     Row(
@@ -938,7 +938,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                     GuideLine("3", "应用后会自动重启", "点「应用」后会自动热重启微信，重开就能看到效果；重启失败时才需要手动划掉微信重开。")
                     GuideLine("4", "主界面即时设置", "上方背景与文字颜色设置只作用于正在使用的主题，无需重启。四页可共用一张图片，也可单独选择或恢复；内置主题同样适用。")
                     GuideLine("5", "自己做/分享", "新建主题 → 选图片 → 保存 → 右上角应用；分享按钮只分享自己的主题。")
-                    GuideLine("6", "聊天页规则", "主题只作用于主页/通讯录/发现/我 4 个界面，永远不影响聊天页；聊天页背景由微信自带，或用「随机聊天背景」图池。")
+                    GuideLine("6", "聊天页规则", "四页背景与聊天外观分别配置；聊天外观组关闭时沿用独立气泡设置，明确选择原生气泡时使用微信样式。")
                     GuideLine("7", "透明度为什么封顶 70%", "背景越不透明越容易盖住文字、时间和分割线。70% 是「背景够明显、文字还看得清」的平衡点，默认 40%。")
                     GuideLine("8", "旧气泡没换掉怎么办", "右上角 ⋮ →「清除主题缓存」，一键清掉已应用的气泡与背景，回到微信原生。")
                 }
@@ -1007,7 +1007,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
             title = { Text("清除主题缓存") },
             text = {
                 Text(
-                    "会清掉：已应用的气泡文件、内置主题素材缓存、已挂的背景层。\n" +
+                    "会撤销当前主题外观，清理解码和内置素材缓存；保留主题包、配置及独立气泡素材。\n" +
                         "不会删除你的主题包，也不会动备份。\n\n" +
                         "用于「换了主题但旧气泡还在」或「没在用主题却还有残留气泡」的情况。"
                 )
@@ -1018,7 +1018,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                     runCatching { ThemeStore.clearThemeCache() }
                         .onSuccess {
                             refreshAll()
-                            showToast(context, "已清除主题缓存，气泡恢复微信原生")
+                            showToast(context, "已撤销主题并清理缓存，保留独立气泡设置")
                         }
                         .onFailure {
                             WeLogger.w("ThemeWorkshop", "清除缓存失败：${it.message}")
@@ -1034,7 +1034,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmReset = false },
             title = { Text("恢复默认") },
-            text = { Text("移除所有自定义背景，气泡恢复微信原生样式。背景会立即恢复，气泡要重进聊天界面才生效。") },
+            text = { Text("撤销当前主题的背景、颜色与气泡覆盖；保留主题配置和独立功能设置。") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmReset = false
@@ -1043,7 +1043,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                             selectedId = ""
                             loadDraft(null)
                             refreshAll()
-                            showToast(context, "已恢复微信原生背景与气泡")
+                            showToast(context, "已撤销当前主题，保留独立功能设置")
                         }
                         .onFailure {
                             WeLogger.w("ThemeWorkshop", "恢复默认失败：${it.message}")
@@ -1202,12 +1202,13 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                         shareSelectedTheme(context, target.id)
                     }
                     PickerRow("删除主题", false, selectedId == target.id) {
-                        ThemePack.delete(target.id)
-                        if (editing?.id == target.id) loadDraft(null)
-                        if (selectedId == target.id) selectedId = ""
-                        longPressTarget = null
-                        refreshAll()
-                        showToast(context, "已删除：${target.name}")
+                        ThemeStore.deleteTheme(target.id).onSuccess {
+                            if (editing?.id == target.id) loadDraft(null)
+                            if (selectedId == target.id) selectedId = ""
+                            longPressTarget = null
+                            refreshAll()
+                            showToast(context, "已删除：${target.name}")
+                        }.onFailure { showToast(context, "删除失败：${it.message}") }
                     }
                 }
             },
@@ -1347,7 +1348,7 @@ private fun OpacityRow(tick: Int) {
             Text("$pct%", fontSize = 13.sp, color = summaryColor())
         }
         Text(
-            text = if (clearBackground) "全屏连续背景按原图显示；此项控制聊天壁纸与兼容显示的透明度。" else
+            text = if (clearBackground) "四页图片使用各页不透明度；此项仅控制随机聊天背景和兼容遮罩。兼容模式会再乘以各页图片不透明度。" else
                 "默认 40%，最高 70%。再往上背景会压住文字、时间、分割线，" +
                     "聊天列表和消息就看不清了，所以封在 70%。",
             fontSize = 11.sp,

@@ -36,6 +36,7 @@ internal object ChatThemeAppearance {
     fun bubble(context: android.content.Context, self: Boolean): Bubble {
         val snapshot = ThemeRuntime.current(context) ?: return Bubble.Inherit
         val profile = snapshot.profile
+        if (!profile.enabled("chat")) return Bubble.Inherit
         val rule = profile.background("chat", if (self) "rightBubble" else "leftBubble")
         return when (rule) {
             BackgroundRule.Native -> Bubble.Native

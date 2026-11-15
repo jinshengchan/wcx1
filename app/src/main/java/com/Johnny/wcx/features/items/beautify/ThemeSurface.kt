@@ -183,7 +183,7 @@ internal object ThemeSurface {
     private var confirmedMainRef: WeakReference<Activity>? = null
 
     @Volatile
-    private var lastChatHit: ChatPageGuard.Hit? = null
+    private var lastChatHit: String? = null
 
     @Volatile
     private var lastChatCheckAt = 0L
@@ -272,7 +272,7 @@ internal object ThemeSurface {
         val hit = lastChatHit
         val byFragment = if (fragmentChatActive) "Fragment锚点=命中" else "Fragment锚点=未命中"
         val byView = if (hit != null) {
-            "特征=命中（输入框=${hit.hasInput} 列表=${hit.hasList} 标题=${hit.hasTitle} ${hit.detail}）"
+            "特征=命中（$hit）"
         } else {
             "特征=未命中[${ChatPageGuard.lastMissInfo}]"
         }
@@ -297,7 +297,7 @@ internal object ThemeSurface {
 
         val hit = ChatPageGuard.detect(activity)
         val visible = hit != null
-        lastChatHit = hit
+        lastChatHit = hit?.let { "输入框=${it.hasInput} 列表=${it.hasList} 标题=${it.hasTitle} ${it.detail}" }
 
         // ── ⓪ 正向判定：先问「这里是不是主页面」（放行条件之一，先算以便本次事件就用上） ──
         updateMainPage(activity, visible)
@@ -490,6 +490,7 @@ internal object ThemeSurface {
     }
 
     fun registerCallbacks(register: Boolean) {
+        if (!register) { lastChatHit = null; confirmedMainRef = null }
         if (!register) mainWatchers.keys.toList().forEach(::removeMainWatcher)
         try {
             val app = hostApp ?: return
@@ -876,6 +877,8 @@ internal object ThemeSurface {
 
     /** 聊天页 Fragment 离开（onPause/onDestroyView）：回主界面时重挂。 */
     fun onChattingFragmentHidden() {
+        ChatPageGuard.restoreAll()
+        lastChatHit = null
         val wasActive = fragmentChatActive
         fragmentChatActive = false
         anchorLeaveSince = 0L
@@ -912,6 +915,8 @@ internal object ThemeSurface {
      * 拿不到焦点也没关系 —— 焦点监听和 onActivityResumed 都会补。
      */
     fun onChattingPageClosed() {
+        ChatPageGuard.restoreAll()
+        lastChatHit = null
         runCatching {
             liveActivities()
                 .firstOrNull {
@@ -1007,6 +1012,8 @@ internal object ThemeSurface {
 
     /** 撤掉所有存活页面的壁纸与窗口还原。 */
     fun removeAllLive() {
+        ChatPageGuard.restoreAll()
+        lastChatHit = null
         liveActivities().forEach { act ->
             runCatching { removeWallpaper(act) }
             runCatching { restoreWindow(act) }

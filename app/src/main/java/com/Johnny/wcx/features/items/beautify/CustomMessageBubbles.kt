@@ -285,7 +285,8 @@ object CustomMessageBubbles : ClickableFeature(), WeChatMessageViewApi.ICreateVi
     private fun applyBubble(bubbleView: View, isSelfSender: Boolean, useTheme: Boolean = true) {
         val context = bubbleView.context
         val configured = if (useTheme) ChatThemeAppearance.bubble(context, isSelfSender) else ChatThemeAppearance.Bubble.Inherit
-        val theme = if (configured === ChatThemeAppearance.Bubble.Native) ChatThemeAppearance.Bubble.Inherit else configured
+        if (configured === ChatThemeAppearance.Bubble.Native) return
+        val theme = configured
         val original = bubbleView.background
         val originalPadding = intArrayOf(bubbleView.paddingLeft, bubbleView.paddingTop, bubbleView.paddingRight, bubbleView.paddingBottom)
         if (theme is ChatThemeAppearance.Bubble.Solid) {

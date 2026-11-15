@@ -30,12 +30,17 @@ import top.yukonga.miuix.kmp.basic.Switch
 
 /** 模式跟随主题；自动切换规则只保存在当前设备。 */
 @Composable
-internal fun ThemeModeSettings(id: String, revision: Int, onChanged: () -> Unit) {
+internal fun ThemeModeSettings(id: String, revision: Int, onEditCopy: (ThemePack.Pack) -> Unit, onChanged: () -> Unit) {
     val context = LocalContext.current
     var showMode by remember { mutableStateOf(false) }
     var showSchedule by remember { mutableStateOf(false) }
     val profile = remember(id, revision) { ThemeStore.profileSnapshot(id)?.profile }
-    TextButton(onClick = { showMode = true }, enabled = profile != null) { Text("深浅模式（所选主题）") }
+    TextButton(onClick = {
+        if (BuiltinThemes.find(id) != null) {
+            ThemeStore.cloneTheme(id).onSuccess { onEditCopy(it); showToast(context, "已复制，请编辑副本的深浅模式") }
+                .onFailure { showToast(context, "复制失败：${it.message}") }
+        } else showMode = true
+    }, enabled = profile != null) { Text("深浅模式（所选主题）") }
     TextButton(onClick = { showSchedule = true }) { Text("日夜自动切换（本设备）") }
     if (showMode && profile != null) {
         var policy by remember(id) { mutableStateOf(profile.mode.policy) }

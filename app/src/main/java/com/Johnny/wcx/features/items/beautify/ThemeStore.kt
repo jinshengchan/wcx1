@@ -334,101 +334,73 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
      */
     private fun hookChattingFragment() {
         if (chattingFragmentHooked) return
-        chattingFragmentHooked = true
         var hooked = 0
-        listOf(
-            "com.tencent.mm.ui.chatting.ChattingUIFragment",
-            "com.tencent.mm.ui.chatting.BaseChattingUIFragment"
-        ).forEach { clsName ->
-            runCatching {
-                val clazz = ClassLoaders.HOST.loadClass(clsName)
-                listOf("onCreate", "onResume", "onViewCreated").forEach { methodName ->
-                    runCatching {
-                        val method = clazz.reflekt().firstMethodOrNull { name = methodName }
-                            ?: return@runCatching
-                        method.hookAfter {
-                            val view = runCatching {
-                                thisObject.javaClass.getMethod("getView").invoke(thisObject) as? View
-                            }.getOrNull()
-                            ThemeSurface.onChattingFragmentShown(view)
-                        }
-                        hooked++
-                    }.onFailure { WeLogger.w(TAG, "hook $clsName.$methodName 失败", it) }
+        listOf("com.tencent.mm.ui.chatting.ChattingUIFragment", "com.tencent.mm.ui.chatting.BaseChattingUIFragment").forEach { clsName ->
+            val clazz = runCatching { ClassLoaders.HOST.loadClass(clsName) }
+                .onFailure { WeLogger.w(TAG, "加载聊天页 Fragment 失败（$clsName）：${it.message}") }.getOrNull() ?: return@forEach
+            listOf("onCreate", "onResume", "onViewCreated").forEach { methodName ->
+                val method = runCatching { clazz.reflekt().firstMethodOrNull { name = methodName } }.getOrNull()
+                if (method != null) {
+                    method.hookAfter {
+                        val view = runCatching { thisObject.javaClass.getMethod("getView").invoke(thisObject) as? View }.getOrNull()
+                        ThemeSurface.onChattingFragmentShown(view)
+                    }
+                    hooked++
                 }
-                listOf("onPause", "onDestroyView").forEach { methodName ->
-                    runCatching {
-                        val method = clazz.reflekt().firstMethodOrNull { name = methodName }
-                            ?: return@runCatching
-                        method.hookAfter { ThemeSurface.onChattingFragmentHidden() }
-                        hooked++
-                    }.onFailure { WeLogger.w(TAG, "hook $clsName.$methodName 失败", it) }
+            }
+            listOf("onPause", "onDestroyView").forEach { methodName ->
+                val method = runCatching { clazz.reflekt().firstMethodOrNull { name = methodName } }.getOrNull()
+                if (method != null) {
+                    method.hookAfter { ThemeSurface.onChattingFragmentHidden() }
+                    hooked++
                 }
-            }.onFailure { WeLogger.w(TAG, "加载聊天页 Fragment 失败（$clsName）：${it.message}") }
+            }
         }
-        // 泛化兜底：MMFragment 是所有微信 Fragment 的基类。
-        // 万一上面两个具体类的方法是被子类 override（父类声明 hook 不到），
-        // 这里按「类名里带 Chatting」兜住私聊 / 群聊 / 半屏聊天 / 公众号聊天等全部变体。
-        runCatching {
-            val mmFragment = ClassLoaders.HOST.loadClass("com.tencent.mm.ui.MMFragment")
+        val mmFragment = runCatching { ClassLoaders.HOST.loadClass("com.tencent.mm.ui.MMFragment") }
+            .onFailure { WeLogger.w(TAG, "加载 MMFragment 失败：${it.message}") }.getOrNull()
+        if (mmFragment != null) {
             listOf("onResume", "onCreate").forEach { methodName ->
-                runCatching {
-                    val method = mmFragment.reflekt().firstMethodOrNull { name = methodName }
-                        ?: return@runCatching
+                val method = runCatching { mmFragment.reflekt().firstMethodOrNull { name = methodName } }.getOrNull()
+                if (method != null) {
                     method.hookAfter {
                         val cn = thisObject.javaClass.name.orEmpty()
                         if (cn.contains("Chatting", ignoreCase = true)) {
-                            val view = runCatching {
-                                thisObject.javaClass.getMethod("getView").invoke(thisObject) as? View
-                            }.getOrNull()
+                            val view = runCatching { thisObject.javaClass.getMethod("getView").invoke(thisObject) as? View }.getOrNull()
                             ThemeSurface.onChattingFragmentShown(view)
                         }
                     }
                     hooked++
-                }.onFailure { WeLogger.w(TAG, "hook MMFragment.$methodName 失败", it) }
+                }
             }
-        }.onFailure { WeLogger.w(TAG, "加载 MMFragment 失败：${it.message}") }
-
+        }
         chattingFragmentHookCount = hooked
         chattingFragmentHookOk = hooked > 0
-        // 锚点挂上 → 聊天页状态以锚点为权威，视图特征不再参与判定（防止残留卡死绘制）
+        chattingFragmentHooked = hooked > 0
         ThemeSurface.fragmentAnchorAvailable = hooked > 0
         WeLogger.i(TAG, "聊天页 Fragment 锚点：已 hook $hooked 个方法（进入即撤壁纸 + 容器兜底）")
     }
 
-    /**
-     * 聊天页锚点：`com.tencent.mm.ui.chatting.ChattingUI`（8.0.79 实测类名，多年未变）。
-     *
-     * 它一出现就把主界面壁纸遮罩整个撤掉 —— 这比在主界面侧等 onPause / 等失焦可靠得多，
-     * 因为聊天页无论是不是半透明窗口，它自己的 onCreate/onResume 一定会执行。
-     */
+    /** 聊天页 Activity 锚点。 */
     private fun hookChattingPage() {
         if (chattingPageHooked) return
-        chattingPageHooked = true
-        runCatching {
-            val clazz = ClassLoaders.HOST.loadClass("com.tencent.mm.ui.chatting.ChattingUI")
-            var hooked = 0
-            listOf("onCreate", "onResume").forEach { methodName ->
-                runCatching {
-                    val method = clazz.reflekt().firstMethodOrNull { name = methodName }
-                    if (method == null) {
-                        WeLogger.w(TAG, "ChattingUI 里没有 $methodName 方法，跳过")
-                        return@runCatching
-                    }
-                    method.hookAfter {
-                        ThemeSurface.onChattingPageShown(thisObject as? Activity)
-                    }
-                    hooked++
-                }.onFailure { WeLogger.w(TAG, "hook ChattingUI.$methodName 失败", it) }
+        val clazz = runCatching { ClassLoaders.HOST.loadClass("com.tencent.mm.ui.chatting.ChattingUI") }
+            .onFailure { WeLogger.w(TAG, "加载聊天页 ChattingUI 失败：${it.message}") }.getOrNull() ?: return
+        var hooked = 0
+        listOf("onCreate", "onResume").forEach { methodName ->
+            val method = runCatching { clazz.reflekt().firstMethodOrNull { name = methodName } }.getOrNull()
+            if (method != null) {
+                method.hookAfter { ThemeSurface.onChattingPageShown(thisObject as? Activity) }
+                hooked++
             }
-            runCatching {
-                clazz.reflekt().firstMethodOrNull { name = "onDestroy" }?.let { method ->
-                    method.hookAfter { ThemeSurface.onChattingPageClosed() }
-                    hooked++
-                }
-            }.onFailure { WeLogger.w(TAG, "hook ChattingUI.onDestroy 失败", it) }
-            chattingHookOk = hooked > 0
-            WeLogger.i(TAG, "聊天页锚点：已 hook ChattingUI 的 $hooked 个方法（进入即撤掉主界面壁纸）")
-        }.onFailure { WeLogger.w(TAG, "hook 聊天页 ChattingUI 失败：${it.message}") }
+        }
+        val onDestroy = runCatching { clazz.reflekt().firstMethodOrNull { name = "onDestroy" } }.getOrNull()
+        if (onDestroy != null) {
+            onDestroy.hookAfter { ThemeSurface.onChattingPageClosed() }
+            hooked++
+        }
+        chattingHookOk = hooked > 0
+        chattingPageHooked = hooked > 0
+        WeLogger.i(TAG, "聊天页锚点：已 hook ChattingUI 的 $hooked 个方法（进入即撤掉主界面壁纸）")
     }
 
     override fun onEnable() {
@@ -605,6 +577,33 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
      * 把当前生效的主题（内置或主题包）打包成 zip，可直接分享给别人导入。
      * 内置主题会先按同样格式生成一个主题包再打包，保证两边格式一致。
      */
+    /** 删除主题包及其独立配置；暂存失败时保留当前主题和缓存。 */
+    fun deleteTheme(id: String): Result<Unit> = runCatching {
+        require(BuiltinThemes.find(id) == null) { "内置主题不可删除" }
+        var stagedPack: File? = null
+        profileRepository.delete(id) { stagedPack = ThemePack.stageDelete(id) }
+        if (activeThemeId == id) {
+            activeThemeId = ""
+            if (ThemePack.currentId == id) ThemePack.currentId = ""
+            listOf<() -> Unit>(
+                { ChatThemeAppearance.restoreAll() },
+                { invalidateWallpaperCache() },
+                { ThemeRuntime.invalidate() },
+                { ThemeOwnedAppearance.invalidate() },
+                { CustomMessageBubbles.refreshBoundViews() },
+                { ThemeSurface.removeAllLive() }
+            ).forEach { refresh ->
+                runCatching { refresh() }.onFailure { WeLogger.w(TAG, "主题已删除，恢复外观失败：${it.message}") }
+            }
+        } else if (ThemePack.currentId == id) {
+            ThemePack.currentId = ""
+        }
+        stagedPack?.let {
+            if (!runCatching { it.deleteRecursively() }.getOrDefault(false)) WeLogger.w(TAG, "主题包临时目录清理失败：$it")
+        }
+        Unit
+    }
+
     fun exportActiveTheme(): File? = exportTheme(activeThemeId).getOrNull()
 
     // ══════════════════════════════════════════════════════════
@@ -723,7 +722,10 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
 
     /** null 表示按背景自动选择清晰的文字颜色。 */
     fun mainTitleColor(): Int? {
-        profileSnapshot()?.let { return (it.profile.color("chrome", "toolbarText") as? ColorRule.Value)?.argb }
+        profileSnapshot()?.let {
+            val rule = it.profile.color("palette", "normal")
+            return ((if (rule === ColorRule.Inherit) it.profile.color("chrome", "toolbarText") else rule) as? ColorRule.Value)?.argb
+        }
         val hex = mainTitleColorHex
         if (!hex.matches(Regex("#[0-9a-fA-F]{6}"))) return null
         return hex.substring(1).toInt(16) or 0xff000000.toInt()
@@ -733,17 +735,10 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         profileSnapshot()?.let { snapshot ->
             val json = snapshot.profile.toJson()
             val appearance = json.getJSONObject("appearance")
-            for ((group, keys) in mapOf(
-                "chrome" to listOf("toolbarText", "toolbarIcon", "tabText", "tabSelectedText", "tabIcon", "tabSelectedIcon"),
-                "lists" to listOf("title")
-            )) {
-                val values = appearance.optJSONObject(group) ?: org.json.JSONObject().also { appearance.put(group, it) }
-                keys.forEach { key ->
-                    val rule = org.json.JSONObject().put("mode", if (color == null) "auto" else "value")
-                    if (color != null) rule.put("value", String.format("#%08X", color))
-                    values.put(key, rule)
-                }
-            }
+            val palette = appearance.optJSONObject("palette") ?: org.json.JSONObject().also { appearance.put("palette", it) }
+            val rule = org.json.JSONObject().put("mode", if (color == null) "auto" else "value")
+            if (color != null) rule.put("value", String.format("#%08X", color))
+            palette.put("normal", rule)
             updateThemeProfile(json).getOrThrow()
             return
         }

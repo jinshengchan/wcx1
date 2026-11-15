@@ -70,7 +70,7 @@ internal object ThemeScheduleController {
                     missingNotified = true
                 }
             }
-            val changed = selected != null && ThemeStore.applyScheduledTheme(selected)
+            val changed = notifyMissing && selected != null && ThemeStore.applyScheduledTheme(selected)
             if (rule == null || selected != null) missingNotified = false
             ThemeRuntime.invalidate()
             val effective = ThemeRuntime.current(context)
