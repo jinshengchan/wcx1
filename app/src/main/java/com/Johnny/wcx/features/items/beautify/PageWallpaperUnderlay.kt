@@ -330,16 +330,52 @@ internal object PageWallpaperUnderlay {
             maxOf(Color.red(color), Color.green(color), Color.blue(color)) -
             minOf(Color.red(color), Color.green(color), Color.blue(color)) <= 10)
 
-    /** 保留原因诊断：纯色给色值+色偏，状态列表给当前态子类；进现有诊断的“保留行背景”里，不另起日志。 */
-    private fun retainedDetail(drawable: Drawable): String = when (drawable) {
+    /** 保留原因诊断：纯色给色值+色偏，状态列表给当前态子类，图层列表逐层给类型+色值；进现有诊断的“保留行背景”里，不另起日志。最多展开两层，避免诊断爆炸。 */
+    private fun retainedDetail(drawable: Drawable, depth: Int = 0): String = when (drawable) {
         is ColorDrawable -> {
             val color = drawable.color
             String.format("(#%08X~%d)", color,
                 maxOf(Color.red(color), Color.green(color), Color.blue(color)) -
                 minOf(Color.red(color), Color.green(color), Color.blue(color)))
         }
-        is StateListDrawable -> "（current=${drawable.current?.javaClass?.simpleName ?: "null"}）"
+        is StateListDrawable -> {
+            val current = drawable.current
+            "（current=${current?.javaClass?.simpleName ?: "null"}${if (depth < 2 && current != null) retainedDetail(current, depth + 1) else ""}）"
+        }
+        is LayerDrawable -> {
+            if (depth >= 2) "" else {
+                val layers = (0 until drawable.numberOfLayers)
+                    .filter { drawable.getId(it) != android.R.id.mask }
+                val shown = layers.take(4).joinToString(",") { i ->
+                    val layer = drawable.getDrawable(i)
+                    "${layer?.javaClass?.simpleName ?: "null"}${layer?.let { retainedDetail(it, depth + 1) } ?: ""}"
+                }
+                val more = if (layers.size > 4) ",+${layers.size - 4}" else ""
+                "（layers=[$shown$more]）"
+            }
+        }
+        is GradientDrawable -> runCatching { "（stops=${drawable.colors?.size ?: 0}）" }.getOrDefault("")
         else -> ""
+    }
+
+    /** 弹跳视图背景诊断：找类名以 WeUIBounceView(V2) 结尾的视图，报背景类型+色值；找不到报“无”。只读，不改任何背景。 */
+    private fun bounceViewBackgrounds(decor: ViewGroup): String {
+        val found = ArrayList<String>()
+        var visited = 0
+        fun visit(view: View, depth: Int) {
+            if (depth > MAX_DEPTH || visited++ >= MAX_NODES || found.size >= 4) return
+            val name = view.javaClass.name
+            if (name.endsWith("WeUIBounceViewV2") || name.endsWith("WeUIBounceView")) {
+                val background = view.background
+                found.add("${view.javaClass.simpleName}/${background?.javaClass?.simpleName ?: "null"}${background?.let { retainedDetail(it) } ?: ""}")
+            }
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                visit(view.getChildAt(i) ?: continue, depth + 1)
+                if (visited >= MAX_NODES || found.size >= 4) break
+            }
+        }
+        runCatching { visit(decor, 0) }.onFailure { return "未知" }
+        return if (found.isEmpty()) "无" else found.joinToString(",")
     }
 
     private fun isNeutralSurface(drawable: Drawable?, depth: Int = 0): Boolean {
@@ -474,7 +510,8 @@ internal object PageWallpaperUnderlay {
             "检查=${state.visited} 透明底色=${state.patches.size} " +
             "宿主回写=${state.hostWrites} 最近恢复原因=${restoreReasons[decor] ?: "无"} " +
             "行底色=${state.patches.count { !it.structural }} " +
-            "保留行背景=${state.retainedRows.joinToString(",").ifEmpty { "无" }}"
+            "保留行背景=${state.retainedRows.joinToString(",").ifEmpty { "无" }} " +
+            "弹跳视图=${bounceViewBackgrounds(decor)}"
     }
 
     private class WindowWallpaper(var bitmap: Bitmap, var shouldDraw: () -> Boolean) : Drawable() {
