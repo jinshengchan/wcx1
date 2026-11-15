@@ -178,6 +178,7 @@ internal fun HomeSidePanelContent(
         }
     }
 }
+}
 
 private fun homeSidePanelRouteContentKey(route: HomeSidePanelRoute): Any = when (route) {
     // Home and EditHome share the lazy list; their classifier-driven pulse runs in HomeSidePanelHome.
