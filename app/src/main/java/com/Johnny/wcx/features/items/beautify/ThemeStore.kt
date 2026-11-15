@@ -941,7 +941,10 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
             "最近一次写入 = tab=${TabWallpaperRenderer.lastTab} 结果=${TabWallpaperRenderer.lastResult}"
         )
         appendLine("  文件=${TabWallpaperRenderer.lastPath}")
-        appendLine("壁纸透明度 = ${overlayOpacity()}%")
+        appendLine("兼容/聊天壁纸不透明度 = ${overlayOpacity()}%")
+        appendLine("最近实际写入不透明度 = " +
+            if (TabWallpaperRenderer.lastAlphaPct >= 0) "${TabWallpaperRenderer.lastAlphaPct}%（以最近一次成功写入为准）"
+            else "暂无")
         appendLine("四页渲染方式 = ${renderModeName()}")
         appendLine("自定义气泡开关 = " + runCatching { WePrefs.getBoolOrFalse(CUSTOM_BUBBLES_PREF_KEY) }.getOrDefault(false))
         appendLine(
