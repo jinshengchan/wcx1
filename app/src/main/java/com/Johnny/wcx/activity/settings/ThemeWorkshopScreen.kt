@@ -502,14 +502,14 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
             ),
         ) {
             item {
-                GroupCard(title = "主界面背景") {
+                GroupCard(title = "主界面背景 · 正在使用的主题") {
                     if (remember(tick) { findFeature("主题工坊")?.isEnabled != true }) {
                         HintRow("主题功能总开关已关闭。可先设置，下方开启总开关后显示效果。")
                     }
                     val backgroundOn = remember(tick) { ThemeStore.mainWallpaperEnabled() }
                     SwitchRow(
                         title = "开启主界面背景",
-                        summary = "控制当前使用主题的四页背景；下方主题配置编辑所选主题，可能与当前主题不同",
+                        summary = "控制正在使用主题的四页背景；选图与恢复均即时生效",
                         checked = backgroundOn,
                     ) { enabled ->
                         if (!editableActive()) return@SwitchRow
@@ -685,7 +685,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
 
             // ── 卡片3 主题编辑 ───────────────────────────────
             item {
-                GroupCard(title = "主题编辑") {
+                GroupCard(title = "所选主题编辑") {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(12.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -739,6 +739,8 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                             RowDivider()
                             ThemePreview(pack)
                             RowDivider()
+                            HintRow(if (pack.id == active) "正在编辑已应用主题：${pack.name}。四页图片统一在上方「主界面背景」设置。"
+                                else "正在编辑未应用主题：${pack.name}。修改保存在此主题中，点右上角「应用」后才显示。")
                             ThemeProfileSettings(pack.id, tick, onPickTab = { index, selected ->
                                 pendingTabThemeId = pack.id
                                 pendingTabIndex = index
@@ -747,22 +749,16 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                             }) { refreshAll() }
                             RowDivider()
                             ThemeOwnedSettings(pack.id, tick) { refreshAll() }
-                            MaterialRow("主页背景", "wallpaper_chats", pack, pendingRole,
-                                { role -> pendingRole = role; pendingThemeId = pack.id; pickImageLauncher.launch("image/*") },
-                                { updated -> editing = updated; tick++ },
-                            )
-                            MaterialRow("通讯录背景", "wallpaper_contacts", pack, pendingRole,
-                                { role -> pendingRole = role; pendingThemeId = pack.id; pickImageLauncher.launch("image/*") },
-                                { updated -> editing = updated; tick++ },
-                            )
-                            MaterialRow("发现页背景", "wallpaper_discover", pack, pendingRole,
-                                { role -> pendingRole = role; pendingThemeId = pack.id; pickImageLauncher.launch("image/*") },
-                                { updated -> editing = updated; tick++ },
-                            )
-                            MaterialRow("我的背景", "wallpaper_me", pack, pendingRole,
-                                { role -> pendingRole = role; pendingThemeId = pack.id; pickImageLauncher.launch("image/*") },
-                                { updated -> editing = updated; tick++ },
-                            )
+                            if (pack.id != active) {
+                                HintRow("未应用主题的四页图片（${pack.name}）")
+                                listOf("主页背景" to "wallpaper_chats", "通讯录背景" to "wallpaper_contacts",
+                                    "发现页背景" to "wallpaper_discover", "我的背景" to "wallpaper_me").forEach { (title, role) ->
+                                    MaterialRow(title, role, pack, pendingRole,
+                                        { pickedRole -> pendingRole = pickedRole; pendingThemeId = pack.id; pickImageLauncher.launch("image/*") },
+                                        { updated -> editing = updated; tick++ },
+                                    )
+                                }
+                            }
                             MaterialRow("消息气泡 · 左（对方）", "bubble_left", pack, pendingRole,
                                 { role -> pendingRole = role; pendingThemeId = pack.id; pickImageLauncher.launch("*/*") },
                                 { updated -> editing = updated; tick++ },
@@ -1587,6 +1583,8 @@ private fun MaterialRow(
 ) {
     val context = LocalContext.current
     val snapshot = editing?.let { ThemeStore.profileSnapshot(it.id) }
+    val pageKey = role.removePrefix("wallpaper_").takeIf { it in listOf("chats", "contacts", "discover", "me") }
+    val pageRule = pageKey?.let { snapshot?.profile?.background(it) }
     val set = if (role.startsWith("bubble_") && snapshot != null) {
         val key = if (role == "bubble_left") "leftBubble" else "rightBubble"
         when (val rule = snapshot.profile.background("chat", key)) {
@@ -1594,6 +1592,8 @@ private fun MaterialRow(
             com.Johnny.wcx.features.items.beautify.BackgroundRule.Inherit -> snapshot.profile.toJson().optString(role).takeIf { it.isNotBlank() }
             else -> null
         }
+    } else if (pageKey != null && snapshot != null) {
+        (pageRule as? com.Johnny.wcx.features.items.beautify.BackgroundRule.Image)?.asset
     } else editing?.manifest?.optString(role)?.takeIf { it.isNotBlank() }
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
         Text(title, fontSize = 15.sp, color = titleColor())
@@ -1601,6 +1601,9 @@ private fun MaterialRow(
         Text(
             text = when {
                 set != null -> "已选择：$set"
+                pageRule is com.Johnny.wcx.features.items.beautify.BackgroundRule.Solid -> "纯色背景"
+                pageRule === com.Johnny.wcx.features.items.beautify.BackgroundRule.Transparent -> "透明背景"
+                pageKey != null && snapshot != null -> "微信原生背景"
                 pendingRole == role -> "正在选择…"
                 else -> "未选择（保持微信原样）"
             },

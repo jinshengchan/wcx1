@@ -33,6 +33,7 @@ internal fun ThemeProfileSettings(id: String, revision: Int, onPickTab: (Int, Bo
     var colorTarget by remember(id) { mutableStateOf<Pair<String, String>?>(null) }
     var backgroundTarget by remember(id) { mutableStateOf<Pair<String, String>?>(null) }
     var labelIndex by remember(id) { mutableStateOf<Int?>(null) }
+    val isActive = id == ThemeStore.activeThemeIdOrEmpty()
     fun update(section: String, key: String, value: Any): Boolean {
         val json = ThemeStore.profileSnapshot(id)?.profile?.toJson() ?: return false
         val appearance = json.getJSONObject("appearance")
@@ -45,6 +46,7 @@ internal fun ThemeProfileSettings(id: String, revision: Int, onPickTab: (Int, Bo
     }
     Text("主题配置", modifier = Modifier.padding(16.dp))
     listOf("pages" to "四页背景", "chrome" to "顶部和标签", "lists" to "列表文字", "chat" to "聊天外观")
+        .filterNot { (section, _) -> section == "pages" && isActive }
         .forEach { (section, title) ->
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
                 Text(title, Modifier.weight(1f))
@@ -70,8 +72,8 @@ internal fun ThemeProfileSettings(id: String, revision: Int, onPickTab: (Int, Bo
         TextButton(onClick = { colorTarget = section to key }) { Text("$title：$label") }
     }
     listOf(
-        Triple("主页背景", "pages", "chats"), Triple("通讯录背景", "pages", "contacts"),
-        Triple("发现背景", "pages", "discover"), Triple("我的背景", "pages", "me"),
+        Triple("主页背景模式", "pages", "chats"), Triple("通讯录背景模式", "pages", "contacts"),
+        Triple("发现背景模式", "pages", "discover"), Triple("我的背景模式", "pages", "me"),
         Triple("顶栏底板", "chrome", "toolbarBackground"), Triple("标签栏底板", "chrome", "tabBackground"),
         Triple("列表底板", "lists", "background"),
         Triple("左侧气泡", "chat", "leftBubble"), Triple("右侧气泡", "chat", "rightBubble"),
@@ -162,7 +164,9 @@ internal fun ThemeProfileSettings(id: String, revision: Int, onPickTab: (Int, Bo
                 if (section != "chat") TextButton(onClick = { set("transparent") }) { Text("透明") }
                 TextButton(onClick = { set("native") }) { Text("微信原生") }
                 TextButton(onClick = { set("inherit") }) { Text("主题默认") }
-                if (section == "pages" || section == "chat") Text("图片请在下方素材中选择。")
+                if (section == "pages") Text(if (isActive) "图片请在上方「主界面背景」选择。选择纯色、透明或微信原生会替换此页图片。"
+                    else "图片请在下方「未应用主题的四页图片」选择。选择纯色、透明或微信原生会替换此页图片。")
+                if (section == "chat") Text("图片请在下方气泡素材中选择。")
             } }, confirmButton = { TextButton(onClick = { backgroundTarget = null }) { Text("取消") } },
         )
     }
