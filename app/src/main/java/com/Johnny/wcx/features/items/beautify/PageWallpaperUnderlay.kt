@@ -12,6 +12,7 @@ import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.DrawableWrapper
 import android.graphics.drawable.LayerDrawable
+import android.graphics.drawable.NinePatchDrawable
 import android.os.Build
 import android.view.View
 import android.view.ViewGroup
@@ -62,6 +63,16 @@ internal object PageWallpaperUnderlay {
     private val states = WeakHashMap<ViewGroup, WeakReference<State>>()
     private val restoreReasons = WeakHashMap<ViewGroup, String>()
 
+    private class NinePatchCheck(drawable: NinePatchDrawable, source: Drawable.ConstantState, val neutral: Boolean) {
+        val source = WeakReference(source)
+        val state = drawable.state.copyOf()
+        val level = drawable.level
+        val alpha = drawable.alpha
+        val filter = drawable.colorFilter
+    }
+
+    private val ninePatchChecks = WeakHashMap<NinePatchDrawable, NinePatchCheck>()
+
     fun apply(activity: Activity, bitmap: Bitmap, shouldDraw: () -> Boolean): String {
         return apply(activity, bitmap, 1f, shouldDraw)
     }
@@ -72,6 +83,7 @@ internal object PageWallpaperUnderlay {
         val content = decor.findViewById<ViewGroup>(android.R.id.content) ?: return "content 不可用"
         val pager = findPager(content) ?: return "主界面分页容器未就绪"
         if (decor.width <= 0 || decor.height <= 0) return "主窗口尚未布局"
+        ninePatchChecks.clear()
         try {
             var state = states[decor]?.get()
             if (state == null || state.pager.get() !== pager) {
@@ -322,12 +334,49 @@ internal object PageWallpaperUnderlay {
                     minOf(Color.red(color), Color.green(color), Color.blue(color)) <= 10)
             }
             is DrawableWrapper -> isNeutralSurface(drawable.drawable, depth + 1)
+            is NinePatchDrawable -> isNeutralNinePatch(drawable)
             is LayerDrawable -> {
                 val layers = (0 until drawable.numberOfLayers).filter { drawable.getId(it) != android.R.id.mask }
                 layers.isNotEmpty() && layers.all { isNeutralSurface(drawable.getDrawable(it), depth + 1) }
             }
             else -> false
         }
+    }
+
+    /** Inspect a copy so probing never changes the host's bounds, callback or drawable state. */
+    private fun isNeutralNinePatch(drawable: NinePatchDrawable): Boolean {
+        val source = drawable.constantState ?: return false
+        ninePatchChecks[drawable]?.let { check ->
+            if (check.source.get() === source && check.state.contentEquals(drawable.state) &&
+                check.level == drawable.level && check.alpha == drawable.alpha && check.filter === drawable.colorFilter) {
+                return check.neutral
+            }
+        }
+        val neutral = runCatching {
+            val probe = source.newDrawable().mutate()
+            probe.state = drawable.state
+            probe.level = drawable.level
+            probe.setAlpha(drawable.alpha)
+            probe.setColorFilter(drawable.colorFilter)
+            val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+            try {
+                probe.setBounds(0, 0, bitmap.width, bitmap.height)
+                probe.draw(Canvas(bitmap))
+                var darkest = 255
+                var lightest = 0
+                for (y in 0 until bitmap.height) for (x in 0 until bitmap.width) {
+                    val color = bitmap.getPixel(x, y)
+                    if (Color.alpha(color) == 0) continue
+                    if (Color.alpha(color) != 255) return@runCatching false
+                    darkest = minOf(darkest, Color.red(color), Color.green(color), Color.blue(color))
+                    lightest = maxOf(lightest, Color.red(color), Color.green(color), Color.blue(color))
+                    if (lightest - darkest > 10) return@runCatching false
+                }
+                true
+            } finally { bitmap.recycle() }
+        }.getOrDefault(false)
+        ninePatchChecks[drawable] = NinePatchCheck(drawable, source, neutral)
+        return neutral
     }
 
     /** Suppress only idle neutral fill; the platform wrapper forwards padding, states and ripple callbacks. */
