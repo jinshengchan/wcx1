@@ -218,8 +218,7 @@ internal object PageWallpaperUnderlay {
         state.patches.toList().forEach { patch ->
             val view = patch.view.get() ?: return@forEach
             if (MainSurfaceBackgrounds.owns(view)) return@forEach
-            val installed = patch.installed.get()
-            if (view.background !== installed) {
+            if (!isPatchInstalled(patch, view)) {
                 state.hostWrites++
                 val structural = patch.structural
                 if (structural || isNeutralSurface(view.background)) makeTransparent(state, view, structural)
@@ -324,7 +323,7 @@ internal object PageWallpaperUnderlay {
         // 即微信默认灰），不例外就永远盖住壁纸，诊断也看不到。顶栏/Tab 栏仍受接管保护，只放 ListView。
         if (MainSurfaceBackgrounds.owns(view) && !(view is ListView && state.wallpaper.shouldDraw())) return
         val patch = state.patches.firstOrNull { it.view.get() === view }
-        if (patch != null && view.background === patch.installed.get()) return
+        if (patch != null && isPatchInstalled(patch, view)) return
         val original = view.background
         if (original == null) {
             if (patch != null) state.patches.remove(patch)
@@ -415,7 +414,8 @@ internal object PageWallpaperUnderlay {
                 val patch = state.patches.firstOrNull { it.view.get() === view }
                 val patchState = when {
                     patch == null -> "补丁=无"
-                    background === patch.installed.get() -> "补丁=已装"
+                    isPatchInstalled(patch, view) -> "补丁=已装"
+                    background != null && background === patch.installed.get() -> "补丁=被原地改写"
                     else -> "补丁=未装"
                 }
                 val owns = MainSurfaceBackgrounds.owns(view)
@@ -549,10 +549,17 @@ internal object PageWallpaperUnderlay {
             } || !isNeutralSurface(drawable)
     }
 
+    // View.setBackgroundColor may recolor our ColorDrawable in place without changing identity.
+    private fun isPatchInstalled(patch: Patch, view: View): Boolean {
+        val installed = patch.installed.get() ?: return false
+        return view.background === installed &&
+            (!patch.structural || installed !is ColorDrawable || installed.color == Color.TRANSPARENT)
+    }
+
     private fun restore(state: State) {
         state.patches.asReversed().forEach { patch ->
             val view = patch.view.get() ?: return@forEach
-            if (view.background === patch.installed.get()) {
+            if (isPatchInstalled(patch, view)) {
                 runCatching { setBackgroundPreservingPadding(view, patch.original) }
                     .onFailure { WeLogger.w(TAG, "恢复页面底色失败：${it.message}") }
             }
@@ -577,7 +584,7 @@ internal object PageWallpaperUnderlay {
     fun originalBackground(view: View): Drawable? {
         states.values.forEach { ref ->
             ref.get()?.patches?.firstOrNull { it.view.get() === view }?.let { patch ->
-                if (view.background === patch.installed.get()) return patch.original
+                if (isPatchInstalled(patch, view)) return patch.original
             }
         }
         return view.background
