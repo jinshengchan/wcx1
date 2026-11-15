@@ -46,6 +46,7 @@ internal object PageWallpaperUnderlay {
         var observer: WeakReference<ViewTreeObserver>? = null
         var preDraw: ViewTreeObserver.OnPreDrawListener? = null
         var layout: ViewTreeObserver.OnGlobalLayoutListener? = null
+        var scroll: ViewTreeObserver.OnScrollChangedListener? = null
         var attachListener: View.OnAttachStateChangeListener? = null
         var dirty = true
         var visited = 0
@@ -120,21 +121,26 @@ internal object PageWallpaperUnderlay {
         removeListeners(state)
         val preDraw = ViewTreeObserver.OnPreDrawListener { refresh(state); true }
         val layout = ViewTreeObserver.OnGlobalLayoutListener { state.dirty = true }
+        val scroll = ViewTreeObserver.OnScrollChangedListener { state.dirty = true }
         state.preDraw = preDraw
         state.layout = layout
+        state.scroll = scroll
         state.observer = WeakReference(observer)
         observer.addOnPreDrawListener(preDraw)
         observer.addOnGlobalLayoutListener(layout)
+        observer.addOnScrollChangedListener(scroll)
     }
 
     private fun removeListeners(state: State) {
         state.observer?.get()?.takeIf { it.isAlive }?.let { observer ->
             state.preDraw?.let(observer::removeOnPreDrawListener)
             state.layout?.let(observer::removeOnGlobalLayoutListener)
+            state.scroll?.let(observer::removeOnScrollChangedListener)
         }
         state.observer = null
         state.preDraw = null
         state.layout = null
+        state.scroll = null
     }
 
     fun findPager(content: ViewGroup): ViewGroup? {
@@ -172,7 +178,7 @@ internal object PageWallpaperUnderlay {
             state.originalBackdrop = decor.background
             MainPageAppearance.updateBackdrop(decor, (decor.background?.current as? ColorDrawable)?.takeIf { it.alpha == 255 }?.color)
             state.wallpaper.backdrop = decor.background
-            decor.background = state.wallpaper
+            setBackgroundPreservingPadding(decor, state.wallpaper)
         }
         transparentBars(state)
         // Host background replacement need not trigger layout. Maintain known surfaces every frame.
@@ -262,9 +268,19 @@ internal object PageWallpaperUnderlay {
 
     private fun restoreBackdrop(state: State) {
         val decor = state.decor.get() ?: return
-        if (decor.background === state.wallpaper) decor.background = state.originalBackdrop
+        if (decor.background === state.wallpaper) setBackgroundPreservingPadding(decor, state.originalBackdrop)
     }
 
+    fun setBackgroundPreservingPadding(view: View, drawable: Drawable?) {
+        val left = view.paddingLeft
+        val top = view.paddingTop
+        val right = view.paddingRight
+        val bottom = view.paddingBottom
+        view.background = drawable
+        if (view.paddingLeft != left || view.paddingTop != top || view.paddingRight != right || view.paddingBottom != bottom) {
+            view.setPadding(left, top, right, bottom)
+        }
+    }
     private fun makeTransparent(state: State, view: View, structural: Boolean = true) {
         if (MainSurfaceBackgrounds.owns(view)) return
         val patch = state.patches.firstOrNull { it.view.get() === view }
@@ -282,7 +298,7 @@ internal object PageWallpaperUnderlay {
             patch.installed = WeakReference(transparent)
             patch.structural = structural
         }
-        view.background = transparent
+        setBackgroundPreservingPadding(view, transparent)
         // View.setBackground clears the old drawable's callback after constructing the wrapper.
         if (transparent is SurfaceBackground) original.callback = transparent
     }
@@ -318,9 +334,7 @@ internal object PageWallpaperUnderlay {
 
         private fun drawsBackground(): Boolean =
             state.any {
-                it == android.R.attr.state_pressed || it == android.R.attr.state_focused ||
-                    it == android.R.attr.state_selected || it == android.R.attr.state_activated ||
-                    it == android.R.attr.state_checked
+                it == android.R.attr.state_pressed || it == android.R.attr.state_focused
             } || !isNeutralSurface(drawable)
     }
 
@@ -328,7 +342,7 @@ internal object PageWallpaperUnderlay {
         state.patches.asReversed().forEach { patch ->
             val view = patch.view.get() ?: return@forEach
             if (view.background === patch.installed.get()) {
-                runCatching { view.background = patch.original }
+                runCatching { setBackgroundPreservingPadding(view, patch.original) }
                     .onFailure { WeLogger.w(TAG, "恢复页面底色失败：${it.message}") }
             }
         }

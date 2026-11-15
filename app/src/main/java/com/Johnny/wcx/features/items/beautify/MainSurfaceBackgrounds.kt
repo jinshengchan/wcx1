@@ -53,14 +53,14 @@ internal class MainSurfaceBackgrounds {
             }
             BackgroundRule.Inherit -> return
         }
-        view.background = drawable
+        PageWallpaperUnderlay.setBackgroundPreservingPadding(view, drawable)
         patches[view] = Patch(original, drawable, rule)
         owners[view] = WeakReference(drawable ?: nativeNull)
     }
 
     private fun restore(view: View) {
         val patch = patches.remove(view) ?: return
-        if (view.background === patch.installed) view.background = patch.original
+        if (view.background === patch.installed) PageWallpaperUnderlay.setBackgroundPreservingPadding(view, patch.original)
         owners.remove(view)
     }
 

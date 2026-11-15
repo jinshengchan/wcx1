@@ -788,7 +788,7 @@ internal object ThemeSurface {
             BackgroundRule.Transparent -> AndroidColor.TRANSPARENT
             else -> null
         }
-        if ((file == null && color == null) || wallpaperFailStreak >= 3) {
+        if (file == null && color == null) {
             TabWallpaperRenderer.clear(activity)
             restoreWindow(activity)
             MainPageAppearance.apply(activity, null, ThemeStore.mainTextColorEnabled(), ThemeStore.mainTitleColor(), profile) {
