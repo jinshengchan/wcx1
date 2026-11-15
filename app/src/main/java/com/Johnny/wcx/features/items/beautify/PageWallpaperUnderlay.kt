@@ -217,7 +217,8 @@ internal object PageWallpaperUnderlay {
         // Host background replacement need not trigger layout. Maintain known surfaces every frame.
         state.patches.toList().forEach { patch ->
             val view = patch.view.get() ?: return@forEach
-            if (MainSurfaceBackgrounds.owns(view)) return@forEach
+            // Wallpaper owns the ListView surface even if a previous theme rule installed it.
+            if (MainSurfaceBackgrounds.owns(view) && !(view is ListView && allowed)) return@forEach
             if (!isPatchInstalled(patch, view)) {
                 state.hostWrites++
                 val structural = patch.structural
