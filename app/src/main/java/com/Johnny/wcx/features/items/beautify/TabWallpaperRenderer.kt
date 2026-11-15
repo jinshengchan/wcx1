@@ -49,6 +49,8 @@ internal object TabWallpaperRenderer {
 
     /** Settings hide the launcher wallpaper; preserve the scene before that cleanup. */
     private val detachedSnapshots = java.util.WeakHashMap<ViewGroup, String>()
+    private val renderedTabs = java.util.WeakHashMap<ViewGroup, Int>()
+    private val pageSnapshots = java.util.WeakHashMap<ViewGroup, LinkedHashMap<Int, String>>()
 
     // ── 诊断快照（主题诊断页直接读，不用再猜） ──
     @Volatile var lastAt = 0L
@@ -64,6 +66,7 @@ internal object TabWallpaperRenderer {
     @Volatile private var lastDrawable: WallpaperMaskDrawable? = null
 
     private fun ok(activity: Activity, source: String, tab: Int, alphaPct: Int, mode: String = "前景遮罩"): String {
+        (activity.window?.decorView as? ViewGroup)?.let { renderedTabs[it] = tab }
         lastAt = System.currentTimeMillis()
         lastTab = tab
         lastPath = source
@@ -125,6 +128,7 @@ internal object TabWallpaperRenderer {
                               allowForegroundFallback: Boolean = true): String {
         val decor = activity.window?.decorView as? ViewGroup ?: return fail("decorView 不可用")
 
+        if (renderedTabs[decor]?.let { it != tab } == true) rememberScene(activity)
         var underlayFailure: String? = null
         if (useUnderlay) {
             clearForeground(activity)
@@ -191,15 +195,30 @@ internal object TabWallpaperRenderer {
         }
     }
 
+    /** Only live renderer state is evidence; a previous restore reason must not replace it. */
+    private fun rememberScene(activity: Activity): String? {
+        val decor = activity.window?.decorView as? ViewGroup ?: return null
+        val underlay = PageWallpaperUnderlay.describe(activity, includeHistory = false)
+        if (underlay == null && !masked.containsKey(decor)) return null
+        val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+        val tab = renderedTabs[decor]
+        val snapshot = "$time Tab=${tab ?: "未知"} ${underlay ?: describeCurrent(activity)}\n    ${ThemeHostAdapter.describe(decor)}"
+        if (tab in 0..3) {
+            val pages = pageSnapshots.getOrPut(decor) { LinkedHashMap() }
+            pages.remove(tab)
+            pages[tab!!] = snapshot
+        }
+        return snapshot
+    }
+
     /** 撤销两种图层，并保留撤销前的真实绘制现场。 */
     fun clear(activity: Activity) {
         val decor = activity.window?.decorView as? ViewGroup
-        if (decor != null && (masked.containsKey(decor) || PageWallpaperUnderlay.describe(activity) != null)) {
-            val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
-            val snapshot = "$time ${describeCurrent(activity)}"
-            detachedSnapshots[decor] = snapshot
+        rememberScene(activity)?.let { snapshot ->
+            if (decor != null) detachedSnapshots[decor] = snapshot
             WeLogger.i(TAG, "背景撤销前：$snapshot")
         }
+        renderedTabs.remove(decor)
         PageWallpaperUnderlay.clear(activity)
         MainPageAppearance.clear(activity)
         clearForeground(activity)
@@ -229,7 +248,10 @@ internal object TabWallpaperRenderer {
         val decor = activity.window?.decorView as? ViewGroup
         val previous = detachedSnapshots[decor]
         val appearance = MainPageAppearance.describe(activity)?.let { "\n  $it" }.orEmpty()
-        return describeCurrent(activity) + appearance + if (previous == null) "" else "\n  上次撤销前：$previous"
+        val pages = pageSnapshots[decor]?.entries?.filter { it.value != previous }?.joinToString("") {
+            "\n  切页前现场 Tab=${it.key}：${it.value}"
+        }.orEmpty()
+        return describeCurrent(activity) + appearance + (if (previous == null) "" else "\n  上次撤销前：$previous") + pages
     }
 
     private fun describeCurrent(activity: Activity): String {

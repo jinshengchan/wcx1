@@ -518,8 +518,8 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                     }
                     RowDivider()
                     SwitchRow(
-                        title = "全屏连续背景",
-                        summary = "图片从状态栏延伸到顶部、页面内容和底部标签；关闭后使用兼容显示",
+                        title = "背景绘制方式",
+                        summary = "开启：背景图绘制在页面内容下方。关闭：使用半透明前景叠加方式兼容显示。此项只切换绘制方式。",
                         checked = remember(tick) { ThemeStore.usePageBackground() },
                     ) { enabled ->
                         ThemeStore.setUsePageBackground(enabled)

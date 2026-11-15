@@ -920,6 +920,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
      */
     fun diagnose(): String = buildString {
         appendLine("== 主题工坊诊断（${BuildConfig.VERSION_NAME}）==")
+        appendLine("构建提交 = ${BuildConfig.COMMIT_HASH}")
         appendLine(
             "功能开关 = " + runCatching { WePrefs.getBoolOrFalse(NEW_FEATURE_NAME) }.getOrDefault(false) +
                 "（key=$NEW_FEATURE_NAME）"

@@ -51,6 +51,7 @@ internal object PageWallpaperUnderlay {
         var dirty = true
         var visited = 0
         var hostWrites = 0
+        var lastGateAllowed: Boolean? = null
         var statusColor = window.statusBarColor
         var navColor = window.navigationBarColor
         var statusContrast = Build.VERSION.SDK_INT >= 29 && window.isStatusBarContrastEnforced
@@ -165,8 +166,14 @@ internal object PageWallpaperUnderlay {
     private fun refresh(state: State) {
         val decor = state.decor.get() ?: return
         val pager = state.pager.get() ?: return
-        if (!state.wallpaper.shouldDraw() || !decor.isShown || !pager.isShown) {
-            restoreReasons[decor] = "主页面守卫关闭或窗口不可见"
+        val allowed = state.wallpaper.shouldDraw()
+        state.lastGateAllowed = allowed
+        if (!allowed || !decor.isShown || !pager.isShown) {
+            restoreReasons[decor] = when {
+                !allowed -> "主页面守卫关闭"
+                !decor.isShown -> "窗口不可见"
+                else -> "分页容器不可见"
+            }
             restore(state)
             state.dirty = true
             restoreBackdrop(state)
@@ -384,11 +391,12 @@ internal object PageWallpaperUnderlay {
         return decor.background === state.wallpaper && state.pager.get()?.isShown == true && decor.isShown
     }
 
-    fun describe(activity: Activity): String? {
+    fun describe(activity: Activity, includeHistory: Boolean = true): String? {
         val decor = activity.window?.decorView as? ViewGroup ?: return null
-        val state = states[decor]?.get() ?: return restoreReasons[decor]?.let { "最近恢复原因=$it" }
+        val state = states[decor]?.get() ?: return if (includeHistory) restoreReasons[decor]?.let { "最近恢复原因=$it" } else null
         return "全屏底图=${if (isAttached(activity)) "已挂载" else "已撤下或被覆盖"} " +
             "窗口=${decor.width}x${decor.height} 图片=${state.wallpaper.bitmap.width}x${state.wallpaper.bitmap.height} " +
+            "窗口可见=${decor.isShown} 分页可见=${state.pager.get()?.isShown} 最近检查守卫=${state.lastGateAllowed} " +
             "绘制=${state.wallpaper.drawCount}次 跳过=${state.wallpaper.skipCount}次 " +
             "检查=${state.visited} 透明底色=${state.patches.size} " +
             "宿主回写=${state.hostWrites} 最近恢复原因=${restoreReasons[decor] ?: "无"} " +
