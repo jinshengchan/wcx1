@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,6 +22,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -28,6 +31,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -44,9 +49,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -57,6 +63,16 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.composables.icons.materialsymbols.MaterialSymbols
+import com.composables.icons.materialsymbols.outlined.Add
+import com.composables.icons.materialsymbols.outlined.Arrow_back
+import com.composables.icons.materialsymbols.outlined.Build
+import com.composables.icons.materialsymbols.outlined.Contrast
+import com.composables.icons.materialsymbols.outlined.Download
+import com.composables.icons.materialsymbols.outlined.Forum
+import com.composables.icons.materialsymbols.outlined.Image as ImageIcon
+import com.composables.icons.materialsymbols.outlined.Layers
+import com.composables.icons.materialsymbols.outlined.Text_fields
 import com.Johnny.wcx.features.core.FeaturesProvider
 import com.Johnny.wcx.features.core.SwitchFeature
 import com.Johnny.wcx.features.items.beautify.BackgroundRule
@@ -68,7 +84,6 @@ import com.Johnny.wcx.utils.HostInfo
 import com.Johnny.wcx.utils.WeLogger
 import com.Johnny.wcx.utils.android.showToast
 import com.Johnny.wcx.utils.restartHost
-import h.Hchat.ui.miuix.PageScaffold
 import top.yukonga.miuix.kmp.basic.BasicComponentDefaults
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -337,7 +352,7 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
     val listState = rememberLazyListState()
     LaunchedEffect(section, selectedId) { listState.scrollToItem(0) }
 
-    PageScaffold(title = screenTitle, largeTitle = screenTitle, onBack = { goBack() }) { padding ->
+    ThemePageScaffold(screenTitle, onBack = { goBack() }) { padding ->
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             state = listState,
@@ -359,15 +374,16 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
             if (profile != null || section in listOf("home", "themes", "diagnostics", "mode", "chat")) when (section) {
                 "home" -> {
                     item { GroupCard(null) {
-                        FeatureSwitchRow("主题工坊", "启用主题", "控制整套主题外观", tick) { refreshAll() }
+                        FeatureSwitchRow("主题工坊", "启用主题", "", tick) { refreshAll() }
                     } }
                     item { GroupCard(null) {
                         if (editing != null) {
                             ThemeIdentityRow(editing!!, tick, selectedId == active, onClick = { showPicker = true })
                             RowDivider()
-                            Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                PillButton("切换主题", Modifier.weight(1f), primary = true) { showPicker = true }
-                                PillButton("管理主题", Modifier.weight(1f), primary = true) { section = "themes" }
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                TextButton(onClick = { showPicker = true }, modifier = Modifier.weight(1f)) { Text("切换主题", color = MiuixTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold) }
+                                Box(Modifier.width(1.dp).height(20.dp).background(summaryColor().copy(alpha = 0.25f)))
+                                TextButton(onClick = { section = "themes" }, modifier = Modifier.weight(1f)) { Text("管理主题", color = MiuixTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold) }
                             }
                         } else {
                             HintRow("还没有选中主题。新建或导入后即可开始编辑。")
@@ -379,18 +395,25 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                         }
                     } }
                     item { GroupCard(null) {
-                        listOf("backgrounds" to "四页背景", "text" to "文字与图标", "chat" to "聊天与气泡",
-                            "mode" to "深浅模式", "owned" to "抽屉与悬浮按钮").forEachIndexed { index, (route, title) ->
+                        listOf(
+                            Triple("backgrounds", "四页背景", MaterialSymbols.Outlined.ImageIcon),
+                            Triple("text", "文字与图标", MaterialSymbols.Outlined.Text_fields),
+                            Triple("chat", "聊天与气泡", MaterialSymbols.Outlined.Forum),
+                            Triple("mode", "深浅模式", MaterialSymbols.Outlined.Contrast),
+                            Triple("owned", "抽屉与悬浮按钮", MaterialSymbols.Outlined.Layers),
+                        ).forEachIndexed { index, (route, title, icon) ->
                             if (index > 0) RowDivider()
-                            NavRow(title, "") { section = route }
+                            NavRow(title, "", icon = icon) { section = route }
                         }
                     } }
-                    item { GroupCard(null) { NavRow("诊断与恢复", "") { section = "diagnostics" } } }
+                    item { GroupCard(null) {
+                        NavRow("诊断与恢复", "", icon = MaterialSymbols.Outlined.Build, primary = true) { section = "diagnostics" }
+                    } }
                 }
                 "backgrounds" -> {
                     item { ThemePreview(selectedId, tick) }
                     item { GroupCard(null) {
-                        SwitchRow("启用四页背景", "修改所选主题的四页背景", profile!!.enabled("pages")) {
+                        SwitchRow("启用四页背景", "", profile!!.enabled("pages")) {
                             updateThemeSetting(selectedId, "pages", "enabled", it).onSuccess { refreshAll() }
                                 .onFailure { error -> showToast(context, "保存失败：${error.message}") }
                         }
@@ -404,13 +427,6 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                             val status = (if (profile!!.enabled("pages")) "" else "已停用，设置保留 · ") + backgroundRuleLabel(rule)
                             ThemePageRow(title, status, file, tick) { pageIndex = index; section = "page" }
                         }
-                    } }
-                    item { GroupCard(null) {
-                        NavRow("绘制方式", (if (ThemeStore.usePageBackground()) "内容底图" else "兼容前景") + " · 本设备") { showRenderMethod = true }
-                    } }
-                    item { GroupCard(null) {
-                        HintRow("更换图片、背景模式与不透明度在单页中设置。绘制方式为本设备设置。")
-                        NavRow("恢复四页原生背景", "仅修改正在编辑的主题") { resetMainImages() }
                     } }
                 }
                 "page" -> {
@@ -431,12 +447,12 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                         ThemeColorSetting(selectedId, tick, "默认文字与图标颜色", "palette", "normal", defaultOnly = true) { refreshAll() }
                         HintRow("默认颜色不会覆盖下方各角色的独立配色。")
                     } }
-                    item { GroupCard(null) {
+                    item {
                         ThemeProfileSettings(selectedId, tick, onPickTab = { index, selected ->
                             pendingTabThemeId = selectedId; pendingTabIndex = index; pendingTabSelected = selected
                             pickTabIconLauncher.launch("image/*")
                         }) { refreshAll() }
-                    } }
+                    }
                 }
                 "chat" -> {
                     if (profile != null) {
@@ -446,14 +462,17 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                                     .onFailure { error -> showToast(context, "保存失败：${error.message}") }
                             }
                         } }
-                        item { GroupCard(null) { ThemeChatPreview(selectedId, tick) } }
+                        item { ThemeChatPreview(selectedId, tick) }
                         item { GroupCard(null) {
                             listOf("左侧气泡（对方）" to "bubble_left", "右侧气泡（自己）" to "bubble_right").forEach { (title, role) ->
+                                if (role == "bubble_right") RowDivider()
                                 ThemeBackgroundSetting(selectedId, tick, title, "chat", if (role == "bubble_left") "leftBubble" else "rightBubble",
                                     onPick = { pendingRole = role; pendingThemeId = selectedId; pickImageLauncher.launch("*/*") },
                                     onChanged = { refreshAll() })
                             }
+                            RowDivider()
                             ThemeColorSetting(selectedId, tick, "左侧正文颜色", "chat", "leftText") { refreshAll() }
+                            RowDivider()
                             ThemeColorSetting(selectedId, tick, "右侧正文颜色", "chat", "rightText") { refreshAll() }
                         } }
                         item { GroupCard(null) {
@@ -481,41 +500,62 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                 "owned" -> item { GroupCard(null) { ThemeOwnedSettings(selectedId, tick) { refreshAll() } } }
                 "themes" -> {
                     item { Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        PillButton("＋ 新建", Modifier.weight(1f), primary = true) { createName = "我的主题"; showCreate = true }
-                        PillButton("导入", Modifier.weight(1f), primary = true) { importLauncher.launch("*/*") }
+                        PillButton("新建", Modifier.weight(1f), primary = true, outlined = true, icon = MaterialSymbols.Outlined.Add) { createName = "我的主题"; showCreate = true }
+                        PillButton("导入", Modifier.weight(1f), primary = true, outlined = true, icon = MaterialSymbols.Outlined.Download) { importLauncher.launch("*/*") }
                     } }
                     if (packs.isEmpty()) item { GroupCard(null) { HintRow("还没有主题，请新建或导入。") } }
                     items(packs.size, key = { packs[it].id }) { index ->
                         val pack = packs[index]
-                        GroupCard(null) {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                            .padding(top = if (index == 0) 6.dp else 0.dp, bottom = if (index == packs.lastIndex) 6.dp else 0.dp)
+                            .clip(RoundedCornerShape(topStart = if (index == 0) 16.dp else 0.dp, topEnd = if (index == 0) 16.dp else 0.dp,
+                                bottomStart = if (index == packs.lastIndex) 16.dp else 0.dp, bottomEnd = if (index == packs.lastIndex) 16.dp else 0.dp))
+                            .background(themeCardColor())) {
+                            if (index > 0) RowDivider()
                             ThemeIdentityRow(pack, tick, active == pack.id,
                                 selected = selectedId == pack.id, onClick = { select(pack.id) },
                                 onMenu = { longPressTarget = pack })
                         }
                     }
-                    if (editing != null) item { GroupCard(null) {
+                    if (editing != null) {
+                    item { GroupCard(null) {
                         HintRow(if (selectedId == active) "编辑使用中的主题即时刷新。" else "编辑未应用主题只保存草稿；应用后切换当前主题。")
+                    } }
+                    item { GroupCard(null) {
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
+                            TextButton(onClick = {
+                                ThemeStore.cloneTheme(selectedId).onSuccess { refreshAll(); select(it.id) }
+                                    .onFailure { showToast(context, "复制失败：${it.message}") }
+                            }, modifier = Modifier.weight(1f)) { Text("复制", color = MiuixTheme.colorScheme.primary) }
+                            TextButton(onClick = {
+                                ThemeStore.exportTheme(selectedId).onSuccess { showToast(context, "已导出：${it.absolutePath}") }
+                                    .onFailure { showToast(context, "导出失败：${it.message}") }
+                            }, modifier = Modifier.weight(1f)) { Text("导出", color = MiuixTheme.colorScheme.primary) }
+                            TextButton(onClick = { renameText = editing!!.name; renameTarget = editing }, modifier = Modifier.weight(1f)) {
+                                Text("重命名", color = MiuixTheme.colorScheme.primary)
+                            }
+                            TextButton(onClick = { longPressTarget = editing }, modifier = Modifier.weight(1f)) {
+                                Text("删除", color = MiuixTheme.colorScheme.primary)
+                            }
+                        }
+                    } }
+                    item { GroupCard("更多操作") {
                         NavRow("编辑所选主题", editing!!.name) { section = "home" }
+                        RowDivider()
                         NavRow(if (selectedId == active) "重新应用所选主题" else "应用所选主题", "应用后自动重启微信") { applySelected() }
-                        NavRow("重命名", editing!!.name) { renameText = editing!!.name; renameTarget = editing }
+                        RowDivider()
                         NavRow("修改描述", editing!!.manifest.optString("description").ifBlank { "未填写" }) {
                             descText = editing!!.manifest.optString("description"); descTarget = editing
                         }
-                        NavRow("复制为新主题", "") {
-                            ThemeStore.cloneTheme(selectedId).onSuccess { refreshAll(); select(it.id) }
-                                .onFailure { showToast(context, "复制失败：${it.message}") }
-                        }
-                        NavRow("导出主题", "保存完整配置与素材") {
-                            ThemeStore.exportTheme(selectedId).onSuccess { showToast(context, "已导出：${it.absolutePath}") }
-                                .onFailure { showToast(context, "导出失败：${it.message}") }
-                        }
+                        RowDivider()
                         NavRow("分享主题", "") { shareSelectedTheme(context, selectedId) }
+                        RowDivider()
                         NavRow("备份主题", "") {
                             editing?.let { ThemePack.backup(it).onSuccess { file -> showToast(context, "已备份：${file.absolutePath}") }
                                 .onFailure { error -> showToast(context, "备份失败：${error.message}") } }
                         }
-                        NavRow("删除主题", "在主题菜单中确认删除") { longPressTarget = editing }
                     } }
+                    }
                 }
                 "diagnostics" -> {
                     item { GroupCard(null) {
@@ -539,7 +579,17 @@ fun ThemeWorkshopScreen(onBack: () -> Unit) {
                         NavRow("清除主题缓存", "撤销使用中的主题并清理缓存") { confirmClearCache = true }
                         NavRow("使用说明", "") { showGuide = true }
                     } }
-                    item { GroupCard("本设备 · 全局设置") { OpacityRow(tick) } }
+                }
+            }
+            if (section == "backgrounds") {
+                item { GroupCard("本设备 · 背景显示") {
+                    NavRow("绘制方式", if (ThemeStore.usePageBackground()) "内容底图" else "兼容前景") { showRenderMethod = true }
+                    RowDivider()
+                    OpacityRow(tick)
+                } }
+                if (profile != null) item {
+                    HintRow("更换图片、背景模式与不透明度在单页中设置。")
+                    GroupCard(null) { NavRow("恢复四页原生背景", "仅修改正在编辑的主题", primary = true) { resetMainImages() } }
                 }
             }
         }
@@ -854,7 +904,25 @@ private fun summaryColor(): Color = BasicComponentDefaults.summaryColor().color
 private fun titleColor(): Color = BasicComponentDefaults.titleColor().color
 
 @Composable
-private fun GroupCard(title: String?, content: @Composable ColumnScope.() -> Unit) {
+private fun ThemePageScaffold(title: String, onBack: () -> Unit, content: @Composable (PaddingValues) -> Unit) {
+    val dark = MiuixTheme.colorScheme.background.luminance() < 0.5f
+    Column(Modifier.fillMaxSize().background(if (dark) Color(0xff101014) else Color(0xfff3f4f6))
+        .statusBarsPadding().navigationBarsPadding()) {
+        Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(MaterialSymbols.Outlined.Arrow_back, contentDescription = "返回", tint = titleColor(), modifier = Modifier.size(24.dp))
+            }
+            Text(title, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = titleColor())
+        }
+        Box(Modifier.weight(1f)) { content(PaddingValues(0.dp)) }
+    }
+}
+
+@Composable
+private fun themeCardColor(): Color = if (MiuixTheme.colorScheme.background.luminance() < 0.5f) Color(0xff1c1c1e) else Color.White
+
+@Composable
+internal fun GroupCard(title: String?, content: @Composable ColumnScope.() -> Unit) {
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
         if (!title.isNullOrBlank()) {
             Text(
@@ -865,20 +933,19 @@ private fun GroupCard(title: String?, content: @Composable ColumnScope.() -> Uni
                 modifier = Modifier.padding(start = 4.dp, bottom = 8.dp),
             )
         }
-        val shape = RoundedCornerShape(22.dp)
+        val shape = RoundedCornerShape(16.dp)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .shadow(elevation = 2.dp, shape = shape, ambientColor = Color.Black.copy(alpha = 0.06f))
                 .clip(shape)
-                .background(MiuixTheme.colorScheme.surface),
+                .background(themeCardColor()),
             content = content,
         )
     }
 }
 
 @Composable
-private fun RowDivider() {
+internal fun RowDivider() {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -928,7 +995,7 @@ internal fun SwitchRow(title: String, summary: String, checked: Boolean, onChang
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, fontSize = 15.sp, color = titleColor())
+            Text(title, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = titleColor())
             if (summary.isNotBlank()) {
                 Spacer(Modifier.height(2.dp))
                 Text(summary, fontSize = 12.sp, color = summaryColor())
@@ -1035,7 +1102,8 @@ internal fun RgbColorDialog(initialColor: Int?, onDismiss: () -> Unit, onApply: 
 }
 
 @Composable
-private fun NavRow(title: String, summary: String, onClick: () -> Unit) {
+private fun NavRow(title: String, summary: String, icon: ImageVector? = null, primary: Boolean = false, onClick: () -> Unit) {
+    val foreground = if (primary) MiuixTheme.colorScheme.primary else titleColor()
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1043,8 +1111,12 @@ private fun NavRow(title: String, summary: String, onClick: () -> Unit) {
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (icon != null) {
+            Icon(icon, contentDescription = null, tint = foreground, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.width(12.dp))
+        }
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, fontSize = 15.sp, color = titleColor(), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(title, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = foreground, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (summary.isNotBlank()) {
                 Spacer(Modifier.height(2.dp))
                 Text(summary, fontSize = 12.sp, color = summaryColor())
@@ -1069,20 +1141,28 @@ private fun PillButton(
     text: String,
     modifier: Modifier = Modifier,
     primary: Boolean = false,
+    outlined: Boolean = false,
+    icon: ImageVector? = null,
     onClick: () -> Unit,
 ) {
-    val bg = if (primary) MiuixTheme.colorScheme.primary.copy(alpha = 0.14f)
+    val bg = if (outlined) themeCardColor() else if (primary) MiuixTheme.colorScheme.primary
     else titleColor().copy(alpha = 0.07f)
-    val fg = if (primary) MiuixTheme.colorScheme.primary else titleColor()
+    val fg = if (outlined) MiuixTheme.colorScheme.primary else if (primary) MiuixTheme.colorScheme.onPrimary else titleColor()
     Box(
         modifier = modifier
             .height(46.dp)
-            .clip(RoundedCornerShape(15.dp))
+            .clip(RoundedCornerShape(12.dp))
             .background(bg)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = fg)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (icon != null) {
+                Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+            }
+            Text(text, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = fg)
+        }
     }
 }
 
@@ -1109,7 +1189,7 @@ private fun ThemePreview(id: String, revision: Int) {
     val snapshot = remember(id, revision) { ThemeStore.profileSnapshot(id) }
     val rule = remember(id, revision) { snapshot?.profile?.let { themeSettingsProfile(it, "pages").background("chats") } }
     val file = (rule as? BackgroundRule.Image)?.let { snapshot?.asset(it.asset) }
-    ThemeThumbnail(file, revision, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).height(120.dp), maxDimension = 720)
+    ThemeThumbnail(file, revision, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).height(110.dp), maxDimension = 720)
 }
 
 @Composable
@@ -1123,7 +1203,10 @@ private fun ThemeIdentityRow(pack: ThemePack.Pack, revision: Int, active: Boolea
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(pack.name, fontSize = 16.sp, fontWeight = FontWeight.Medium, color = titleColor(), maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(if (active) "使用中" else "未应用", fontSize = 12.sp, color = if (active) MiuixTheme.colorScheme.primary else summaryColor())
+            Spacer(Modifier.height(5.dp))
+            val badgeColor = if (active) MiuixTheme.colorScheme.primary else summaryColor()
+            Text(if (active) "使用中" else "未应用", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = badgeColor,
+                modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(badgeColor.copy(alpha = 0.1f)).padding(horizontal = 9.dp, vertical = 3.dp))
             if (selected && !active) Text("正在编辑", fontSize = 11.sp, color = MiuixTheme.colorScheme.primary)
         }
         onMenu?.let { menu -> TextButton(onClick = menu) { Text("⋮", fontSize = 22.sp) } }
@@ -1133,7 +1216,7 @@ private fun ThemeIdentityRow(pack: ThemePack.Pack, revision: Int, active: Boolea
 @Composable
 private fun ThemePageRow(title: String, status: String, file: File?, revision: Int, onClick: () -> Unit) {
     Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-        ThemeThumbnail(file, revision, Modifier.size(44.dp))
+        ThemeThumbnail(file, revision, Modifier.width(52.dp).height(40.dp))
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(title, fontSize = 15.sp, color = titleColor())

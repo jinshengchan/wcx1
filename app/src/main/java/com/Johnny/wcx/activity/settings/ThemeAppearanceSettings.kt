@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.graphics.NinePatch
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,14 +13,14 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -32,11 +33,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.composables.icons.materialsymbols.MaterialSymbols
+import com.composables.icons.materialsymbols.outlined.Image as ImageIcon
 import com.Johnny.wcx.features.items.beautify.BackgroundRule
 import com.Johnny.wcx.features.items.beautify.ColorRule
 import com.Johnny.wcx.features.items.beautify.ThemeProfile
@@ -112,13 +117,11 @@ internal fun ThemeChatPreview(id: String, revision: Int) {
     val backgroundFile = (background as? BackgroundRule.Image)?.let { snapshot.asset(it.asset) }
     val backgroundBitmap = themePreviewBitmap(backgroundFile, revision)
     val backgroundColor = (background as? BackgroundRule.Solid)?.argb?.let { Color(it) } ?: Color(0xffededed)
-    Column(Modifier.padding(16.dp)) {
-        Text(if (snapshot.profile.enabled("chat")) "已保存设置示意" else "聊天主题已停用 · 已保存设置示意",
-            fontSize = 12.sp, color = BasicComponentDefaults.summaryColor().color)
-        Box(Modifier.fillMaxWidth().padding(top = 8.dp).height(160.dp).clip(RoundedCornerShape(14.dp)).background(backgroundColor)) {
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+        Box(Modifier.fillMaxWidth().heightIn(min = 150.dp).clip(RoundedCornerShape(14.dp)).background(backgroundColor)) {
             if (backgroundBitmap != null) Image(backgroundBitmap.asImageBitmap(), null, Modifier.matchParentSize(),
                 contentScale = ContentScale.Crop, alpha = (background as BackgroundRule.Image).opacity)
-            Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 listOf(false to "你好", true to "收到").forEach { (self, text) ->
                     val bubble = remember(id, revision, self) { themeChatPreviewBubble(snapshot.profile, self) }
                     val bubbleFile = (bubble as? BackgroundRule.Image)?.let { snapshot.asset(it.asset) }
@@ -139,7 +142,7 @@ internal fun ThemeChatPreview(id: String, revision: Int) {
                 }
             }
         }
-        Text("素材缩放示意；原生/默认使用示例样式。聊天背景独立于四页背景，实际效果以微信为准。",
+        Text((if (snapshot.profile.enabled("chat")) "已保存设置 · " else "聊天主题已停用 · ") + "素材缩放示意；原生/默认使用示例样式。聊天背景独立于四页背景，实际效果以微信为准。",
             fontSize = 11.sp, color = BasicComponentDefaults.summaryColor().color, modifier = Modifier.padding(top = 8.dp))
     }
 }
@@ -161,13 +164,19 @@ private fun themePreviewBitmap(file: File?, revision: Int, bubble: Boolean = fal
 }
 
 @Composable
-internal fun ThemeSettingRow(title: String, summary: String, swatch: Int? = null, onClick: () -> Unit) {
+internal fun ThemeSettingRow(title: String, summary: String, swatch: Int? = null, icon: ImageVector? = null, onClick: () -> Unit) {
+    val trailingSummary = swatch == null && summary.length in 1..10
     Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(title, fontSize = 15.sp, color = BasicComponentDefaults.titleColor().color)
-            if (summary.isNotBlank()) Text(summary, fontSize = 12.sp, color = BasicComponentDefaults.summaryColor().color)
+        if (icon != null) {
+            Icon(icon, contentDescription = null, tint = BasicComponentDefaults.titleColor().color, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.width(12.dp))
         }
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = BasicComponentDefaults.titleColor().color)
+            if (summary.isNotBlank() && !trailingSummary) Text(summary, fontSize = 12.sp, color = BasicComponentDefaults.summaryColor().color)
+        }
+        if (trailingSummary) Text(summary, Modifier.padding(horizontal = 8.dp), fontSize = 12.sp, color = BasicComponentDefaults.summaryColor().color)
         if (swatch != null) {
             BoxSwatch(swatch)
             Spacer(Modifier.width(12.dp))
@@ -178,7 +187,8 @@ internal fun ThemeSettingRow(title: String, summary: String, swatch: Int? = null
 
 @Composable
 private fun BoxSwatch(color: Int) {
-    Spacer(Modifier.size(25.dp).clip(RoundedCornerShape(7.dp)).background(Color(color)))
+    Spacer(Modifier.size(25.dp).clip(RoundedCornerShape(7.dp)).background(Color(color))
+        .border(0.6.dp, BasicComponentDefaults.summaryColor().color.copy(alpha = 0.4f), RoundedCornerShape(7.dp)))
 }
 
 @Composable
@@ -243,7 +253,7 @@ internal fun ThemeBackgroundSetting(id: String, revision: Int, title: String, se
             .onFailure { showToast(context, "保存失败：${it.message}") }
     }
     ThemeSettingRow(title, (if (profile.enabled(section)) "" else "已停用，设置保留 · ") + backgroundRuleLabel(rule),
-        (rule as? BackgroundRule.Solid)?.argb) { show = true }
+        (rule as? BackgroundRule.Solid)?.argb, icon = if (onPick != null) MaterialSymbols.Outlined.ImageIcon else null) { show = true }
     if (section == "pages" && rule is BackgroundRule.Image) {
         var opacity by remember(id, key, rule.asset, rule.opacity) { mutableStateOf(rule.opacity) }
         Text("图片不透明度：${(opacity * 100).toInt()}%", Modifier.padding(horizontal = 16.dp), fontSize = 12.sp)
