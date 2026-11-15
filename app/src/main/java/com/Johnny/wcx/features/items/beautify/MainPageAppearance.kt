@@ -15,6 +15,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.ImageView
+import android.widget.ListView
 import android.widget.TextView
 import java.lang.ref.WeakReference
 import java.lang.reflect.Method
@@ -156,6 +157,7 @@ internal object MainPageAppearance {
         }
         state.generation++
         state.visited = 0
+        val wallpaperActive = bitmap != null && runCatching { state.shouldDraw() }.getOrDefault(false)
         val queue = ArrayDeque<Node>()
         queue.add(Node(decor, 0, false))
         val rect = Rect()
@@ -165,7 +167,10 @@ internal object MainPageAppearance {
             state.visited++
             if (node.depth > MAX_DEPTH || view.visibility != View.VISIBLE || !view.getGlobalVisibleRect(rect)) continue
             val inTab = node.inTab || isNativeTab(view)
-            state.backgrounds.apply(view)
+            // 全屏壁纸模式下 ListView 底板交给 underlay（透明补丁）：这里每帧按主题规则重刷，
+            // 注册顺序又在 underlay 之后，会把 ListView 灰底刷回来，壁纸永远透不出来。
+            // 只跳 ListView，顶栏/Tab 栏仍走主题规则；壁纸关掉后下次刷新恢复原规则。
+            if (!(view is ListView && wallpaperActive)) state.backgrounds.apply(view)
             if (view is TextView && inTab) state.tabAssets.apply(view, selectedTab(view))
             if (state.textEnabled && view is TextView) styleText(state, view, rect, bounds, bitmap, inTab)
             if (state.textEnabled && view is ImageView && (inTab || isHeaderIcon(view, rect, bounds))) {
