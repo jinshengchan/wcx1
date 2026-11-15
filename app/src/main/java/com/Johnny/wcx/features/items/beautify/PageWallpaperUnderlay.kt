@@ -21,6 +21,7 @@ import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.view.Window
 import android.widget.ImageView
+import android.widget.ListView
 import com.Johnny.wcx.utils.WeLogger
 import java.lang.ref.WeakReference
 import java.util.WeakHashMap
@@ -261,6 +262,11 @@ internal object PageWallpaperUnderlay {
         if (row !is ImageView && isNeutralSurface(row.background)) makeTransparent(state, row, false)
     }
 
+    /** 切页后补一次重扫：切页瞬间那次 walk 可能赶在新页行绑定完之前；等动画落定后再脏一次，下次 pre-draw 即重走。 */
+    fun markDirtyAfterSettle(decor: ViewGroup, delayMs: Long = 300L) {
+        decor.postDelayed({ states[decor]?.get()?.let { it.dirty = true } }, delayMs)
+    }
+
     @Suppress("DEPRECATION")
     private fun transparentBars(state: State) {
         val window = state.window.get() ?: return
@@ -314,7 +320,9 @@ internal object PageWallpaperUnderlay {
         }
     }
     private fun makeTransparent(state: State, view: View, structural: Boolean = true) {
-        if (MainSurfaceBackgrounds.owns(view)) return
+        // 壁纸模式下 ListView 例外：它被 MainSurfaceBackgrounds 按 lists→background 接管（多为 Native，
+        // 即微信默认灰），不例外就永远盖住壁纸，诊断也看不到。顶栏/Tab 栏仍受接管保护，只放 ListView。
+        if (MainSurfaceBackgrounds.owns(view) && !(view is ListView && state.wallpaper.shouldDraw())) return
         val patch = state.patches.firstOrNull { it.view.get() === view }
         if (patch != null && view.background === patch.installed.get()) return
         val original = view.background

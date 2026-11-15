@@ -751,6 +751,8 @@ internal object ThemeSurface {
         lastTabIndex = position
         runCatching { updateTabWallpaper(activity, position) }
             .onFailure { WeLogger.w(TAG, "切 Tab 换背景（onPageSelected）失败：${it.message}") }
+        // 切页落定后再脏一次：切页瞬间那次 walk 可能赶在新页行绑定完之前，漏掉的行会一直灰到下次滚动。
+        (activity.window?.decorView as? ViewGroup)?.let { PageWallpaperUnderlay.markDirtyAfterSettle(it) }
     }
 
     /**
