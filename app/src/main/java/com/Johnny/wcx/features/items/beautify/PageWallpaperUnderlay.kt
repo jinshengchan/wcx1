@@ -99,10 +99,6 @@ internal object PageWallpaperUnderlay {
         // Backed-up ActionBar primary background (mBackground), restored
         // when wallpaper mode ends so the native title bar comes back.
         var toolbarPrimaryBackup: Drawable? = null
-        var toolbarStackedBackup: Drawable? = null
-        var toolbarSplitBackup: Drawable? = null
-        var toolbarStackedClears = 0
-        var toolbarSplitClears = 0
         var taskBarHeader: WeakReference<View>? = null
         var taskBarView: WeakReference<View>? = null
         val taskBarPainters = WeakHashMap<View, Boolean>()
@@ -353,7 +349,6 @@ internal object PageWallpaperUnderlay {
         // is not enough to keep it transparent.
         val toolbarView = state.toolbarView?.get()
         if (toolbarView != null && toolbarView.isShown) {
-            clearUnusedActionBarBackgrounds(state, toolbarView)
             val now = SystemClock.uptimeMillis()
             if (now - state.lastPrimaryBarCheckAt >= 500L) {
                 state.lastPrimaryBarCheckAt = now
@@ -421,7 +416,6 @@ internal object PageWallpaperUnderlay {
                     // primary background, not in the View background the
                     // walk patches below.
                     clearActionBarPrimaryBackground(state, view)
-                    clearUnusedActionBarBackgrounds(state, view)
                 }
                 // Only the home's full-width pull-down LIST surface, never its card rows.
                 val homeShelf = activePage == 0 && view is ListView &&
@@ -968,57 +962,6 @@ internal object PageWallpaperUnderlay {
         runCatching {
             setter.isAccessible = true
             setter.invoke(view, null)
-        }
-    }
-
-    /**
-     * AppCompat ActionBarContainer has three independent DRAWING slots:
-     * mBackground (primary), mStackedBackground (tabs) and mSplitBackground.
-     * The old code only cleared primary; the diagnostics only checked
-     * primary, so the other painters could survive despite bg=null.
-     *
-     * Do not touch any child, foreground, bounds or touch dispatch. Only
-     * clear a drawable in an actual native ActionBarContainer, and retain
-     * the original so leaving wallpaper mode restores native appearance.
-     */
-    private fun clearUnusedActionBarBackgrounds(state: State, view: View) {
-        if (view.javaClass.simpleName != "ActionBarContainer" ||
-            MainSurfaceBackgrounds.owns(view)) return
-        val access = actionBarBgAccess(view)
-        for (slot in arrayOf("Stacked", "Split")) {
-            val field = access.fields.firstOrNull { it.name == "m${slot}Background" } ?: continue
-            val setter = access.setters.firstOrNull { it.name == "set${slot}Background" } ?: continue
-            val current = runCatching { field.get(view) as? Drawable }.getOrNull() ?: continue
-            val backedUp = if (slot == "Stacked") state.toolbarStackedBackup else state.toolbarSplitBackup
-            if (backedUp == null) {
-                if (slot == "Stacked") state.toolbarStackedBackup = current
-                else state.toolbarSplitBackup = current
-            }
-            val cleared = runCatching {
-                setter.isAccessible = true
-                setter.invoke(view, null)
-                true
-            }.getOrDefault(false)
-            if (cleared) {
-                if (slot == "Stacked") state.toolbarStackedClears++
-                else state.toolbarSplitClears++
-            }
-        }
-    }
-
-    private fun restoreUnusedActionBarBackgrounds(state: State) {
-        val view = state.toolbarView?.get() ?: return
-        val access = actionBarBgAccess(view)
-        for (slot in arrayOf("Stacked", "Split")) {
-            val original = if (slot == "Stacked") state.toolbarStackedBackup else state.toolbarSplitBackup
-            if (original == null) continue
-            val setter = access.setters.firstOrNull { it.name == "set${slot}Background" } ?: continue
-            runCatching {
-                setter.isAccessible = true
-                setter.invoke(view, original)
-            }
-            if (slot == "Stacked") state.toolbarStackedBackup = null
-            else state.toolbarSplitBackup = null
         }
     }
 
@@ -1708,7 +1651,6 @@ internal object PageWallpaperUnderlay {
 
     private fun restore(state: State) {
         restoreTaskBarPainters(state)
-        restoreUnusedActionBarBackgrounds(state)
         restoreActionBarPrimaryBackground(state)
         state.patches.asReversed().forEach { patch ->
             val view = patch.view.get() ?: return@forEach
@@ -1771,7 +1713,6 @@ internal object PageWallpaperUnderlay {
             "资料卡=${state.cardDiag} 资料卡重绑=${state.cardRebinds} 立即修复=${state.cardImmediateRepairs} " +
             "资料卡焦点抑制=${state.cardFocusSuppressed} 返回主页复查=${state.launcherReturnChecks} " +
             "资料卡淡底修复=${state.cardFaintRepairs} 标题区底板修复=${state.titleRegionRepairs} " +
-            "原生顶栏绘制槽清除=Stacked:${state.toolbarStackedClears},Split:${state.toolbarSplitClears} " +
             "会话滚动标题=${state.conversationHeaderState} 标题锚点命中=${state.conversationTitleAnchors} " +
             "标题定点修复=${state.conversationTitleRepairs} 标题Header修复=${state.conversationHeaderRepairs} " +
             "滚动标题窄条命中=${state.conversationStripChecks} 修复前绘制=${state.conversationStripIdleDraws} " +
