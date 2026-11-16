@@ -67,6 +67,7 @@ internal object PageWallpaperUnderlay {
         // scan pass is not enough to keep it transparent.
         var cardRow: WeakReference<View>? = null
         var lastCardCheckAt = 0L
+        var lastSweepAt = 0L
         var cardDiag = "未观测"
         // Per-view-class host-write counts: the hostWrites total alone
         // cannot tell whether one view is rewritten every frame or many
@@ -319,6 +320,17 @@ internal object PageWallpaperUnderlay {
                     state.rowRepairs++
                 }
             }
+        }
+        // The walk only runs on a dirty pass and skips narrow views, so a
+        // white surface nested inside the title bar or the card row can
+        // survive every targeted fix while the diagnostics above it read
+        // clean. Sweep exactly those two subtrees twice a second and patch
+        // any neutral surface at any depth. The list is deliberately not
+        // swept here.
+        val sweepNow = SystemClock.uptimeMillis()
+        if (sweepNow - state.lastSweepAt >= 500L) {
+            state.lastSweepAt = sweepNow
+            sweepTitleBarAndCard(state)
         }
         refreshIdentifiedRows(state, decor, pager, page)
         if (!state.dirty) return
@@ -685,6 +697,32 @@ internal object PageWallpaperUnderlay {
         }
     }
 
+    /** Sweep the two still-white subtrees (title-bar container and Me card
+     *  row) and patch any neutral surface at any depth. Unlike the walk,
+     *  this runs twice a second regardless of dirty state and has no width
+     *  gate, so nested white surfaces the walk never reaches get patched.
+     *  Views already wrapped in SurfaceBackground are skipped; themed
+     *  images and non-neutral colors are left alone by isNeutralSurface. */
+    private fun sweepTitleBarAndCard(state: State) {
+        state.toolbarView?.get()?.let { toolbar ->
+            if (toolbar.isShown) sweepSubtree(state, toolbar, 0)
+        }
+        state.cardRow?.get()?.let { row ->
+            if (row.isShown) sweepSubtree(state, row, 0)
+        }
+    }
+
+    private fun sweepSubtree(state: State, view: View, depth: Int) {
+        if (depth > 6 || !view.isShown) return
+        val bg = view.background
+        if (bg != null && bg !is SurfaceBackground && isNeutralSurface(bg)) {
+            makeTransparent(state, view, false)
+        }
+        if (view is ViewGroup) for (i in 0 until view.childCount) {
+            sweepSubtree(state, view.getChildAt(i) ?: continue, depth + 1)
+        }
+    }
+
     private fun taskBarNativeOpen(view: View?): Boolean? {
         if (view == null) return null
         var type: Class<*>? = view.javaClass
@@ -924,6 +962,84 @@ internal object PageWallpaperUnderlay {
         }
         runCatching { visit(decor, 0) }.onFailure { return "未知" }
         return found ?: "无"
+    }
+
+    /** Dump one problem subtree (title bar or Me card row): class, live
+     *  background, patch state, pressed/focused, and whether a
+     *  SurfaceBackground wrapper would currently draw its original
+     *  (pressed/focused, or the wrapped drawable is not neutral).
+     *  Read-only; bounded so the diagnostic stays small. */
+    private fun subtreeDump(root: View?, state: State, maxDepth: Int = 4): String {
+        if (root == null) return "无"
+        val out = ArrayList<String>()
+        fun visit(view: View, depth: Int) {
+            if (depth > maxDepth || out.size >= 12) return
+            val bg = view.background
+            val patch = state.patches.firstOrNull { it.view.get() === view }
+            val patchState = when {
+                patch == null -> "无"
+                isPatchInstalled(patch, view) -> "已装"
+                else -> "未装"
+            }
+            val draws = if (bg is SurfaceBackground) {
+                " 绘=${view.isPressed || view.isFocused || !isNeutralSurface(bg.drawable)}"
+            } else ""
+            out.add("${view.javaClass.simpleName}/" +
+                "${bg?.javaClass?.simpleName ?: "null"}${bg?.let { retainedDetail(it) } ?: ""} " +
+                "补丁=$patchState 按压=${view.isPressed} 聚焦=${view.isFocused}$draws")
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                visit(view.getChildAt(i) ?: continue, depth + 1)
+            }
+        }
+        runCatching { visit(root, 0) }.onFailure { return "未知" }
+        return out.joinToString(";").ifEmpty { "空" }
+    }
+
+    /** Views outside the two problem subtrees whose bounds intersect the
+     *  given screen rect and whose background is an opaque neutral surface:
+     *  a sibling painted over the title bar or the card. Read-only. */
+    private fun coveringWhiteViews(decor: ViewGroup, rect: Rect, state: State): String {
+        val found = ArrayList<String>()
+        var visited = 0
+        val hit = Rect()
+        fun visit(view: View, depth: Int) {
+            if (depth > MAX_DEPTH || visited++ >= MAX_NODES || found.size >= 6) return
+            if (view.visibility == View.VISIBLE && view.getGlobalVisibleRect(hit) &&
+                Rect.intersects(hit, rect)) {
+                val bg = view.background
+                val opaque = when (bg) {
+                    null -> false
+                    is ColorDrawable -> Color.alpha(bg.color) != 0 && isNeutralColor(bg.color)
+                    else -> isNeutralSurface(bg)
+                }
+                if (opaque && bg !is SurfaceBackground &&
+                    state.patches.none { it.view.get() === view && isPatchInstalled(it, view) }) {
+                    found.add("${view.javaClass.simpleName}@${hit.top}-${hit.bottom}/" +
+                        "${bg.javaClass.simpleName}${retainedDetail(bg)}")
+                }
+            }
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                visit(view.getChildAt(i) ?: continue, depth + 1)
+            }
+        }
+        runCatching { visit(decor, 0) }.onFailure { return "未知" }
+        return found.joinToString(";").ifEmpty { "无" }
+    }
+
+    private fun coveringDumps(decor: ViewGroup, state: State): String {
+        val out = ArrayList<String>()
+        val rect = Rect()
+        state.toolbarView?.get()?.let { toolbar ->
+            if (toolbar.getGlobalVisibleRect(rect)) {
+                out.add("标题栏遮挡=${coveringWhiteViews(decor, rect, state)}")
+            }
+        }
+        state.cardRow?.get()?.let { row ->
+            if (row.getGlobalVisibleRect(rect)) {
+                out.add("资料卡遮挡=${coveringWhiteViews(decor, rect, state)}")
+            }
+        }
+        return out.joinToString(" ").ifEmpty { "无目标" }
     }
 
     /** Bounded, read-only samples for Me-header and Contacts/WeCom white surfaces. */
@@ -1200,6 +1316,9 @@ internal object PageWallpaperUnderlay {
             "弹跳视图=${bounceViewBackgrounds(decor)}" +
             " ListView实况=${listViewLiveState(decor, state)}" +
             " 顶栏=${toolbarLiveState(decor, state)}" +
+            " 标题栏子树=${subtreeDump(state.toolbarView?.get(), state)}" +
+            " 资料卡子树=${subtreeDump(state.cardRow?.get(), state)}" +
+            " 遮挡排查=${coveringDumps(decor, state)}" +
             " 页区未处理底板=${unresolvedSurfaceSamples(decor, state)}" +
             " 页区绘制层=${visibleRegionLayers(decor, state)}"
     }
