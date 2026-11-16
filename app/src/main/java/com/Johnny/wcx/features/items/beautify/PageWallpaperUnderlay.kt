@@ -51,6 +51,7 @@ internal object PageWallpaperUnderlay {
         // happen without layout/scroll callbacks, when the full scan is not dirty.
         var firstScreen: WeakReference<View>? = null
         var firstScreenRepairs = 0
+        var firstScreenBlockedRecolors = 0
         // The AppCompat ActionBarContainer paints its primary background in
         // onDraw (setPrimaryBackground), which View.getBackground() never
         // sees. Track the toolbar view so the per-frame pass can re-clear
@@ -1158,8 +1159,21 @@ internal object PageWallpaperUnderlay {
             if (patch != null) state.patches.remove(patch)
             return
         }
-        val transparent = if (structural) ColorDrawable(Color.TRANSPARENT)
-            else SurfaceBackground(original, suppressFaintIdle)
+        // WeChat calls setBackgroundColor() on FirstScreenFrameLayout
+        // after layout/scroll. If its current background is ColorDrawable,
+        // Android recolors the SAME drawable in-place, sometimes after our
+        // pre-draw pass. Keep this specific full-screen shell transparent
+        // until we restore the original on leaving the main page.
+        val lockedFirstScreen = structural &&
+            view.javaClass.simpleName == "FirstScreenFrameLayout" &&
+            view.width >= (state.decor.get()?.width ?: Int.MAX_VALUE) * 0.90f
+        val transparent = when {
+            lockedFirstScreen -> LockedTransparentShell {
+                state.firstScreenBlockedRecolors++
+            }
+            structural -> ColorDrawable(Color.TRANSPARENT)
+            else -> SurfaceBackground(original, suppressFaintIdle)
+        }
         if (patch == null) {
             state.patches.add(Patch(WeakReference(view), original, WeakReference(transparent), structural))
         } else {
@@ -1170,6 +1184,20 @@ internal object PageWallpaperUnderlay {
         setBackgroundPreservingPadding(view, transparent)
         // View.setBackground clears the old drawable's callback after constructing the wrapper.
         if (transparent is SurfaceBackground) original.callback = transparent
+    }
+
+    /**
+     * Only for the native FirstScreenFrameLayout (not every background).
+     * View.setBackgroundColor() normally calls ColorDrawable.setColor() on
+     * the existing instance. Ignore host recolors while the wallpaper owns
+     * this shell; original native drawable is retained in Patch for restore.
+     */
+    private class LockedTransparentShell(private val onBlocked: () -> Unit) :
+        ColorDrawable(Color.TRANSPARENT) {
+        override fun setColor(color: Int) {
+            if (color == Color.TRANSPARENT) super.setColor(color)
+            else onBlocked()
+        }
     }
 
     /** 单色是否中性：全透明；或近灰（RGB 三通道极差 ≤ 10）且全不透明或半透明（alpha ≤ 0x33）。半透明遮罩色偏极小，放掉只让底图亮一点，不改色相。 */
@@ -1642,7 +1670,7 @@ internal object PageWallpaperUnderlay {
             "绘制=${state.wallpaper.drawCount}次 跳过=${state.wallpaper.skipCount}次 " +
             "检查=${state.visited} 透明底色=${state.patches.size} " +
             "宿主回写=${state.hostWrites} 回写分布=${state.hostWritesByClass.entries.sortedByDescending { it.value }.take(4).joinToString(",") { "${it.key}=${it.value}" }.ifEmpty { "无" }} " +
-            "首页外壳修复=${state.firstScreenRepairs} " +
+            "首页外壳修复=${state.firstScreenRepairs} 外壳拦截改色=${state.firstScreenBlockedRecolors} " +
             "定点行处理=${state.rowRepairs}（通讯录=${state.rowRepairsContacts} 资料卡=${state.rowRepairsCard} 行底色类型=${state.rowBgType}） " +
             "资料卡=${state.cardDiag} 资料卡重绑=${state.cardRebinds} 立即修复=${state.cardImmediateRepairs} " +
             "资料卡焦点抑制=${state.cardFocusSuppressed} 返回主页复查=${state.launcherReturnChecks} " +
