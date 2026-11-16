@@ -595,6 +595,18 @@ internal object PageWallpaperUnderlay {
                 if (painter.visibility == View.VISIBLE) painter.visibility = View.INVISIBLE
                 return@forEach
             }
+            // Do not mute any container that encloses the interactive mini-program
+            // grid; the native taskbar may reuse the same animation parent.
+            if (name == "DynamicBgContainer") {
+                var node: View? = state.taskBarView?.get()
+                var inside = false
+                var depth = 0
+                while (node != null && depth++ < 20) {
+                    if (node === painter) { inside = true; break }
+                    node = node.parent as? View
+                }
+                if (inside) return@forEach
+            }
             // GL/animated background containers keep visibility unchanged so
             // Android does not tear down or recreate a GLSurfaceView.
             if (!state.mutedPainters.containsKey(painter)) {
