@@ -194,16 +194,19 @@ internal object PageWallpaperUnderlay {
         val pager = state.pager.get() ?: return
         val allowed = state.wallpaper.shouldDraw()
         state.lastGateAllowed = allowed
-        if (!allowed || !decor.isShown || !pager.isShown) {
-            restoreReasons[decor] = when {
-                !allowed -> "主页面守卫关闭"
-                !decor.isShown -> "窗口不可见"
-                else -> "分页容器不可见"
-            }
+        if (!allowed || !decor.isShown) {
+            restoreReasons[decor] = if (!allowed) "主页面守卫关闭" else "窗口不可见"
             restore(state)
             state.dirty = true
             restoreBackdrop(state)
             restoreBars(state)
+            return
+        }
+        // Home pull-down mini-program shelf and ViewPager transitions can temporarily hide
+        // the pager. Keep the already installed wallpaper instead of flashing the native fill.
+        // A chat/other page still closes the draw gate and follows the restore path above.
+        if (!pager.isShown) {
+            state.dirty = true
             return
         }
         if (decor.background !== state.wallpaper) {
@@ -238,13 +241,16 @@ internal object PageWallpaperUnderlay {
             if (view is ImageView || !view.getGlobalVisibleRect(visibleRect)) return
             if (view !== decor) {
                 val bottomTab = ThemeHostAdapter.isBottomTab(view)
-                if (view.width < decor.width * 0.75f && !bottomTab) return
-                val structural = view in structuralTargets || bottomTab
-                val background = view.background
-                if (structural || isNeutralSurface(background)) {
-                    makeTransparent(state, view, structural)
-                } else if (background != null && background !is SurfaceBackground && state.retainedRows.size < 6) {
-                    state.retainedRows.add("${view.javaClass.simpleName}/${background.javaClass.simpleName}${retainedDetail(background)}")
+                // A narrow wrapper can host a full-width scrolling mini-program surface.
+                // Skip patching the wrapper, not visiting its children.
+                if (view.width >= decor.width * 0.75f || bottomTab) {
+                    val structural = view in structuralTargets || bottomTab
+                    val background = view.background
+                    if (structural || isNeutralSurface(background)) {
+                        makeTransparent(state, view, structural)
+                    } else if (background != null && background !is SurfaceBackground && state.retainedRows.size < 6) {
+                        state.retainedRows.add("${view.javaClass.simpleName}/${background.javaClass.simpleName}${retainedDetail(background)}")
+                    }
                 }
             }
             if (view is ViewGroup) for (i in 0 until view.childCount) {
@@ -438,17 +444,17 @@ internal object PageWallpaperUnderlay {
         val page = runCatching {
             pager.javaClass.getMethod("getCurrentItem").invoke(pager) as? Int
         }.getOrNull()
-        if (page != 1 && page != 3) return "非目标页"
+        if (page != 0 && page != 1 && page != 3) return "非目标页"
         val samples = ArrayList<String>()
         val rect = Rect()
         var visited = 0
         fun visit(view: View, depth: Int) {
             if (depth > MAX_DEPTH || visited++ >= MAX_NODES || samples.size >= 6 ||
                 view.visibility != View.VISIBLE || !view.getGlobalVisibleRect(rect)) return
-            val inRegion = if (page == 3) {
-                rect.top < decor.height * 0.38f
-            } else {
-                rect.top < decor.height * 0.85f && rect.bottom > decor.height * 0.12f
+            val inRegion = when (page) {
+                3 -> rect.top < decor.height * 0.38f
+                0 -> rect.top < decor.height * 0.88f
+                else -> rect.top < decor.height * 0.85f && rect.bottom > decor.height * 0.12f
             }
             if (inRegion && view !== decor && view !is ImageView &&
                 view.width >= decor.width * 0.7f && rect.height() >= 48 &&
@@ -473,17 +479,17 @@ internal object PageWallpaperUnderlay {
         val page = runCatching {
             pager.javaClass.getMethod("getCurrentItem").invoke(pager) as? Int
         }.getOrNull()
-        if (page != 1 && page != 3) return "非目标页"
+        if (page != 0 && page != 1 && page != 3) return "非目标页"
         val hits = ArrayList<String>()
         val rect = Rect()
         var visited = 0
         fun walk(view: View, depth: Int) {
             if (visited++ >= MAX_NODES || depth > MAX_DEPTH ||
                 view.visibility != View.VISIBLE || !view.getGlobalVisibleRect(rect)) return
-            val area = if (page == 3) {
-                rect.top < decor.height * 0.38f
-            } else {
-                rect.top < decor.height * 0.80f && rect.bottom > decor.height * 0.12f
+            val area = when (page) {
+                3 -> rect.top < decor.height * 0.38f
+                0 -> rect.top < decor.height * 0.88f
+                else -> rect.top < decor.height * 0.80f && rect.bottom > decor.height * 0.12f
             }
             if (view !== decor && area && rect.width() >= decor.width * 0.65f &&
                 rect.height() > 45 && hits.size < 18) {
