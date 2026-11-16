@@ -1,5 +1,8 @@
 package com.Johnny.wcx.features.items.beautify
 
+import android.graphics.Color
+import android.graphics.Rect
+import android.graphics.drawable.ColorDrawable
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ListView
@@ -86,6 +89,41 @@ internal object ThemeHostAdapter {
         while (ancestor != null && ancestor !== decor) {
             targets.add(ancestor)
             ancestor = ancestor.parent as? View
+        }
+        // LauncherUIBottomTabView is outside ViewPager: page-only traversal misses its fill.
+        // Scope the patch to the visible native bottom tab and neutral, wide ancestors.
+        var tab: View? = null
+        val tabRect = Rect()
+        var tabVisited = 0
+        fun findTab(view: View, depth: Int) {
+            if (tab != null || depth > 20 || tabVisited++ >= 1800 ||
+                view.visibility != View.VISIBLE) return
+            if (isBottomTab(view) && view.getGlobalVisibleRect(tabRect) &&
+                tabRect.width() >= decor.width * 0.65f &&
+                tabRect.top >= decor.height * 0.78f &&
+                tabRect.bottom >= decor.height * 0.90f) {
+                tab = view
+                return
+            }
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                findTab(view.getChildAt(i) ?: continue, depth + 1)
+                if (tab != null || tabVisited >= 1800) break
+            }
+        }
+        findTab(decor, 0)
+        var chrome: View? = tab
+        while (chrome != null && chrome !== decor) {
+            val color = (chrome.background as? ColorDrawable)?.color
+            val nativeNeutral = color != null && Color.alpha(color) == 255 &&
+                (maxOf(Color.red(color), Color.green(color), Color.blue(color)) -
+                    minOf(Color.red(color), Color.green(color), Color.blue(color)) <= 12)
+            if (nativeNeutral && chrome.getGlobalVisibleRect(tabRect) &&
+                tabRect.width() >= decor.width * 0.70f &&
+                tabRect.top >= decor.height * 0.78f &&
+                tabRect.height() <= decor.height * 0.20f) {
+                targets.add(chrome)
+            }
+            chrome = chrome.parent as? View
         }
         var visited = 0
         val visible = android.graphics.Rect()

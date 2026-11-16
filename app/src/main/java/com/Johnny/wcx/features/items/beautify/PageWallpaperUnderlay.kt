@@ -467,6 +467,50 @@ internal object PageWallpaperUnderlay {
         return samples.joinToString(";").ifEmpty { "未发现未接管的可见底板" }
     }
 
+    /** Read-only view-layer evidence; embedded text in user wallpaper is not an error. */
+    private fun visibleRegionLayers(decor: ViewGroup, state: State): String {
+        val pager = state.pager.get() ?: return "无"
+        val page = runCatching {
+            pager.javaClass.getMethod("getCurrentItem").invoke(pager) as? Int
+        }.getOrNull()
+        if (page != 1 && page != 3) return "非目标页"
+        val hits = ArrayList<String>()
+        val rect = Rect()
+        var visited = 0
+        fun walk(view: View, depth: Int) {
+            if (visited++ >= MAX_NODES || depth > MAX_DEPTH ||
+                view.visibility != View.VISIBLE || !view.getGlobalVisibleRect(rect)) return
+            val area = if (page == 3) {
+                rect.top < decor.height * 0.38f
+            } else {
+                rect.top < decor.height * 0.80f && rect.bottom > decor.height * 0.12f
+            }
+            if (view !== decor && area && rect.width() >= decor.width * 0.65f &&
+                rect.height() > 45 && hits.size < 18) {
+                val patch = state.patches.firstOrNull { it.view.get() === view }
+                val patchFlag = when {
+                    patch == null -> "-"
+                    isPatchInstalled(patch, view) -> "ok"
+                    else -> "changed"
+                }
+                // A view may draw its own white fill or foreground despite transparent background.
+                val background = view.background
+                val foreground = view.foreground
+                val bg = background?.let { "${it.javaClass.simpleName}${retainedDetail(it)}" } ?: "null"
+                val fg = foreground?.let { "${it.javaClass.simpleName}${retainedDetail(it)}" } ?: "null"
+                val parent = (view.parent as? View)?.javaClass?.simpleName ?: "none"
+                hits.add("${view.javaClass.simpleName}@${rect.top}-${rect.bottom}" +
+                    "(bg=$bg fg=$fg patch=$patchFlag parent=$parent)")
+            }
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                walk(view.getChildAt(i) ?: continue, depth + 1)
+                if (visited >= MAX_NODES) break
+            }
+        }
+        runCatching { walk(decor, 0) }
+        return hits.joinToString(";").ifEmpty { "无" }
+    }
+
     private fun isNeutralSurface(drawable: Drawable?, depth: Int = 0): Boolean {
         if (drawable == null || depth > 4) return false
         val current = drawable.current
@@ -652,7 +696,8 @@ internal object PageWallpaperUnderlay {
             "保留行背景=${state.retainedRows.joinToString(",").ifEmpty { "无" }} " +
             "弹跳视图=${bounceViewBackgrounds(decor)}" +
             " ListView实况=${listViewLiveState(decor, state)}" +
-            " 页区未处理底板=${unresolvedSurfaceSamples(decor, state)}"
+            " 页区未处理底板=${unresolvedSurfaceSamples(decor, state)}" +
+            " 页区绘制层=${visibleRegionLayers(decor, state)}"
     }
 
     private class WindowWallpaper(var bitmap: Bitmap, var shouldDraw: () -> Boolean) : Drawable() {
