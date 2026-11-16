@@ -291,6 +291,7 @@ internal object PageWallpaperUnderlay {
             if (view is ImageView || !view.getGlobalVisibleRect(visibleRect)) return
             if (view !== decor) {
                 val bottomTab = ThemeHostAdapter.isBottomTab(view)
+                val toolbar = MainSurfaceBackgrounds.isToolbar(view)
                 val firstScreen = view.javaClass.simpleName == "FirstScreenFrameLayout" &&
                     view.width >= decor.width * 0.90f
                 if (firstScreen) state.firstScreen = WeakReference(view)
@@ -305,9 +306,9 @@ internal object PageWallpaperUnderlay {
                     view.width >= decor.width * 0.45f &&
                     visibleRect.height() in 32..(decor.height / 3)
                 val candidate = view.width >= decor.width * 0.75f ||
-                    bottomTab || firstScreen || homeShelf || nativeRow
+                    bottomTab || firstScreen || homeShelf || nativeRow || toolbar
                 if (candidate) {
-                    val structural = view in structuralTargets || bottomTab || firstScreen || homeShelf
+                    val structural = view in structuralTargets || bottomTab || firstScreen || homeShelf || toolbar
                     val background = view.background
                     if (structural || isNeutralSurface(background)) {
                         makeTransparent(state, view, structural)
@@ -548,7 +549,8 @@ internal object PageWallpaperUnderlay {
     }
     private fun makeTransparent(state: State, view: View, structural: Boolean = true) {
         // 壁纸模式下 ListView 例外：它被 MainSurfaceBackgrounds 按 lists→background 接管（多为 Native，
-        // 即微信默认灰），不例外就永远盖住壁纸，诊断也看不到。顶栏/Tab 栏仍受接管保护，只放 ListView。
+        // 即微信默认灰），不例外就永远盖住壁纸，诊断也看不到。顶栏与 Tab 栏在壁纸模式 + Native/Inherit
+        // 时已由 MainPageAppearance 释放归属（同款），这里照常打补丁；仍被接管的（包里配了纯色）不动。
         if (MainSurfaceBackgrounds.owns(view) && !(view is ListView && state.wallpaper.shouldDraw())) return
         val patch = state.patches.firstOrNull { it.view.get() === view }
         if (patch != null && isPatchInstalled(patch, view)) return
@@ -656,6 +658,36 @@ internal object PageWallpaperUnderlay {
         }
         runCatching { visit(decor, 0) }.onFailure { return "未知" }
         return if (found.isEmpty()) "无" else found.joinToString(";")
+    }
+
+    /** Top-bar live state: the action-bar container's real background + patch + ownership.
+     * Confirms the wallpaper-mode release (Native/Inherit) took effect; if the pack sets
+     * an explicit toolbar color the release never applies and this still shows owned. */
+    private fun toolbarLiveState(decor: ViewGroup, state: State): String {
+        var found: String? = null
+        var visited = 0
+        fun visit(view: View, depth: Int) {
+            if (found != null || depth > MAX_DEPTH || visited++ >= MAX_NODES) return
+            if (view.visibility == View.VISIBLE && MainSurfaceBackgrounds.isToolbar(view)) {
+                val background = view.background
+                val patch = state.patches.firstOrNull { it.view.get() === view }
+                val patchState = when {
+                    patch == null -> "补丁=无"
+                    isPatchInstalled(patch, view) -> "补丁=已装"
+                    background != null && background === patch.installed.get() -> "补丁=被原地改写"
+                    else -> "补丁=未装"
+                }
+                val owns = MainSurfaceBackgrounds.owns(view)
+                found = "${view.javaClass.simpleName}/实背景=${background?.javaClass?.simpleName ?: "null"}${background?.let { retainedDetail(it) } ?: ""} $patchState 接管=$owns"
+                return
+            }
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                visit(view.getChildAt(i) ?: continue, depth + 1)
+                if (found != null || visited >= MAX_NODES) break
+            }
+        }
+        runCatching { visit(decor, 0) }.onFailure { return "未知" }
+        return found ?: "无"
     }
 
     /** Bounded, read-only samples for Me-header and Contacts/WeCom white surfaces. */
@@ -927,6 +959,7 @@ internal object PageWallpaperUnderlay {
             "保留行背景=${state.retainedRows.joinToString(",").ifEmpty { "无" }} " +
             "弹跳视图=${bounceViewBackgrounds(decor)}" +
             " ListView实况=${listViewLiveState(decor, state)}" +
+            " 顶栏=${toolbarLiveState(decor, state)}" +
             " 页区未处理底板=${unresolvedSurfaceSamples(decor, state)}" +
             " 页区绘制层=${visibleRegionLayers(decor, state)}"
     }

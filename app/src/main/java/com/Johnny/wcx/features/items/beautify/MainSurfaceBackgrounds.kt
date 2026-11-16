@@ -28,7 +28,7 @@ internal class MainSurfaceBackgrounds {
         val slot = when {
             isTab(view) -> "chrome" to "tabBackground"
             view is ListView -> "lists" to "background"
-            resourceName(view) in setOf("action_bar_container", "action_bar", "top_actionbar") -> "chrome" to "toolbarBackground"
+            isToolbar(view) -> "chrome" to "toolbarBackground"
             else -> return
         }
         val rule = config.background(slot.first, slot.second)
@@ -94,5 +94,9 @@ internal class MainSurfaceBackgrounds {
             }
             return false
         }
+
+        /** The WeChat action-bar container: its background slot is chrome/toolbarBackground. */
+        fun isToolbar(view: View): Boolean =
+            resourceName(view) in setOf("action_bar_container", "action_bar", "top_actionbar")
     }
 }

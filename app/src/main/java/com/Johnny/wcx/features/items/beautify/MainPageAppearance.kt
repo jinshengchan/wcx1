@@ -169,11 +169,15 @@ internal object MainPageAppearance {
             val inTab = node.inTab || isNativeTab(view)
             // 全屏壁纸模式下 ListView 底板交给 underlay（透明补丁）：这里每帧按主题规则重刷，
             // 注册顺序又在 underlay 之后，会把 ListView 灰底刷回来，壁纸永远透不出来。
-            // 只跳 ListView，顶栏/Tab 栏仍走主题规则；壁纸关掉后下次刷新恢复原规则。
+            // 只跳 ListView；底栏与顶栏在规则为 Native/Inherit 时释放归属给 underlay，
+            // 包里配了纯色的不动；壁纸关掉后下次刷新恢复原规则。
             val nativeTabChrome = ThemeHostAdapter.isBottomTab(view) &&
                 (state.profile?.background("chrome", "tabBackground") ?: BackgroundRule.Inherit)
                     .let { it === BackgroundRule.Native || it === BackgroundRule.Inherit }
-            if (wallpaperActive && nativeTabChrome) {
+            val nativeToolbarChrome = MainSurfaceBackgrounds.isToolbar(view) &&
+                (state.profile?.background("chrome", "toolbarBackground") ?: BackgroundRule.Inherit)
+                    .let { it === BackgroundRule.Native || it === BackgroundRule.Inherit }
+            if (wallpaperActive && (nativeTabChrome || nativeToolbarChrome)) {
                 if (state.backgrounds.releaseForWallpaper(view)) {
                     (decor as? ViewGroup)?.let { PageWallpaperUnderlay.markDirtyAfterSettle(it, 0L) }
                 }
