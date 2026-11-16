@@ -57,7 +57,11 @@ internal object PageWallpaperUnderlay {
         // sees. Track the toolbar view so the per-frame pass can re-clear
         // it when the host repaints it.
         var toolbarView: WeakReference<View>? = null
-        var lastPrimaryBarCheckAt = 0L
+        // Count O(1) pre-draw recoveries to distinguish a directional
+        // one-frame host recolor from a missing wallpaper or failed hook.
+        var toolbarInstantPrimaryRepairs = 0
+        var toolbarInstantViewRepairs = 0
+        var toolbarLastInstantTab = -1
         var lastRowScanAt = 0L
         var rowRepairs = 0
         var rowRepairsContacts = 0
@@ -337,25 +341,25 @@ internal object PageWallpaperUnderlay {
                 else state.patches.remove(patch)
             }
         }
-        // The host repaints the title bar two ways on tab switches and
-        // scrolls: setPrimaryBackground (onDraw, invisible to the patch
-        // loop) and setBackgroundColor on the container itself (a View
-        // background, which the walk only reaches on a dirty pass and the
-        // patch loop only maintains when a patch record exists). Re-clear
-        // both at most twice a second, plus the container's direct
-        // children (custom title view / Toolbar), which carry their own
-        // backgrounds. The same 500ms slot also re-checks the Me card row:
-        // the adapter re-binds it and may rebuild it, so one scan pass
-        // is not enough to keep it transparent.
+        // WeChat may restore the title bar's native white color while a
+        // ViewPager page is being selected (Me -> Discover in particular).
+        // A 500ms throttle used to expose that fill for one or more frames
+        // before making it transparent. Pre-draw is the last safe point to
+        // restore the already-owned native background BEFORE it is painted.
+        // This is an O(1) check on the cached title container and its direct
+        // children only; it does NOT touch the pager, insert views, change
+        // translation, or interfere with the mini-program pull-down gesture.
         val toolbarView = state.toolbarView?.get()
         if (toolbarView != null && toolbarView.isShown) {
-            val now = SystemClock.uptimeMillis()
-            if (now - state.lastPrimaryBarCheckAt >= 500L) {
-                state.lastPrimaryBarCheckAt = now
-                if (actionBarPrimaryBackgroundSet(toolbarView)) {
-                    clearActionBarPrimaryBackground(state, toolbarView)
-                }
-                clearToolbarViewBackground(state, toolbarView)
+            if (actionBarPrimaryBackgroundSet(toolbarView)) {
+                clearActionBarPrimaryBackground(state, toolbarView)
+                state.toolbarInstantPrimaryRepairs++
+                state.toolbarLastInstantTab = page ?: -1
+            }
+            val repairedViews = clearToolbarViewBackground(state, toolbarView)
+            if (repairedViews > 0) {
+                state.toolbarInstantViewRepairs += repairedViews
+                state.toolbarLastInstantTab = page ?: -1
             }
         }
         // Keep the visible AccountInfoPreference row transparent in the SAME
@@ -982,10 +986,12 @@ internal object PageWallpaperUnderlay {
      *  direct children's backgrounds when the host repaints them opaque.
      *  Only non-transparent neutral ColorDrawables are touched, so themed
      *  images and translucent scrims are left alone. */
-    private fun clearToolbarViewBackground(state: State, view: View) {
+    private fun clearToolbarViewBackground(state: State, view: View): Int {
+        var repaired = 0
         val bg = view.background as? ColorDrawable
         if (bg != null && bg.color != Color.TRANSPARENT && isNeutralColor(bg.color)) {
             makeTransparent(state, view, true)
+            repaired++
         }
         if (view is ViewGroup) for (i in 0 until view.childCount) {
             val child = view.getChildAt(i) ?: continue
@@ -993,8 +999,10 @@ internal object PageWallpaperUnderlay {
             val childBg = child.background as? ColorDrawable
             if (childBg != null && childBg.color != Color.TRANSPARENT && isNeutralColor(childBg.color)) {
                 makeTransparent(state, child, false)
+                repaired++
             }
         }
+        return repaired
     }
 
     /** Sweep the two still-white subtrees (title-bar container and Me card
@@ -1713,6 +1721,7 @@ internal object PageWallpaperUnderlay {
             "资料卡=${state.cardDiag} 资料卡重绑=${state.cardRebinds} 立即修复=${state.cardImmediateRepairs} " +
             "资料卡焦点抑制=${state.cardFocusSuppressed} 返回主页复查=${state.launcherReturnChecks} " +
             "资料卡淡底修复=${state.cardFaintRepairs} 标题区底板修复=${state.titleRegionRepairs} " +
+            "顶栏即时恢复=Primary:${state.toolbarInstantPrimaryRepairs},View:${state.toolbarInstantViewRepairs},最后Tab:${state.toolbarLastInstantTab} " +
             "会话滚动标题=${state.conversationHeaderState} 标题锚点命中=${state.conversationTitleAnchors} " +
             "标题定点修复=${state.conversationTitleRepairs} 标题Header修复=${state.conversationHeaderRepairs} " +
             "滚动标题窄条命中=${state.conversationStripChecks} 修复前绘制=${state.conversationStripIdleDraws} " +
