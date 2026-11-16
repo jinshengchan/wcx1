@@ -69,6 +69,10 @@ internal object PageWallpaperUnderlay {
         var cardList: WeakReference<ListView>? = null
         var cardRebinds = 0
         var cardImmediateRepairs = 0
+        var cardFocusSuppressed = 0
+        var lastCardResolveAt = 0L
+        var launcherReturnChecks = 0
+        var launcherReturnScheduled = false
         var lastCardCheckAt = 0L
         var lastSweepAt = 0L
         var titleRegionRepairs = 0
@@ -188,6 +192,24 @@ internal object PageWallpaperUnderlay {
             state.wallpaper.invalidateSelf()
             state.dirty = true
             refresh(state)
+            // A freshly reattached LauncherUI can finish binding Me's first
+            // Preference row AFTER apply(). Do a few bounded one-shot checks
+            // instead of waiting for another tab switch or list scroll.
+            val installed = state
+            if (!installed.launcherReturnScheduled) {
+                installed.launcherReturnScheduled = true
+                for (delay in longArrayOf(80L, 250L, 600L)) {
+                    decor.postDelayed({
+                        if (states[decor]?.get() === installed &&
+                            decor.isShown && installed.wallpaper.shouldDraw()) {
+                            installed.launcherReturnChecks++
+                            installed.dirty = true
+                            installed.lastCardResolveAt = 0L
+                            refresh(installed)
+                        }
+                    }, delay)
+                }
+            }
         } catch (e: Throwable) {
             clear(activity)
             WeLogger.w(TAG, "全屏底图失败：${e.message}")
@@ -425,7 +447,37 @@ internal object PageWallpaperUnderlay {
      * A small bounded pre-draw scan handles recycled rows without hooking RecyclerView.
      */
     private fun refreshVisibleMeCard(state: State, decor: ViewGroup) {
-        val list = state.cardList?.get() ?: return
+        var list = state.cardList?.get()
+        // Clear() on an external Activity restores all patches and discards
+        // their State. The next State initially has no cached Me list even
+        // if its row has already finished binding before onResume.
+        if (list == null || !list.isAttachedToWindow || !list.isShown) {
+            val now = SystemClock.uptimeMillis()
+            if (!state.dirty && now - state.lastCardResolveAt < 160L) return
+            state.lastCardResolveAt = now
+            val pager = state.pager.get() ?: return
+            var checked = 0
+            var resolved: ListView? = null
+            fun find(view: View, depth: Int) {
+                if (resolved != null || checked++ >= 850 || depth > MAX_DEPTH ||
+                    view.visibility != View.VISIBLE) return
+                if (view is ListView && view.javaClass.simpleName == "PullDownListView" &&
+                    view.headerViewsCount == 0 && view.firstVisiblePosition == 0 &&
+                    runCatching {
+                        view.adapter?.getItem(0)?.javaClass?.simpleName == "AccountInfoPreference"
+                    }.getOrDefault(false)) {
+                    resolved = view
+                    return
+                }
+                if (view is ViewGroup) for (i in 0 until view.childCount) {
+                    find(view.getChildAt(i), depth + 1)
+                    if (resolved != null || checked >= 850) break
+                }
+            }
+            find(pager, 0)
+            list = resolved ?: return
+            state.cardList = WeakReference(list)
+        }
         if (!list.isShown || list.firstVisiblePosition != 0 ||
             list.headerViewsCount != 0 || list.childCount == 0) return
         val row = list.getChildAt(0) ?: return
@@ -442,7 +494,16 @@ internal object PageWallpaperUnderlay {
         fun repair(view: View, depth: Int) {
             if (depth > 4 || visited++ >= 48 || view.visibility != View.VISIBLE) return
             val bg = view.background
-            if (view !is ImageView && view !is android.widget.TextView &&
+            // Returning from another screen can restore focus to the card,
+            // leaving its original white selector DRAWING despite the patch
+            // being installed. Ignore idle focus only on this card, but keep
+            // pressed feedback and restore native behavior when theme exits.
+            if (bg is SurfaceBackground && !bg.ignoreIdleFocus) {
+                bg.ignoreIdleFocus = true
+                state.cardFocusSuppressed++
+                view.invalidate()
+            }
+            if (view !is android.widget.TextView &&
                 bg != null && bg !is SurfaceBackground &&
                 (whiteSelector(bg) || isNeutralSurface(bg))) {
                 makeTransparent(state, view, false)
@@ -1464,6 +1525,7 @@ internal object PageWallpaperUnderlay {
         original: Drawable,
         private val suppressFaintIdle: Boolean = false
     ) : DrawableWrapper(original) {
+        var ignoreIdleFocus = false
         @Deprecated("Deprecated in Java")
         override fun getOpacity(): Int = if (drawsBackground()) PixelFormat.TRANSLUCENT else PixelFormat.TRANSPARENT
 
@@ -1473,7 +1535,8 @@ internal object PageWallpaperUnderlay {
 
         private fun drawsBackground(): Boolean =
             state.any {
-                it == android.R.attr.state_pressed || it == android.R.attr.state_focused
+                it == android.R.attr.state_pressed ||
+                    (it == android.R.attr.state_focused && !ignoreIdleFocus)
             } || (!isNeutralSurface(drawable) && !suppressFaintIdle)
     }
 
@@ -1546,6 +1609,7 @@ internal object PageWallpaperUnderlay {
             "首页外壳修复=${state.firstScreenRepairs} " +
             "定点行处理=${state.rowRepairs}（通讯录=${state.rowRepairsContacts} 资料卡=${state.rowRepairsCard} 行底色类型=${state.rowBgType}） " +
             "资料卡=${state.cardDiag} 资料卡重绑=${state.cardRebinds} 立即修复=${state.cardImmediateRepairs} " +
+            "资料卡焦点抑制=${state.cardFocusSuppressed} 返回主页复查=${state.launcherReturnChecks} " +
             "资料卡淡底修复=${state.cardFaintRepairs} 标题区底板修复=${state.titleRegionRepairs} " +
             "会话滚动标题=${state.conversationHeaderState} 标题Header修复=${state.conversationHeaderRepairs} " +
             "小程序展开=${state.taskBarState} 渐变透明度=${state.taskBarGradientAlpha} 已藏画笔=${state.taskBarHiddenCount} 画笔实况=${state.taskBarPainterSamples} " +
