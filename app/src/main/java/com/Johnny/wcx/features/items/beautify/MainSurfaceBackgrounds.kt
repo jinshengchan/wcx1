@@ -95,8 +95,14 @@ internal class MainSurfaceBackgrounds {
             return false
         }
 
-        /** The WeChat action-bar container: its background slot is chrome/toolbarBackground. */
+        /** The WeChat action-bar container: its background slot is chrome/toolbarBackground.
+         *  Matched by class name: the three resource names below do not exist in
+         *  WeChat 8.0.80 (checked against resources.arsc: 0 hits), so a name-only
+         *  match never fired and the top bar was never released. 8.0.80's container
+         *  is androidx.appcompat.widget.ActionBarContainer; the names are kept as a
+         *  fallback for other versions. */
         fun isToolbar(view: View): Boolean =
-            resourceName(view) in setOf("action_bar_container", "action_bar", "top_actionbar")
+            view.javaClass.simpleName == "ActionBarContainer" ||
+                resourceName(view) in setOf("action_bar_container", "action_bar", "top_actionbar")
     }
 }
