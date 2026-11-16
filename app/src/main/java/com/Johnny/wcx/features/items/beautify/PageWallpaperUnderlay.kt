@@ -57,10 +57,6 @@ internal object PageWallpaperUnderlay {
         // sees. Track the toolbar view so the per-frame pass can re-clear
         // it when the host repaints it.
         var toolbarView: WeakReference<View>? = null
-        var titleWallpaperLayer: WeakReference<View>? = null
-        var titleWallpaperHost: WeakReference<ViewGroup>? = null
-        var titleWallpaperDraws = 0
-        var titleWallpaperInstalls = 0
         var lastPrimaryBarCheckAt = 0L
         var lastRowScanAt = 0L
         var rowRepairs = 0
@@ -200,7 +196,6 @@ internal object PageWallpaperUnderlay {
             ThemeHostAdapter.track(decor, pager, shouldDraw)
             observe(state, decor)
             state.wallpaper.invalidateSelf()
-            state.titleWallpaperLayer?.get()?.invalidate()
             state.dirty = true
             refresh(state)
             // A freshly reattached LauncherUI can finish binding Me's first
@@ -354,7 +349,6 @@ internal object PageWallpaperUnderlay {
         // is not enough to keep it transparent.
         val toolbarView = state.toolbarView?.get()
         if (toolbarView != null && toolbarView.isShown) {
-            ensureTitleWallpaperLayer(state, toolbarView)
             val now = SystemClock.uptimeMillis()
             if (now - state.lastPrimaryBarCheckAt >= 500L) {
                 state.lastPrimaryBarCheckAt = now
@@ -380,9 +374,7 @@ internal object PageWallpaperUnderlay {
             sweepTitleBarAndCard(state)
         }
         refreshIdentifiedRows(state, decor, pager, page)
-        // Stop touching ConversationListView's native headers: the real
-        // title in the user's screenshot sits in ActionBarContainer above
-        // the list, not in the y=288..432 list header.
+        refreshConversationHeaders(state, decor, pager, page)
         if (!state.dirty) return
         state.dirty = false
         state.visited = 0
@@ -420,7 +412,6 @@ internal object PageWallpaperUnderlay {
                 if (firstScreen) state.firstScreen = WeakReference(view)
                 if (toolbar) {
                     state.toolbarView = WeakReference(view)
-                    ensureTitleWallpaperLayer(state, view)
                     // The title-bar color lives in the container's onDraw
                     // primary background, not in the View background the
                     // walk patches below.
@@ -985,78 +976,6 @@ internal object PageWallpaperUnderlay {
             setter.invoke(view, backup)
         }
         state.toolbarPrimaryBackup = null
-    }
-
-    /**
-     * A title-only bitmap tile below the original Toolbar/ActionMenu children.
-     *
-     * WeChat 8.0.80 draws the visible #EDEDED title slab independently of
-     * View.background and ActionBarContainer's primary background. Clearing
-     * background fields cannot suppress that paint. Draw the SAME full-window
-     * wallpaper bitmap after the native container has painted, but before its
-     * native title, search and add children draw. Because this child is at
-     * index 0, it never intercepts touches or the taskbar's pull-down gesture.
-     *
-     * Use window-relative coordinates at draw time: if WeChat translates the
-     * action bar during a pull gesture, the crop remains aligned to the fixed
-     * decor wallpaper. No new bitmap, scaling cache, or per-frame tree scan.
-     */
-    private fun ensureTitleWallpaperLayer(state: State, toolbar: View) {
-        val host = toolbar as? android.widget.FrameLayout ?: return
-        val decor = state.decor.get() ?: return
-        if (toolbar.javaClass.simpleName != "ActionBarContainer" ||
-            MainSurfaceBackgrounds.owns(host) ||
-            !host.isShown || host.width < decor.width * 0.75f ||
-            host.height !in (decor.height * 0.035f).toInt()..(decor.height * 0.20f).toInt()) return
-        val existing = state.titleWallpaperLayer?.get()
-        if (existing != null && state.titleWallpaperHost?.get() === host && existing.parent === host) {
-            if (host.indexOfChild(existing) != 0) {
-                host.removeView(existing)
-                host.addView(existing, 0, android.widget.FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            }
-            return
-        }
-        removeTitleWallpaperLayer(state)
-        val layer = object : View(host.context) {
-            private val ownLocation = IntArray(2)
-            private val decorLocation = IntArray(2)
-            override fun onDraw(canvas: Canvas) {
-                val root = state.decor.get() ?: return
-                if (!state.wallpaper.shouldDraw() || root.width <= 0 || root.height <= 0 ||
-                    state.wallpaper.bitmap.isRecycled) return
-                getLocationOnScreen(ownLocation)
-                root.getLocationOnScreen(decorLocation)
-                val checkpoint = canvas.save()
-                try {
-                    canvas.translate(
-                        (decorLocation[0] - ownLocation[0]).toFloat(),
-                        (decorLocation[1] - ownLocation[1]).toFloat()
-                    )
-                    state.wallpaper.draw(canvas)
-                    state.titleWallpaperDraws++
-                } finally {
-                    canvas.restoreToCount(checkpoint)
-                }
-            }
-        }
-        layer.isClickable = false
-        layer.isFocusable = false
-        layer.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-        host.addView(layer, 0, android.widget.FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        state.titleWallpaperHost = WeakReference(host)
-        state.titleWallpaperLayer = WeakReference(layer)
-        state.titleWallpaperInstalls++
-    }
-
-    private fun removeTitleWallpaperLayer(state: State) {
-        val layer = state.titleWallpaperLayer?.get()
-        (layer?.parent as? ViewGroup)?.let { parent ->
-            runCatching { parent.removeView(layer) }
-        }
-        state.titleWallpaperLayer = null
-        state.titleWallpaperHost = null
     }
 
     /** Re-clear the title-bar container's own View background and its
@@ -1731,7 +1650,6 @@ internal object PageWallpaperUnderlay {
     }
 
     private fun restore(state: State) {
-        removeTitleWallpaperLayer(state)
         restoreTaskBarPainters(state)
         restoreActionBarPrimaryBackground(state)
         state.patches.asReversed().forEach { patch ->
@@ -1795,8 +1713,6 @@ internal object PageWallpaperUnderlay {
             "资料卡=${state.cardDiag} 资料卡重绑=${state.cardRebinds} 立即修复=${state.cardImmediateRepairs} " +
             "资料卡焦点抑制=${state.cardFocusSuppressed} 返回主页复查=${state.launcherReturnChecks} " +
             "资料卡淡底修复=${state.cardFaintRepairs} 标题区底板修复=${state.titleRegionRepairs} " +
-            "原生顶栏壁纸层=${if (state.titleWallpaperLayer?.get()?.parent != null) "已挂载" else "未挂载"} " +
-            "顶栏壁纸绘制=${state.titleWallpaperDraws} 安装=${state.titleWallpaperInstalls} " +
             "会话滚动标题=${state.conversationHeaderState} 标题锚点命中=${state.conversationTitleAnchors} " +
             "标题定点修复=${state.conversationTitleRepairs} 标题Header修复=${state.conversationHeaderRepairs} " +
             "滚动标题窄条命中=${state.conversationStripChecks} 修复前绘制=${state.conversationStripIdleDraws} " +
