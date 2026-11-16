@@ -78,6 +78,8 @@ internal object PageWallpaperUnderlay {
         var titleRegionRepairs = 0
         var cardFaintRepairs = 0
         var conversationHeaderRepairs = 0
+        var conversationTitleAnchors = 0
+        var conversationTitleRepairs = 0
         var conversationHeaderState = "未观测"
         var lastConversationHeaderScanAt = 0L
         var cardDiag = "未观测"
@@ -642,21 +644,56 @@ internal object PageWallpaperUnderlay {
         val rect = Rect()
         var shown = 0
         var repaired = 0
+        var titleRows = 0
         val samples = ArrayList<String>()
-        fun patchHeader(view: View, depth: Int) {
-            if (depth > 6 || !view.isShown || !view.getGlobalVisibleRect(rect)) return
-            if (rect.top >= decor.height * 0.36f) return
+        // Identify the SCROLLING "微信" title by its TextView inside actual
+        // ListView headers. Only its ancestor backgrounds may be suppressed
+        // even if their NinePatch or image-like drawable is non-neutral.
+        // This never changes header layout, scroll handling, or text/icons.
+        fun patchHeader(view: View, depth: Int): Boolean {
+            val bounds = Rect()
+            if (depth > 6 || !view.isShown || !view.getGlobalVisibleRect(bounds) ||
+                bounds.top >= decor.height * 0.36f) return false
             val background = view.background
-            if (samples.size < 6 && background != null)
-                samples.add("${view.javaClass.simpleName}/${background.javaClass.simpleName}${retainedDetail(background)}")
-            // Only broad neutral paint in header surfaces. Preserve native
-            // title text, icons, search affordances, badges and colored UI.
-            if (view !is ImageView && view !is android.widget.TextView &&
-                rect.width() >= decor.width * 0.58f &&
-                rect.height() in 12..(decor.height / 4)) {
-                val base = background?.current
+            if (samples.size < 8 && (background != null || depth == 0)) {
+                val fg = view.foreground
+                samples.add("${view.javaClass.simpleName}@${bounds.top}-${bounds.bottom}/" +
+                    "bg=${background?.javaClass?.simpleName ?: "null"}" +
+                    "${background?.let { retainedDetail(it) } ?: ""}/" +
+                    "fg=${fg?.javaClass?.simpleName ?: "null"}")
+            }
+            var hasTitle = if (view is android.widget.TextView) {
+                val label = view.text?.toString()?.trim().orEmpty()
+                label == "微信" || (label.length <= 15 &&
+                    (label.startsWith("微信(") || label.startsWith("微信（")))
+            } else false
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                if (patchHeader(view.getChildAt(i), depth + 1)) hasTitle = true
+            }
+            if (view is ViewGroup && bounds.width() >= decor.width * 0.58f &&
+                bounds.height() >= 12 && background != null) {
+                val base = background.current
                 val transparent = base is ColorDrawable && Color.alpha(base.color) == 0
-                if (background != null && background !is SurfaceBackground &&
+                if (hasTitle) {
+                    // When a title-specific background is not strictly neutral
+                    // (e.g. a white nine-patch with a shaded border), the old
+                    // neutral-only pass leaves the scrolling title opaque.
+                    val wrapper = background as? SurfaceBackground
+                    if (wrapper != null) {
+                        if (!wrapper.suppressFaintIdle) {
+                            wrapper.suppressFaintIdle = true
+                            view.invalidate()
+                            state.conversationTitleRepairs++
+                        }
+                    } else if (!transparent) {
+                        makeTransparent(state, view, false, true)
+                        if (view.background is SurfaceBackground) {
+                            state.conversationTitleRepairs++
+                            repaired++
+                        }
+                    }
+                } else if (bounds.height() <= decor.height / 4 &&
+                    background !is SurfaceBackground &&
                     !transparent && isNeutralSurface(background)) {
                     makeTransparent(state, view, false)
                     if (view.background is SurfaceBackground) {
@@ -665,19 +702,18 @@ internal object PageWallpaperUnderlay {
                     }
                 }
             }
-            if (view is ViewGroup) for (i in 0 until view.childCount) {
-                patchHeader(view.getChildAt(i), depth + 1)
-            }
+            return hasTitle
         }
         for (index in 0 until list.childCount) {
             if (first + index >= headerCount) break
             val row = list.getChildAt(index) ?: continue
             if (!row.getGlobalVisibleRect(rect) || rect.top >= decor.height * 0.36f) continue
             shown++
-            patchHeader(row, 0)
+            if (patchHeader(row, 0)) titleRows++
         }
+        if (titleRows > 0) state.conversationTitleAnchors++
         state.conversationHeaderState =
-            "Header=$headerCount 首项=$first 可见=$shown 本轮修复=$repaired " +
+            "Header=$headerCount 首项=$first 可见=$shown 标题行=$titleRows 本轮修复=$repaired " +
             "背景=${samples.joinToString(";").ifEmpty { "无" }}"
     }
 
@@ -1523,7 +1559,7 @@ internal object PageWallpaperUnderlay {
     /** Suppress only idle neutral fill; the platform wrapper forwards padding, states and ripple callbacks. */
     private class SurfaceBackground(
         original: Drawable,
-        private val suppressFaintIdle: Boolean = false
+        var suppressFaintIdle: Boolean = false
     ) : DrawableWrapper(original) {
         var ignoreIdleFocus = false
         @Deprecated("Deprecated in Java")
@@ -1611,7 +1647,8 @@ internal object PageWallpaperUnderlay {
             "资料卡=${state.cardDiag} 资料卡重绑=${state.cardRebinds} 立即修复=${state.cardImmediateRepairs} " +
             "资料卡焦点抑制=${state.cardFocusSuppressed} 返回主页复查=${state.launcherReturnChecks} " +
             "资料卡淡底修复=${state.cardFaintRepairs} 标题区底板修复=${state.titleRegionRepairs} " +
-            "会话滚动标题=${state.conversationHeaderState} 标题Header修复=${state.conversationHeaderRepairs} " +
+            "会话滚动标题=${state.conversationHeaderState} 标题锚点命中=${state.conversationTitleAnchors} " +
+            "标题定点修复=${state.conversationTitleRepairs} 标题Header修复=${state.conversationHeaderRepairs} " +
             "小程序展开=${state.taskBarState} 渐变透明度=${state.taskBarGradientAlpha} 已藏画笔=${state.taskBarHiddenCount} 画笔实况=${state.taskBarPainterSamples} " +
             "最近恢复原因=${restoreReasons[decor] ?: "无"} " +
             "行底色=${state.patches.count { !it.structural }} " +
