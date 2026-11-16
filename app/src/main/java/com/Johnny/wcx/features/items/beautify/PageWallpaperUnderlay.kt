@@ -70,6 +70,9 @@ internal object PageWallpaperUnderlay {
         var lastSweepAt = 0L
         var titleRegionRepairs = 0
         var cardFaintRepairs = 0
+        var conversationHeaderRepairs = 0
+        var conversationHeaderState = "未观测"
+        var lastConversationHeaderScanAt = 0L
         var cardDiag = "未观测"
         // Per-view-class host-write counts: the hostWrites total alone
         // cannot tell whether one view is rewritten every frame or many
@@ -287,6 +290,14 @@ internal object PageWallpaperUnderlay {
             // Wallpaper owns the ListView surface even if a previous theme rule installed it.
             if (MainSurfaceBackgrounds.owns(view) && !(view is ListView && allowed)) return@forEach
             if (!isPatchInstalled(patch, view)) {
+                // WeChat may hand us a NEW transparent ColorDrawable during a
+                // scroll. Adopt it rather than replacing a transparent fill
+                // with another transparent fill on every pre-draw.
+                val live = view.background
+                if (patch.structural && live is ColorDrawable && live.color == Color.TRANSPARENT) {
+                    patch.installed = WeakReference(live)
+                    return@forEach
+                }
                 state.hostWrites++
                 val key = view.javaClass.simpleName
                 state.hostWritesByClass[key] = (state.hostWritesByClass[key] ?: 0) + 1
@@ -340,6 +351,7 @@ internal object PageWallpaperUnderlay {
             sweepTitleBarAndCard(state)
         }
         refreshIdentifiedRows(state, decor, pager, page)
+        refreshConversationHeaders(state, decor, pager, page)
         if (!state.dirty) return
         state.dirty = false
         state.visited = 0
@@ -496,6 +508,84 @@ internal object PageWallpaperUnderlay {
             }
         }
         walk(pager, 0, false)
+    }
+
+    /**
+     * The scrolling "微信" title is in ConversationListView's header rows,
+     * not the stationary ActionBarContainer. Only inspect visible adapter
+     * headers of tab 0. No reparenting, intercepting touches, or disabling
+     * the list's native vertical scroll.
+     */
+    private fun refreshConversationHeaders(state: State, decor: ViewGroup, pager: ViewGroup, page: Int?) {
+        if (page != 0) return
+        val now = SystemClock.uptimeMillis()
+        if (!state.dirty && now - state.lastConversationHeaderScanAt < 200L) return
+        state.lastConversationHeaderScanAt = now
+        var visited = 0
+        var conversation: ListView? = null
+        fun find(view: View, depth: Int) {
+            if (conversation != null || depth > MAX_DEPTH || visited++ >= MAX_NODES ||
+                view.visibility != View.VISIBLE) return
+            if (view is ListView && view.javaClass.simpleName == "ConversationListView") {
+                conversation = view
+                return
+            }
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                find(view.getChildAt(i), depth + 1)
+                if (conversation != null) break
+            }
+        }
+        find(pager, 0)
+        val list = conversation ?: run {
+            state.conversationHeaderState = "会话列表未显示"
+            return
+        }
+        val first = list.firstVisiblePosition
+        val headerCount = list.headerViewsCount
+        if (headerCount <= 0 || first >= headerCount) {
+            state.conversationHeaderState = "Header=$headerCount 首项=$first（已滚出视野）"
+            return
+        }
+        val rect = Rect()
+        var shown = 0
+        var repaired = 0
+        val samples = ArrayList<String>()
+        fun patchHeader(view: View, depth: Int) {
+            if (depth > 6 || !view.isShown || !view.getGlobalVisibleRect(rect)) return
+            if (rect.top >= decor.height * 0.36f) return
+            val background = view.background
+            if (samples.size < 6 && background != null)
+                samples.add("${view.javaClass.simpleName}/${background.javaClass.simpleName}${retainedDetail(background)}")
+            // Only broad neutral paint in header surfaces. Preserve native
+            // title text, icons, search affordances, badges and colored UI.
+            if (view !is ImageView && view !is android.widget.TextView &&
+                rect.width() >= decor.width * 0.58f &&
+                rect.height() in 12..(decor.height / 4)) {
+                val base = background?.current
+                val transparent = base is ColorDrawable && Color.alpha(base.color) == 0
+                if (background != null && background !is SurfaceBackground &&
+                    !transparent && isNeutralSurface(background)) {
+                    makeTransparent(state, view, false)
+                    if (view.background is SurfaceBackground) {
+                        repaired++
+                        state.conversationHeaderRepairs++
+                    }
+                }
+            }
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                patchHeader(view.getChildAt(i), depth + 1)
+            }
+        }
+        for (index in 0 until list.childCount) {
+            if (first + index >= headerCount) break
+            val row = list.getChildAt(index) ?: continue
+            if (!row.getGlobalVisibleRect(rect) || rect.top >= decor.height * 0.36f) continue
+            shown++
+            patchHeader(row, 0)
+        }
+        state.conversationHeaderState =
+            "Header=$headerCount 首项=$first 可见=$shown 本轮修复=$repaired " +
+            "背景=${samples.joinToString(";").ifEmpty { "无" }}"
     }
 
     private fun whiteSelector(drawable: Drawable?): Boolean {
@@ -1424,6 +1514,7 @@ internal object PageWallpaperUnderlay {
             "首页外壳修复=${state.firstScreenRepairs} " +
             "定点行处理=${state.rowRepairs}（通讯录=${state.rowRepairsContacts} 资料卡=${state.rowRepairsCard} 行底色类型=${state.rowBgType}） " +
             "资料卡=${state.cardDiag} 资料卡淡底修复=${state.cardFaintRepairs} 标题区底板修复=${state.titleRegionRepairs} " +
+            "会话滚动标题=${state.conversationHeaderState} 标题Header修复=${state.conversationHeaderRepairs} " +
             "小程序展开=${state.taskBarState} 渐变透明度=${state.taskBarGradientAlpha} 已藏画笔=${state.taskBarHiddenCount} 画笔实况=${state.taskBarPainterSamples} " +
             "最近恢复原因=${restoreReasons[decor] ?: "无"} " +
             "行底色=${state.patches.count { !it.structural }} " +
