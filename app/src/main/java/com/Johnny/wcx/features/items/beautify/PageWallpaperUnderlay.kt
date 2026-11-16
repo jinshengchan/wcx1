@@ -48,7 +48,7 @@ internal object PageWallpaperUnderlay {
         val patches = ArrayList<Patch>()
         // A stable home shell needs a cheap per-frame check: host color changes may
         // happen without layout/scroll callbacks, when the full scan is not dirty.
-        var firstScreen = WeakReference<View>(null)
+        var firstScreen: WeakReference<View>? = null
         var firstScreenRepairs = 0
         val retainedRows = LinkedHashSet<String>()
         var observer: WeakReference<ViewTreeObserver>? = null
@@ -225,9 +225,10 @@ internal object PageWallpaperUnderlay {
         // The host sometimes rewrites the screen-wide neutral fill after the last
         // layout pass (particularly on returning from the mini-program pull-down).
         // Keep this check O(1); it never touches children, badges or touch handlers.
-        state.firstScreen.get()?.let { shell ->
+        state.firstScreen?.get()?.let { shell ->
+            val color = (shell.background as? ColorDrawable)?.color
             if (shell.isShown && shell.width >= decor.width * 0.9f &&
-                isNeutralSurface(shell.background) &&
+                color != null && Color.alpha(color) == 255 && isNeutralColor(color) &&
                 state.patches.none { it.view.get() === shell && isPatchInstalled(it, shell) }) {
                 state.firstScreenRepairs++
                 makeTransparent(state, shell, true)
