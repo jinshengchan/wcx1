@@ -866,11 +866,11 @@ internal object ThemeSurface {
         if (entering) {
             noteEvent("聊天页 Fragment 出现 → 容器兜底 + 撤壁纸")
         }
-        fragmentChatActive = true
-        // Prepare the chat's opaque root BEFORE removing the wallpaper, avoiding one blank frame.
-        // A duplicate Fragment callback must not clear the launcher repeatedly.
-        anchorLeaveSince = 0L
+        // Prepare the chat's opaque root while the old wallpaper is still drawable.
+        // Closing the render gate first can create a blank transition frame.
         (fragmentView as? ViewGroup)?.let { runCatching { ChatPageGuard.ensureOpaque(it) } }
+        fragmentChatActive = true
+        anchorLeaveSince = 0L
         if (entering) runCatching {
             liveActivities().forEach { act ->
                 if (ThemePages.isLauncher(act)) { TabWallpaperRenderer.clear(act); restoreWindow(act) }

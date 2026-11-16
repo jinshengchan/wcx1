@@ -16,6 +16,7 @@ import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.NinePatchDrawable
 import android.graphics.drawable.StateListDrawable
 import android.os.Build
+import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -50,6 +51,14 @@ internal object PageWallpaperUnderlay {
         // happen without layout/scroll callbacks, when the full scan is not dirty.
         var firstScreen: WeakReference<View>? = null
         var firstScreenRepairs = 0
+        var lastRowScanAt = 0L
+        var rowRepairs = 0
+        var taskBarHeader: WeakReference<View>? = null
+        var taskBarView: WeakReference<View>? = null
+        val taskBarPainters = WeakHashMap<View, Boolean>()
+        val mutedPainters = WeakHashMap<View, Float>()
+        var lastTaskBarScanAt = 0L
+        var taskBarState = "未观测"
         val retainedRows = LinkedHashSet<String>()
         var observer: WeakReference<ViewTreeObserver>? = null
         var preDraw: ViewTreeObserver.OnPreDrawListener? = null
@@ -222,6 +231,10 @@ internal object PageWallpaperUnderlay {
             setBackgroundPreservingPadding(decor, state.wallpaper)
         }
         transparentBars(state)
+        val page = runCatching {
+            pager.javaClass.getMethod("getCurrentItem").invoke(pager) as? Int
+        }.getOrNull()?.takeIf { it in 0..3 }
+        updateTaskBarPainters(state, decor, page)
         // The host sometimes rewrites the screen-wide neutral fill after the last
         // layout pass (particularly on returning from the mini-program pull-down).
         // Keep this check O(1); it never touches children, badges or touch handlers.
@@ -246,6 +259,7 @@ internal object PageWallpaperUnderlay {
                 else state.patches.remove(patch)
             }
         }
+        refreshIdentifiedRows(state, decor, pager, page)
         if (!state.dirty) return
         state.dirty = false
         state.visited = 0
@@ -308,6 +322,163 @@ internal object PageWallpaperUnderlay {
             }
         }
         walk(decor, 0)
+    }
+
+    /**
+     * WeChat 8.0.80: enterprise rows are under contact.t3/WxRecyclerView; the
+     * Me profile is AccountInfoPreference's FIRST ADAPTER ROW, not a ListView header.
+     * A small bounded pre-draw scan handles recycled rows without hooking RecyclerView.
+     */
+    private fun refreshIdentifiedRows(state: State, decor: ViewGroup, pager: ViewGroup, page: Int?) {
+        if (page != 1 && page != 3) return
+        val now = SystemClock.uptimeMillis()
+        if (!state.dirty && now - state.lastRowScanAt < 140L) return
+        state.lastRowScanAt = now
+        val rect = Rect()
+        var visited = 0
+        fun eligible(view: View): Boolean =
+            view is ViewGroup && view.isShown &&
+                view.width >= decor.width * 0.48f &&
+                view.getGlobalVisibleRect(rect) &&
+                rect.height() >= 36
+
+        fun patchMeCard(row: View, depth: Int) {
+            if (depth > 4 || !eligible(row)) return
+            if (whiteSelector(row.background)) {
+                makeTransparent(state, row, false)
+                state.rowRepairs++
+                return
+            }
+            if (row is ViewGroup) for (i in 0 until row.childCount) {
+                patchMeCard(row.getChildAt(i), depth + 1)
+            }
+        }
+
+        fun walk(view: View, depth: Int, wecom: Boolean) {
+            if (depth > MAX_DEPTH || visited++ >= 850 ||
+                view.visibility != View.VISIBLE || !view.getGlobalVisibleRect(rect)) return
+            val inWecom = wecom || view.javaClass.name == "com.tencent.mm.ui.contact.t3"
+            if (page == 1 && inWecom && eligible(view) && whiteSelector(view.background)) {
+                makeTransparent(state, view, false)
+                state.rowRepairs++
+            }
+            if (page == 3 && view is ListView &&
+                view.javaClass.simpleName == "PullDownListView" &&
+                view.firstVisiblePosition == 0 && view.headerViewsCount == 0) {
+                val row = view.getChildAt(0)
+                if (row != null && row.getGlobalVisibleRect(rect) &&
+                    rect.top < decor.height * 0.40f) {
+                    val firstItem = runCatching { view.adapter?.getItem(0) }.getOrNull()
+                    if (firstItem?.javaClass?.simpleName == "AccountInfoPreference") {
+                        patchMeCard(row, 0)
+                    }
+                }
+            }
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                walk(view.getChildAt(i), depth + 1, inWecom)
+                if (visited >= 850) break
+            }
+        }
+        walk(pager, 0, false)
+    }
+
+    private fun whiteSelector(drawable: Drawable?): Boolean {
+        val original = drawable as? StateListDrawable ?: return false
+        val color = (original.current as? ColorDrawable)?.color ?: return false
+        return Color.alpha(color) == 255 &&
+            Color.red(color) >= 248 && Color.green(color) >= 248 && Color.blue(color) >= 248
+    }
+
+    /**
+     * Only suppress the taskbar's OWN painted gradient / bottom strip during a
+     * PARTIAL home pull-down. Once the native header is fully expanded, restore
+     * native painters; on collapse the wallpaper becomes visible again.
+     * Never hide TaskBarContainer or the mini-program RecyclerView.
+     */
+    private fun updateTaskBarPainters(state: State, decor: ViewGroup, page: Int?) {
+        if (page != 0) {
+            restoreTaskBarPainters(state)
+            state.taskBarState = "非首页"
+            return
+        }
+        val now = SystemClock.uptimeMillis()
+        if (now - state.lastTaskBarScanAt >= 180L &&
+            (state.taskBarHeader?.get() == null || state.dirty || state.taskBarPainters.isEmpty())) {
+            state.lastTaskBarScanAt = now
+            var visited = 0
+            fun scan(view: View, depth: Int) {
+                if (depth > MAX_DEPTH || visited++ >= MAX_NODES) return
+                val name = view.javaClass.simpleName
+                when (name) {
+                    "TaskBarContainer" -> {
+                        if (view.javaClass.name == "com.tencent.mm.plugin.taskbar.ui.TaskBarContainer")
+                            state.taskBarHeader = WeakReference(view)
+                    }
+                    "TaskBarView" -> state.taskBarView = WeakReference(view)
+                    "GradientColorBackgroundView", "DynamicBackgroundGLSurfaceView",
+                    "TaskBarBottomView" -> state.taskBarPainters[view] = true
+                }
+                if (view is ViewGroup) for (i in 0 until view.childCount) {
+                    scan(view.getChildAt(i), depth + 1)
+                    if (visited >= MAX_NODES) break
+                }
+            }
+            scan(decor, 0)
+        }
+        val header = state.taskBarHeader?.get()
+        val visible = Rect()
+        val exposed = header != null && header.isShown &&
+            header.height > 0 && header.getGlobalVisibleRect(visible) && visible.height() > 0
+        if (!exposed) {
+            restoreTaskBarPainters(state)
+            state.taskBarState = "收起/未显示"
+            return
+        }
+        val fraction = (visible.height().toFloat() / header!!.height).coerceIn(0f, 1f)
+        val nativeOpen = taskBarNativeOpen(state.taskBarView?.get())
+        val fullyExpanded = fraction >= 0.98f && nativeOpen != false
+        state.taskBarState = if (fullyExpanded) "完全展开" else "下拉中"
+        state.taskBarState += "（可见=${(fraction * 100).toInt()}%，原生展开=${nativeOpen ?: "未知"}）"
+        if (fullyExpanded) {
+            restoreTaskBarPainters(state)
+            return
+        }
+        state.taskBarPainters.keys.toList().forEach { painter ->
+            if (!painter.isAttachedToWindow || !painter.isShown) return@forEach
+            if (!state.mutedPainters.containsKey(painter)) {
+                val original = painter.alpha
+                if (original <= 0f) return@forEach
+                state.mutedPainters[painter] = original
+            }
+            if (painter.alpha != 0f) painter.alpha = 0f
+        }
+    }
+
+    private fun taskBarNativeOpen(view: View?): Boolean? {
+        if (view == null) return null
+        var type: Class<*>? = view.javaClass
+        while (type != null) {
+            val method = type.declaredMethods.firstOrNull {
+                it.name == "I2" && it.parameterTypes.isEmpty() &&
+                    (it.returnType == Boolean::class.javaPrimitiveType ||
+                        it.returnType == java.lang.Boolean::class.java)
+            }
+            if (method != null) {
+                return runCatching {
+                    method.isAccessible = true
+                    method.invoke(view) as? Boolean
+                }.getOrNull()
+            }
+            type = type.superclass
+        }
+        return null
+    }
+
+    private fun restoreTaskBarPainters(state: State) {
+        state.mutedPainters.entries.toList().forEach { (view, original) ->
+            if (view.alpha == 0f) view.alpha = original
+        }
+        state.mutedPainters.clear()
     }
 
     /** Called only for a row returned by the concrete adapter of a registered main-page list. */
@@ -476,7 +647,7 @@ internal object PageWallpaperUnderlay {
                     else -> "补丁=未装"
                 }
                 val owns = MainSurfaceBackgrounds.owns(view)
-                found.add("${view.javaClass.simpleName}/实背景=${background?.javaClass?.simpleName ?: "null"}${background?.let { retainedDetail(it) } ?: ""} $patchState 接管=$owns")
+                found.add("${view.javaClass.simpleName}/实背景=${background?.javaClass?.simpleName ?: "null"}${background?.let { retainedDetail(it) } ?: ""} $patchState 接管=$owns headerViewsCount=${view.headerViewsCount} firstVisible=${view.firstVisiblePosition}")
             }
             if (view is ViewGroup) for (i in 0 until view.childCount) {
                 visit(view.getChildAt(i) ?: continue, depth + 1)
@@ -693,6 +864,7 @@ internal object PageWallpaperUnderlay {
     }
 
     private fun restore(state: State) {
+        restoreTaskBarPainters(state)
         state.patches.asReversed().forEach { patch ->
             val view = patch.view.get() ?: return@forEach
             if (isPatchInstalled(patch, view)) {
@@ -749,6 +921,7 @@ internal object PageWallpaperUnderlay {
             "绘制=${state.wallpaper.drawCount}次 跳过=${state.wallpaper.skipCount}次 " +
             "检查=${state.visited} 透明底色=${state.patches.size} " +
             "宿主回写=${state.hostWrites} 首页外壳修复=${state.firstScreenRepairs} " +
+            "定点行处理=${state.rowRepairs} 小程序展开=${state.taskBarState} " +
             "最近恢复原因=${restoreReasons[decor] ?: "无"} " +
             "行底色=${state.patches.count { !it.structural }} " +
             "保留行背景=${state.retainedRows.joinToString(",").ifEmpty { "无" }} " +

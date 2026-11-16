@@ -133,18 +133,9 @@ internal object ThemeHostAdapter {
                 targets.add(view)
                 session.lists[view] = true
                 session.rows += view.childCount
-                // Me's profile header is a ListView header, not an adapter-bound row.
-                // Only take the first visible header at the top of the Me tab.
-                if (session.actualPage == 3 && view.headerViewsCount > 0 && view.firstVisiblePosition == 0) {
-                    val header = view.getChildAt(0)
-                    val headerRect = android.graphics.Rect()
-                    if (header != null && header.width >= decor.width * 0.7f &&
-                        header.getGlobalVisibleRect(headerRect) &&
-                        headerRect.top <= decor.height * 0.28f &&
-                        headerRect.height() >= decor.height * 0.08f) {
-                        targets.add(header)
-                    }
-                }
+                // Me's AccountInfoPreference is adapter item 0, not a ListView header.
+                // Its selector row is handled by PageWallpaperUnderlay's reversible
+                // SurfaceBackground wrapper so native press feedback remains intact.
                 val adapter = view.adapter
                 val method = adapter?.let {
                     runCatching {
