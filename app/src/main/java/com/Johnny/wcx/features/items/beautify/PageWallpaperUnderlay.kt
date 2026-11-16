@@ -46,6 +46,10 @@ internal object PageWallpaperUnderlay {
         val wallpaper = WindowWallpaper(bitmap, shouldDraw)
         var originalBackdrop = decor.background
         val patches = ArrayList<Patch>()
+        // A stable home shell needs a cheap per-frame check: host color changes may
+        // happen without layout/scroll callbacks, when the full scan is not dirty.
+        var firstScreen = WeakReference<View>(null)
+        var firstScreenRepairs = 0
         val retainedRows = LinkedHashSet<String>()
         var observer: WeakReference<ViewTreeObserver>? = null
         var preDraw: ViewTreeObserver.OnPreDrawListener? = null
@@ -218,6 +222,17 @@ internal object PageWallpaperUnderlay {
             setBackgroundPreservingPadding(decor, state.wallpaper)
         }
         transparentBars(state)
+        // The host sometimes rewrites the screen-wide neutral fill after the last
+        // layout pass (particularly on returning from the mini-program pull-down).
+        // Keep this check O(1); it never touches children, badges or touch handlers.
+        state.firstScreen.get()?.let { shell ->
+            if (shell.isShown && shell.width >= decor.width * 0.9f &&
+                isNeutralSurface(shell.background) &&
+                state.patches.none { it.view.get() === shell && isPatchInstalled(it, shell) }) {
+                state.firstScreenRepairs++
+                makeTransparent(state, shell, true)
+            }
+        }
         // Host background replacement need not trigger layout. Maintain known surfaces every frame.
         state.patches.toList().forEach { patch ->
             val view = patch.view.get() ?: return@forEach
@@ -263,6 +278,7 @@ internal object PageWallpaperUnderlay {
                 val bottomTab = ThemeHostAdapter.isBottomTab(view)
                 val firstScreen = view.javaClass.simpleName == "FirstScreenFrameLayout" &&
                     view.width >= decor.width * 0.90f
+                if (firstScreen) state.firstScreen = WeakReference(view)
                 // Only the home's full-width pull-down LIST surface, never its card rows.
                 val homeShelf = activePage == 0 && view is ListView &&
                     view.javaClass.simpleName == "PullDownListView" &&
@@ -731,7 +747,8 @@ internal object PageWallpaperUnderlay {
             "窗口可见=${decor.isShown} 分页可见=${state.pager.get()?.isShown} 最近检查守卫=${state.lastGateAllowed} " +
             "绘制=${state.wallpaper.drawCount}次 跳过=${state.wallpaper.skipCount}次 " +
             "检查=${state.visited} 透明底色=${state.patches.size} " +
-            "宿主回写=${state.hostWrites} 最近恢复原因=${restoreReasons[decor] ?: "无"} " +
+            "宿主回写=${state.hostWrites} 首页外壳修复=${state.firstScreenRepairs} " +
+            "最近恢复原因=${restoreReasons[decor] ?: "无"} " +
             "行底色=${state.patches.count { !it.structural }} " +
             "保留行背景=${state.retainedRows.joinToString(",").ifEmpty { "无" }} " +
             "弹跳视图=${bounceViewBackgrounds(decor)}" +
