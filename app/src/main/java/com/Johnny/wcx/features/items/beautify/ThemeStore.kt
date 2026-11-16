@@ -7,6 +7,8 @@ import android.net.Uri
 import android.view.View
 import androidx.activity.ComponentActivity
 import com.Johnny.wcx.BuildConfig
+import com.Johnny.wcx.dexkit.abc.IResolveDex
+import com.Johnny.wcx.dexkit.dsl.dexMethod
 import com.Johnny.wcx.activity.settings.SettingsNavigation
 import com.Johnny.wcx.features.api.ui.WeChatMessageViewApi
 import com.Johnny.wcx.features.api.ui.WeMainActivityBeautifyApi
@@ -48,7 +50,7 @@ import kotlin.io.path.listDirectoryEntries
     categories = ["界面美化"],
     description = "自定义主题包、四页背景、文字图标及聊天气泡，支持主题导入导出与原生外观恢复"
 )
-object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener {
+object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener, IResolveDex {
 
     private const val TAG = "ThemeStore"
 
@@ -328,6 +330,22 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     @Volatile private var actionBarColorOriginal: Int? = null
     @Volatile private var actionBarColorGetterHooked = false
 
+    // Unlike LauncherUI's (possibly obfuscated) getter, WeChat's HomeUI
+    // setter is the writer of the COLLAPSING, scrollable title-bar color.
+    // Match the same two native string constants as the known upstream hook;
+    // allowFailure is essential because Dex mappings vary by host version.
+    private val nativeHomeActionBarColorSetter by dexMethod(
+        allowMultiple = true, allowFailure = true
+    ) {
+        matcher {
+            usingEqStrings("com/tencent/mm/ui/HomeUI", "setActionBarColor")
+        }
+    }
+    @Volatile private var homeBarSetterStatus = "未检查"
+    @Volatile private var homeBarSetterHits = 0
+    @Volatile private var homeBarSetterLastColor: Int? = null
+    @Volatile private var homeBarSetterHooked = false
+
     /**
      * Read and override the host's OWN ActionBarColor accessor, not a guessed
      * action-bar child background. This is a narrow, optional hook: if 8.0.80
@@ -373,6 +391,82 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
             actionBarColorHookStatus = "已挂 ${getter.declaringClass.simpleName}.${getter.name}"
         }.onFailure {
             actionBarColorHookStatus = "挂载失败：${it.javaClass.simpleName}"
+        }
+    }
+
+    /**
+     * The disappearing white slab in the recorded upward-scroll animation
+     * belongs to the native scrolling HomeUI title transition. The stationary
+     * ActionBarContainer is already transparent. Do NOT hide either title or
+     * insert any view: only replace a CONFIRMED native neutral-white color
+     * argument before HomeUI applies it.
+     *
+     * WeChat 8.0.80 can obfuscate the setter name. Resolve by the same
+     * "com/tencent/mm/ui/HomeUI"+"setActionBarColor" bytecode strings used
+     * upstream, then require exact (int)->void on com.tencent.mm.ui.HomeUI.
+     * On ambiguity/mismatch simply leave the native app untouched.
+     */
+    private fun hookHomeActionBarColorWriter() {
+        if (homeBarSetterHooked) return
+        val homeClass = runCatching {
+            ClassLoaders.HOST.loadClass("com.tencent.mm.ui.HomeUI")
+        }.getOrNull()
+        val exactMethods = homeClass?.declaredMethods?.filter { it.name == "setActionBarColor" }.orEmpty()
+        val dexMethods = runCatching {
+            listOf(nativeHomeActionBarColorSetter.method) +
+                nativeHomeActionBarColorSetter.candidateMethods()
+        }.getOrDefault(emptyList())
+        val candidates = (exactMethods + dexMethods).distinct()
+        val safe = candidates.filter { method ->
+            method.declaringClass.name == "com.tencent.mm.ui.HomeUI" &&
+                method.parameterTypes.size == 1 &&
+                method.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                method.returnType == Void.TYPE &&
+                !java.lang.reflect.Modifier.isStatic(method.modifiers)
+        }
+        if (safe.size != 1) {
+            homeBarSetterStatus = "HomeUI 色值写入方法未唯一确认（匹配=${safe.size},候选=${candidates.size}）"
+            return
+        }
+        val method = safe.single()
+        runCatching {
+            method.isAccessible = true
+            method.hookBefore {
+                if (!wallpaperSwitchOn() || !usePageBackground() || !ThemeSurface.onMainPage)
+                    return@hookBefore
+                // A previous incident made tabs unresponsive by adding a
+                // native action-bar child. Keep this fix strictly LauncherUI
+                // and full-window wallpaper only.
+                val launcher = ThemeSurface.liveActivities().firstOrNull {
+                    ThemePages.isLauncher(it) && PageWallpaperUnderlay.isAttached(it)
+                } ?: return@hookBefore
+                val toolbarRule = ThemeRuntime.current(launcher)?.profile
+                    ?.background("chrome", "toolbarBackground") ?: BackgroundRule.Inherit
+                if (toolbarRule !== BackgroundRule.Native &&
+                    toolbarRule !== BackgroundRule.Inherit) return@hookBefore
+                val old = args.getOrNull(0) as? Int ?: return@hookBefore
+                val spread = maxOf(
+                    android.graphics.Color.red(old),
+                    android.graphics.Color.green(old),
+                    android.graphics.Color.blue(old)
+                ) - minOf(
+                    android.graphics.Color.red(old),
+                    android.graphics.Color.green(old),
+                    android.graphics.Color.blue(old)
+                )
+                // Do not override dark mode, accented themes or non-white
+                // transition states. Only the opaque neutral-white title fill.
+                if (android.graphics.Color.alpha(old) != 255 ||
+                    spread > 12 || android.graphics.Color.red(old) < 190)
+                    return@hookBefore
+                homeBarSetterLastColor = old
+                args[0] = android.graphics.Color.TRANSPARENT
+                homeBarSetterHits++
+            }
+            homeBarSetterHooked = true
+            homeBarSetterStatus = "已挂 ${method.declaringClass.simpleName}.${method.name}"
+        }.onFailure {
+            homeBarSetterStatus = "挂载失败：${it.javaClass.simpleName}"
         }
     }
 
@@ -474,6 +568,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         hookTabSwitch()
         hookLiveTabAdapters()
         hookNativeActionBarColor()
+        hookHomeActionBarColorWriter()
         hookChattingPage()
         hookChattingFragment()
         ThemeSurface.registerCallbacks(true)
@@ -501,6 +596,10 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         hookSelectedOk = false
         hookScrolledOk = false
         actionBarColorGetterHooked = false
+        homeBarSetterHooked = false
+        homeBarSetterStatus = "已停用"
+        homeBarSetterHits = 0
+        homeBarSetterLastColor = null
         actionBarColorHookStatus = "已停用"
         actionBarColorHookHits = 0
         actionBarColorOriginal = null
@@ -1049,6 +1148,11 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
                 "Getter:$actionBarColorHookStatus " +
                 "原值:${actionBarColorOriginal?.let { "#${Integer.toHexString(it).padStart(8, '0')}" } ?: "未命中"} " +
                 "透明返回:$actionBarColorHookHits 次"
+        )
+        appendLine(
+            "HomeUI 滚动标题写入 = $homeBarSetterStatus " +
+                "拦截:$homeBarSetterHits 次 原值:" +
+                (homeBarSetterLastColor?.let { "#${Integer.toHexString(it).padStart(8, '0')}" } ?: "未命中")
         )
 
         // 分页是否生效，就看这两行：页码读不到 / 切页 hook 没挂上，都会「4 页全是主页那张」
