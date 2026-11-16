@@ -56,6 +56,7 @@ internal object PageWallpaperUnderlay {
         var visited = 0
         var hostWrites = 0
         var lastGateAllowed: Boolean? = null
+        var pagerShown: Boolean? = null
         var statusColor = window.statusBarColor
         var navColor = window.navigationBarColor
         var statusContrast = Build.VERSION.SDK_INT >= 29 && window.isStatusBarContrastEnforced
@@ -202,12 +203,12 @@ internal object PageWallpaperUnderlay {
             restoreBars(state)
             return
         }
-        // Home pull-down mini-program shelf and ViewPager transitions can temporarily hide
-        // the pager. Keep the already installed wallpaper instead of flashing the native fill.
-        // A chat/other page still closes the draw gate and follows the restore path above.
-        if (!pager.isShown) {
+        // When the home mini-program shelf opens, ViewPager may be temporarily hidden.
+        // The Launcher window is still on screen: keep repairing its wallpaper/structural
+        // surfaces. Only the explicit chat/secondary-page draw gate may restore them.
+        if (state.pagerShown != pager.isShown) {
+            state.pagerShown = pager.isShown
             state.dirty = true
-            return
         }
         if (decor.background !== state.wallpaper) {
             if (state.wallpaper.drawCount > 0) state.hostWrites++
@@ -235,16 +236,47 @@ internal object PageWallpaperUnderlay {
         state.retainedRows.clear()
         state.patches.removeAll { it.view.get() == null }
         val structuralTargets = ThemeHostAdapter.structuralTargets(decor, pager)
+        val activePage = runCatching {
+            pager.javaClass.getMethod("getCurrentItem").invoke(pager) as? Int
+        }.getOrNull()?.takeIf { it in 0..3 }
         val visibleRect = Rect()
+        fun inNativeList(view: View): Boolean {
+            var parent = view.parent as? View
+            var depth = 0
+            while (parent != null && depth++ < 16) {
+                if (parent is ListView) {
+                    val name = parent.javaClass.simpleName
+                    return when (activePage) {
+                        0 -> name == "ConversationListView"
+                        1, 3 -> name == "PullDownListView"
+                        else -> false
+                    }
+                }
+                parent = parent.parent as? View
+            }
+            return false
+        }
         fun walk(view: View, depth: Int) {
             if (depth > MAX_DEPTH || state.visited++ >= MAX_NODES || view.visibility != View.VISIBLE) return
             if (view is ImageView || !view.getGlobalVisibleRect(visibleRect)) return
             if (view !== decor) {
                 val bottomTab = ThemeHostAdapter.isBottomTab(view)
-                // A narrow wrapper can host a full-width scrolling mini-program surface.
-                // Skip patching the wrapper, not visiting its children.
-                if (view.width >= decor.width * 0.75f || bottomTab) {
-                    val structural = view in structuralTargets || bottomTab
+                val firstScreen = view.javaClass.simpleName == "FirstScreenFrameLayout" &&
+                    view.width >= decor.width * 0.90f
+                // Only the home's full-width pull-down LIST surface, never its card rows.
+                val homeShelf = activePage == 0 && view is ListView &&
+                    view.javaClass.simpleName == "PullDownListView" &&
+                    visibleRect.width() >= decor.width * 0.70f &&
+                    visibleRect.height() >= decor.height * 0.18f
+                // WeCom/Me rows and conversation unread-count ROW containers can be less
+                // than 75% width. Keep TextView/ImageView/interactive badges untouched.
+                val nativeRow = view is ViewGroup && inNativeList(view) &&
+                    view.width >= decor.width * 0.45f &&
+                    visibleRect.height() in 32..(decor.height / 3)
+                val candidate = view.width >= decor.width * 0.75f ||
+                    bottomTab || firstScreen || homeShelf || nativeRow
+                if (candidate) {
+                    val structural = view in structuralTargets || bottomTab || firstScreen || homeShelf
                     val background = view.background
                     if (structural || isNeutralSurface(background)) {
                         makeTransparent(state, view, structural)
@@ -686,7 +718,9 @@ internal object PageWallpaperUnderlay {
     fun isAttached(activity: Activity): Boolean {
         val decor = activity.window?.decorView as? ViewGroup ?: return false
         val state = states[decor]?.get() ?: return false
-        return decor.background === state.wallpaper && state.pager.get()?.isShown == true && decor.isShown
+        // Pager can hide during the home mini-program pull-down: the installed
+        // window wallpaper still counts as attached until the explicit gate closes.
+        return decor.background === state.wallpaper && decor.isShown
     }
 
     fun describe(activity: Activity, includeHistory: Boolean = true): String? {
