@@ -85,6 +85,10 @@ internal object PageWallpaperUnderlay {
         var taskBarView: WeakReference<View>? = null
         val taskBarPainters = WeakHashMap<View, Boolean>()
         val mutedPainters = WeakHashMap<View, Float>()
+        // Visibility is more stable than alpha for native-gradient painters:
+        // the taskbar animation repeatedly writes alpha while the shelf moves.
+        // INVISIBLE (never GONE) retains layout and avoids frame-by-frame alpha tug-of-war.
+        val mutedPainterVisibility = WeakHashMap<View, Int>()
         var lastTaskBarScanAt = 0L
         var taskBarState = "未观测"
         val retainedRows = LinkedHashSet<String>()
@@ -529,7 +533,8 @@ internal object PageWallpaperUnderlay {
                     }
                     "TaskBarView" -> state.taskBarView = WeakReference(view)
                     "GradientColorBackgroundView", "DynamicBackgroundGLSurfaceView",
-                    "TaskBarBottomView" -> state.taskBarPainters[view] = true
+                    "TaskBarBottomView", "DynamicBgContainer" ->
+                        state.taskBarPainters[view] = true
                 }
                 if (view is ViewGroup) for (i in 0 until view.childCount) {
                     scan(view.getChildAt(i), depth + 1)
@@ -578,10 +583,20 @@ internal object PageWallpaperUnderlay {
      *  original alpha so a full expansion can restore it. */
     private fun muteTaskBarPainters(state: State) {
         state.taskBarPainters.keys.toList().forEach { painter ->
-            // The gradient painter may be attached but temporarily not isShown
-            // during the first pull-down frames. Waiting for isShown lets a
-            // purple frame through before the next pre-draw pass.
             if (!painter.isAttachedToWindow) return@forEach
+            val name = painter.javaClass.simpleName
+            // These two classes ONLY paint the background. Native animation
+            // writes alpha every frame; INVISIBLE avoids the opposing writes
+            // while leaving geometry and interactive mini-program grid intact.
+            if (name == "GradientColorBackgroundView" || name == "TaskBarBottomView") {
+                if (!state.mutedPainterVisibility.containsKey(painter)) {
+                    state.mutedPainterVisibility[painter] = painter.visibility
+                }
+                if (painter.visibility == View.VISIBLE) painter.visibility = View.INVISIBLE
+                return@forEach
+            }
+            // GL/animated background containers keep visibility unchanged so
+            // Android does not tear down or recreate a GLSurfaceView.
             if (!state.mutedPainters.containsKey(painter)) {
                 val original = painter.alpha
                 if (original <= 0f) return@forEach
@@ -596,9 +611,12 @@ internal object PageWallpaperUnderlay {
     private fun recordTaskBarPainterState(state: State) {
         val painters = state.taskBarPainters.keys.toList()
         state.taskBarGradientAlpha = painters.maxOfOrNull { it.alpha } ?: -1f
-        state.taskBarHiddenCount = painters.count { it.alpha == 0f }
+        state.taskBarHiddenCount = painters.count {
+            it.alpha == 0f || state.mutedPainterVisibility.containsKey(it) &&
+                it.visibility == View.INVISIBLE
+        }
         state.taskBarPainterSamples = painters.take(6).joinToString(",") { painter ->
-            "${painter.javaClass.simpleName}:${painter.alpha}/" +
+            "${painter.javaClass.simpleName}:a=${painter.alpha}/v=${painter.visibility}/" +
                 "${if (painter.isAttachedToWindow) "挂载" else "未挂载"}/" +
                 "${if (painter.isShown) "可见" else "不可见"}"
         }.ifEmpty { "无" }
@@ -754,6 +772,10 @@ internal object PageWallpaperUnderlay {
     }
 
     private fun restoreTaskBarPainters(state: State) {
+        state.mutedPainterVisibility.entries.toList().forEach { (view, original) ->
+            if (view.visibility == View.INVISIBLE) view.visibility = original
+        }
+        state.mutedPainterVisibility.clear()
         state.mutedPainters.entries.toList().forEach { (view, original) ->
             if (view.alpha == 0f) view.alpha = original
         }
