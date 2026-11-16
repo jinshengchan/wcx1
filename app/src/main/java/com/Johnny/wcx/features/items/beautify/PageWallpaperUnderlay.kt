@@ -59,6 +59,26 @@ internal object PageWallpaperUnderlay {
         var lastPrimaryBarCheckAt = 0L
         var lastRowScanAt = 0L
         var rowRepairs = 0
+        var rowRepairsContacts = 0
+        var rowRepairsCard = 0
+        var rowBgType = "?"
+        // Me profile card row, kept for the 500ms maintenance in refresh():
+        // the adapter re-binds it and the host may rebuild it, so a single
+        // scan pass is not enough to keep it transparent.
+        var cardRow: WeakReference<View>? = null
+        var lastCardCheckAt = 0L
+        var cardDiag = "未观测"
+        // Per-view-class host-write counts: the hostWrites total alone
+        // cannot tell whether one view is rewritten every frame or many
+        // views once each.
+        val hostWritesByClass = LinkedHashMap<String, Int>()
+        // Taskbar painter readouts for the next diagnostic.
+        var taskBarGradientAlpha = -1f
+        var taskBarHiddenCount = 0
+        var taskBarFullyExpandedAt = 0L
+        // Backed-up ActionBar primary background (mBackground), restored
+        // when wallpaper mode ends so the native title bar comes back.
+        var toolbarPrimaryBackup: Drawable? = null
         var taskBarHeader: WeakReference<View>? = null
         var taskBarView: WeakReference<View>? = null
         val taskBarPainters = WeakHashMap<View, Boolean>()
@@ -260,21 +280,43 @@ internal object PageWallpaperUnderlay {
             if (MainSurfaceBackgrounds.owns(view) && !(view is ListView && allowed)) return@forEach
             if (!isPatchInstalled(patch, view)) {
                 state.hostWrites++
+                val key = view.javaClass.simpleName
+                state.hostWritesByClass[key] = (state.hostWritesByClass[key] ?: 0) + 1
                 val structural = patch.structural
                 if (structural || isNeutralSurface(view.background)) makeTransparent(state, view, structural)
                 else state.patches.remove(patch)
             }
         }
-        // The host repaints the title bar through setPrimaryBackground on
-        // tab switches and scrolls; the View-background patch loop cannot
-        // see it. Re-clear at most twice a second when it is set again.
+        // The host repaints the title bar two ways on tab switches and
+        // scrolls: setPrimaryBackground (onDraw, invisible to the patch
+        // loop) and setBackgroundColor on the container itself (a View
+        // background, which the walk only reaches on a dirty pass and the
+        // patch loop only maintains when a patch record exists). Re-clear
+        // both at most twice a second, plus the container's direct
+        // children (custom title view / Toolbar), which carry their own
+        // backgrounds. The same 500ms slot also re-checks the Me card row:
+        // the adapter re-binds it and may rebuild it, so one scan pass
+        // is not enough to keep it transparent.
         val toolbarView = state.toolbarView?.get()
         if (toolbarView != null && toolbarView.isShown) {
             val now = SystemClock.uptimeMillis()
             if (now - state.lastPrimaryBarCheckAt >= 500L) {
                 state.lastPrimaryBarCheckAt = now
                 if (actionBarPrimaryBackgroundSet(toolbarView)) {
-                    clearActionBarPrimaryBackground(toolbarView)
+                    clearActionBarPrimaryBackground(state, toolbarView)
+                }
+                clearToolbarViewBackground(state, toolbarView)
+            }
+        }
+        val cardRow = state.cardRow?.get()
+        if (cardRow != null && cardRow.isShown) {
+            val now = SystemClock.uptimeMillis()
+            if (now - state.lastCardCheckAt >= 500L) {
+                state.lastCardCheckAt = now
+                if (whiteSelector(cardRow.background)) {
+                    makeTransparent(state, cardRow, false)
+                    state.rowRepairsCard++
+                    state.rowRepairs++
                 }
             }
         }
@@ -319,7 +361,7 @@ internal object PageWallpaperUnderlay {
                     // The title-bar color lives in the container's onDraw
                     // primary background, not in the View background the
                     // walk patches below.
-                    clearActionBarPrimaryBackground(view)
+                    clearActionBarPrimaryBackground(state, view)
                 }
                 // Only the home's full-width pull-down LIST surface, never its card rows.
                 val homeShelf = activePage == 0 && view is ListView &&
@@ -374,6 +416,7 @@ internal object PageWallpaperUnderlay {
             if (whiteSelector(row.background)) {
                 makeTransparent(state, row, false)
                 state.rowRepairs++
+                state.rowRepairsCard++
                 return
             }
             if (row is ViewGroup) for (i in 0 until row.childCount) {
@@ -388,6 +431,7 @@ internal object PageWallpaperUnderlay {
             if (page == 1 && inWecom && eligible(view) && whiteSelector(view.background)) {
                 makeTransparent(state, view, false)
                 state.rowRepairs++
+                state.rowRepairsContacts++
             }
             if (page == 3 && view is ListView &&
                 view.javaClass.simpleName == "PullDownListView" &&
@@ -395,9 +439,35 @@ internal object PageWallpaperUnderlay {
                 val row = view.getChildAt(0)
                 if (row != null && row.getGlobalVisibleRect(rect) &&
                     rect.top < decor.height * 0.40f) {
+                    // The adapter-type gate used to be required here, but it
+                    // silently skipped the card whenever getItem(0) was not
+                    // AccountInfoPreference at scan time (wrapper adapter,
+                    // not-yet-bound screen). A white first row on the Me
+                    // page is the card by construction: patch it on its
+                    // background alone, and record what the gate saw so the
+                    // diagnostic can tell us whether it would have passed.
                     val firstItem = runCatching { view.adapter?.getItem(0) }.getOrNull()
-                    if (firstItem?.javaClass?.simpleName == "AccountInfoPreference") {
+                    val firstType = firstItem?.javaClass?.simpleName ?: "null"
+                    val rowBg = row.background
+                    val patch = state.patches.firstOrNull { it.view.get() === row }
+                    val patchState = when {
+                        patch == null -> "补丁=无"
+                        isPatchInstalled(patch, row) -> "补丁=已装"
+                        else -> "补丁=未装"
+                    }
+                    state.cardDiag = "第0项=$firstType 行=${row.javaClass.simpleName}/" +
+                        "${rowBg?.javaClass?.simpleName ?: "null"}${rowBg?.let { retainedDetail(it) } ?: ""} $patchState"
+                    state.cardRow = WeakReference(row)
+                    state.rowBgType = "${rowBg?.javaClass?.simpleName ?: "null"}${rowBg?.let { retainedDetail(it) } ?: ""}"
+                    if (whiteSelector(rowBg)) {
                         patchMeCard(row, 0)
+                    } else if (row is ViewGroup) {
+                        // The row root may already be patched (its wrapper
+                        // is not white); still walk the children, whose own
+                        // backgrounds the host repaints on every bind.
+                        for (i in 0 until row.childCount) {
+                            patchMeCard(row.getChildAt(i), 1)
+                        }
                     }
                 }
             }
@@ -470,7 +540,18 @@ internal object PageWallpaperUnderlay {
         }
         val fraction = (visible.height().toFloat() / header!!.height).coerceIn(0f, 1f)
         val nativeOpen = taskBarNativeOpen(state.taskBarView?.get())
-        val fullyExpanded = fraction >= 0.98f && nativeOpen != false
+        // The native open signal is unreliable (often null), so a bare
+        // 98% frame could restore the gradient a moment too early. Only
+        // restore when the shelf is at >=98% with a confirmed native open,
+        // or when it has sat at >=98% for 300ms straight (debounce).
+        val nowMs = SystemClock.uptimeMillis()
+        if (fraction >= 0.98f) {
+            if (state.taskBarFullyExpandedAt == 0L) state.taskBarFullyExpandedAt = nowMs
+        } else {
+            state.taskBarFullyExpandedAt = 0L
+        }
+        val heldFull = state.taskBarFullyExpandedAt != 0L && nowMs - state.taskBarFullyExpandedAt >= 300L
+        val fullyExpanded = fraction >= 0.98f && (nativeOpen == true || heldFull)
         state.taskBarState = if (fullyExpanded) "完全展开" else "下拉中"
         state.taskBarState += "（可见=${(fraction * 100).toInt()}%，原生展开=${nativeOpen ?: "未知"}）"
         if (fullyExpanded) {
@@ -492,6 +573,13 @@ internal object PageWallpaperUnderlay {
             }
             if (painter.alpha != 0f) painter.alpha = 0f
         }
+        recordTaskBarPainterState(state)
+    }
+
+    /** Read the shelf painters' current alpha into the diagnostic fields. */
+    private fun recordTaskBarPainterState(state: State) {
+        state.taskBarGradientAlpha = state.taskBarPainters.keys.maxOfOrNull { it.alpha } ?: -1f
+        state.taskBarHiddenCount = state.taskBarPainters.keys.count { it.alpha == 0f }
     }
 
     private class ActionBarBgAccess(
@@ -532,20 +620,67 @@ internal object PageWallpaperUnderlay {
         }
     }
 
-    private fun actionBarPrimaryBackgroundSet(view: View): Boolean {
+    /** The primary-background Drawable field (ActionBarContainer.mBackground).
+     *  Falls back to the first Drawable field when the name is unavailable. */
+    private fun primaryBackgroundField(view: View): java.lang.reflect.Field? {
         val access = actionBarBgAccess(view)
-        return access.fields.any { field ->
-            runCatching { field.get(view) as? Drawable }.getOrNull() != null
+        return access.fields.firstOrNull { it.name == "mBackground" } ?: access.fields.firstOrNull()
+    }
+
+    /** The primary-background setter (ActionBarContainer.setPrimaryBackground).
+     *  The stacked/split setters are deliberately not used: clearing them
+     *  would touch surfaces the title-bar fix does not own. */
+    private fun primaryBackgroundSetter(view: View): java.lang.reflect.Method? {
+        val access = actionBarBgAccess(view)
+        return access.setters.firstOrNull { it.name == "setPrimaryBackground" }
+    }
+
+    private fun actionBarPrimaryBackgroundSet(view: View): Boolean {
+        val field = primaryBackgroundField(view) ?: return false
+        return runCatching { field.get(view) as? Drawable }.getOrNull() != null
+    }
+
+    private fun clearActionBarPrimaryBackground(state: State, view: View) {
+        val setter = primaryBackgroundSetter(view) ?: return
+        if (state.toolbarPrimaryBackup == null) {
+            state.toolbarPrimaryBackup = runCatching {
+                primaryBackgroundField(view)?.get(view) as? Drawable
+            }.getOrNull()
+        }
+        runCatching {
+            setter.isAccessible = true
+            setter.invoke(view, null)
         }
     }
 
-    private fun clearActionBarPrimaryBackground(view: View) {
-        val access = actionBarBgAccess(view)
-        if (access.setters.isEmpty()) return
-        for (setter in access.setters) {
-            runCatching {
-                setter.isAccessible = true
-                setter.invoke(view, null)
+    /** Restore the backed-up primary background when wallpaper mode ends,
+     *  so the native title bar comes back exactly as it was. */
+    private fun restoreActionBarPrimaryBackground(state: State) {
+        val view = state.toolbarView?.get() ?: return
+        val backup = state.toolbarPrimaryBackup ?: return
+        val setter = primaryBackgroundSetter(view) ?: return
+        runCatching {
+            setter.isAccessible = true
+            setter.invoke(view, backup)
+        }
+        state.toolbarPrimaryBackup = null
+    }
+
+    /** Re-clear the title-bar container's own View background and its
+     *  direct children's backgrounds when the host repaints them opaque.
+     *  Only non-transparent neutral ColorDrawables are touched, so themed
+     *  images and translucent scrims are left alone. */
+    private fun clearToolbarViewBackground(state: State, view: View) {
+        val bg = view.background as? ColorDrawable
+        if (bg != null && bg.color != Color.TRANSPARENT && isNeutralColor(bg.color)) {
+            makeTransparent(state, view, true)
+        }
+        if (view is ViewGroup) for (i in 0 until view.childCount) {
+            val child = view.getChildAt(i) ?: continue
+            if (!child.isShown) continue
+            val childBg = child.background as? ColorDrawable
+            if (childBg != null && childBg.color != Color.TRANSPARENT && isNeutralColor(childBg.color)) {
+                makeTransparent(state, child, false)
             }
         }
     }
@@ -575,6 +710,7 @@ internal object PageWallpaperUnderlay {
             if (view.alpha == 0f) view.alpha = original
         }
         state.mutedPainters.clear()
+        recordTaskBarPainterState(state)
     }
 
     /** Called only for a row returned by the concrete adapter of a registered main-page list. */
@@ -774,7 +910,7 @@ internal object PageWallpaperUnderlay {
                 }
                 val owns = MainSurfaceBackgrounds.owns(view)
                 val primary = when {
-                    actionBarBgAccess(view).setters.isEmpty() -> "主底=?"
+                    primaryBackgroundSetter(view) == null -> "主底=?"
                     actionBarPrimaryBackgroundSet(view) -> "主底=有"
                     else -> "主底=无"
                 }
@@ -997,6 +1133,7 @@ internal object PageWallpaperUnderlay {
 
     private fun restore(state: State) {
         restoreTaskBarPainters(state)
+        restoreActionBarPrimaryBackground(state)
         state.patches.asReversed().forEach { patch ->
             val view = patch.view.get() ?: return@forEach
             if (isPatchInstalled(patch, view)) {
@@ -1052,8 +1189,11 @@ internal object PageWallpaperUnderlay {
             "窗口可见=${decor.isShown} 分页可见=${state.pager.get()?.isShown} 最近检查守卫=${state.lastGateAllowed} " +
             "绘制=${state.wallpaper.drawCount}次 跳过=${state.wallpaper.skipCount}次 " +
             "检查=${state.visited} 透明底色=${state.patches.size} " +
-            "宿主回写=${state.hostWrites} 首页外壳修复=${state.firstScreenRepairs} " +
-            "定点行处理=${state.rowRepairs} 小程序展开=${state.taskBarState} " +
+            "宿主回写=${state.hostWrites} 回写分布=${state.hostWritesByClass.entries.sortedByDescending { it.value }.take(4).joinToString(",") { "${it.key}=${it.value}" }.ifEmpty { "无" }} " +
+            "首页外壳修复=${state.firstScreenRepairs} " +
+            "定点行处理=${state.rowRepairs}（通讯录=${state.rowRepairsContacts} 资料卡=${state.rowRepairsCard} 行底色类型=${state.rowBgType}） " +
+            "资料卡=${state.cardDiag} " +
+            "小程序展开=${state.taskBarState} 渐变透明度=${state.taskBarGradientAlpha} 已藏画笔=${state.taskBarHiddenCount} " +
             "最近恢复原因=${restoreReasons[decor] ?: "无"} " +
             "行底色=${state.patches.count { !it.structural }} " +
             "保留行背景=${state.retainedRows.joinToString(",").ifEmpty { "无" }} " +
