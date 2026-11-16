@@ -66,6 +66,9 @@ internal object PageWallpaperUnderlay {
         // the adapter re-binds it and the host may rebuild it, so a single
         // scan pass is not enough to keep it transparent.
         var cardRow: WeakReference<View>? = null
+        var cardList: WeakReference<ListView>? = null
+        var cardRebinds = 0
+        var cardImmediateRepairs = 0
         var lastCardCheckAt = 0L
         var lastSweepAt = 0L
         var titleRegionRepairs = 0
@@ -327,18 +330,10 @@ internal object PageWallpaperUnderlay {
                 clearToolbarViewBackground(state, toolbarView)
             }
         }
-        val cardRow = state.cardRow?.get()
-        if (cardRow != null && cardRow.isShown) {
-            val now = SystemClock.uptimeMillis()
-            if (now - state.lastCardCheckAt >= 500L) {
-                state.lastCardCheckAt = now
-                if (whiteSelector(cardRow.background)) {
-                    makeTransparent(state, cardRow, false)
-                    state.rowRepairsCard++
-                    state.rowRepairs++
-                }
-            }
-        }
+        // Keep the visible AccountInfoPreference row transparent in the SAME
+        // frame after a ListView rebind. The old 140/500ms checks could expose
+        // its native white selector briefly when WeChat recycled the first row.
+        if (page == 3) refreshVisibleMeCard(state, decor)
         // The walk only runs on a dirty pass and skips narrow views, so a
         // white surface nested inside the title bar or the card row can
         // survive every targeted fix while the diagnostics above it read
@@ -429,6 +424,42 @@ internal object PageWallpaperUnderlay {
      * Me profile is AccountInfoPreference's FIRST ADAPTER ROW, not a ListView header.
      * A small bounded pre-draw scan handles recycled rows without hooking RecyclerView.
      */
+    private fun refreshVisibleMeCard(state: State, decor: ViewGroup) {
+        val list = state.cardList?.get() ?: return
+        if (!list.isShown || list.firstVisiblePosition != 0 ||
+            list.headerViewsCount != 0 || list.childCount == 0) return
+        val row = list.getChildAt(0) ?: return
+        val visible = Rect()
+        if (!row.isShown || !row.getGlobalVisibleRect(visible) ||
+            visible.top > decor.height * 0.40f) return
+
+        if (state.cardRow?.get() !== row) {
+            state.cardRow = WeakReference(row)
+            state.cardRebinds++
+            state.dirty = true
+        }
+        var visited = 0
+        fun repair(view: View, depth: Int) {
+            if (depth > 4 || visited++ >= 48 || view.visibility != View.VISIBLE) return
+            val bg = view.background
+            if (view !is ImageView && view !is android.widget.TextView &&
+                bg != null && bg !is SurfaceBackground &&
+                (whiteSelector(bg) || isNeutralSurface(bg))) {
+                makeTransparent(state, view, false)
+                if (view.background is SurfaceBackground) {
+                    state.cardImmediateRepairs++
+                    state.rowRepairs++
+                    state.rowRepairsCard++
+                }
+            }
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                repair(view.getChildAt(i), depth + 1)
+                if (visited >= 48) break
+            }
+        }
+        repair(row, 0)
+    }
+
     private fun refreshIdentifiedRows(state: State, decor: ViewGroup, pager: ViewGroup, page: Int?) {
         if (page != 1 && page != 3) return
         val now = SystemClock.uptimeMillis()
@@ -467,6 +498,7 @@ internal object PageWallpaperUnderlay {
             if (page == 3 && view is ListView &&
                 view.javaClass.simpleName == "PullDownListView" &&
                 view.firstVisiblePosition == 0 && view.headerViewsCount == 0) {
+                state.cardList = WeakReference(view)
                 val row = view.getChildAt(0)
                 if (row != null && row.getGlobalVisibleRect(rect) &&
                     rect.top < decor.height * 0.40f) {
@@ -1513,7 +1545,8 @@ internal object PageWallpaperUnderlay {
             "宿主回写=${state.hostWrites} 回写分布=${state.hostWritesByClass.entries.sortedByDescending { it.value }.take(4).joinToString(",") { "${it.key}=${it.value}" }.ifEmpty { "无" }} " +
             "首页外壳修复=${state.firstScreenRepairs} " +
             "定点行处理=${state.rowRepairs}（通讯录=${state.rowRepairsContacts} 资料卡=${state.rowRepairsCard} 行底色类型=${state.rowBgType}） " +
-            "资料卡=${state.cardDiag} 资料卡淡底修复=${state.cardFaintRepairs} 标题区底板修复=${state.titleRegionRepairs} " +
+            "资料卡=${state.cardDiag} 资料卡重绑=${state.cardRebinds} 立即修复=${state.cardImmediateRepairs} " +
+            "资料卡淡底修复=${state.cardFaintRepairs} 标题区底板修复=${state.titleRegionRepairs} " +
             "会话滚动标题=${state.conversationHeaderState} 标题Header修复=${state.conversationHeaderRepairs} " +
             "小程序展开=${state.taskBarState} 渐变透明度=${state.taskBarGradientAlpha} 已藏画笔=${state.taskBarHiddenCount} 画笔实况=${state.taskBarPainterSamples} " +
             "最近恢复原因=${restoreReasons[decor] ?: "无"} " +
