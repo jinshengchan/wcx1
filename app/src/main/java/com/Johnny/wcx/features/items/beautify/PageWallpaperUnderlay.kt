@@ -51,6 +51,12 @@ internal object PageWallpaperUnderlay {
         // happen without layout/scroll callbacks, when the full scan is not dirty.
         var firstScreen: WeakReference<View>? = null
         var firstScreenRepairs = 0
+        // The AppCompat ActionBarContainer paints its primary background in
+        // onDraw (setPrimaryBackground), which View.getBackground() never
+        // sees. Track the toolbar view so the per-frame pass can re-clear
+        // it when the host repaints it.
+        var toolbarView: WeakReference<View>? = null
+        var lastPrimaryBarCheckAt = 0L
         var lastRowScanAt = 0L
         var rowRepairs = 0
         var taskBarHeader: WeakReference<View>? = null
@@ -259,6 +265,19 @@ internal object PageWallpaperUnderlay {
                 else state.patches.remove(patch)
             }
         }
+        // The host repaints the title bar through setPrimaryBackground on
+        // tab switches and scrolls; the View-background patch loop cannot
+        // see it. Re-clear at most twice a second when it is set again.
+        val toolbarView = state.toolbarView?.get()
+        if (toolbarView != null && toolbarView.isShown) {
+            val now = SystemClock.uptimeMillis()
+            if (now - state.lastPrimaryBarCheckAt >= 500L) {
+                state.lastPrimaryBarCheckAt = now
+                if (actionBarPrimaryBackgroundSet(toolbarView)) {
+                    clearActionBarPrimaryBackground(toolbarView)
+                }
+            }
+        }
         refreshIdentifiedRows(state, decor, pager, page)
         if (!state.dirty) return
         state.dirty = false
@@ -295,6 +314,13 @@ internal object PageWallpaperUnderlay {
                 val firstScreen = view.javaClass.simpleName == "FirstScreenFrameLayout" &&
                     view.width >= decor.width * 0.90f
                 if (firstScreen) state.firstScreen = WeakReference(view)
+                if (toolbar) {
+                    state.toolbarView = WeakReference(view)
+                    // The title-bar color lives in the container's onDraw
+                    // primary background, not in the View background the
+                    // walk patches below.
+                    clearActionBarPrimaryBackground(view)
+                }
                 // Only the home's full-width pull-down LIST surface, never its card rows.
                 val homeShelf = activePage == 0 && view is ListView &&
                     view.javaClass.simpleName == "PullDownListView" &&
@@ -384,8 +410,11 @@ internal object PageWallpaperUnderlay {
     }
 
     private fun whiteSelector(drawable: Drawable?): Boolean {
-        val original = drawable as? StateListDrawable ?: return false
-        val color = (original.current as? ColorDrawable)?.color ?: return false
+        val color = when (drawable) {
+            is StateListDrawable -> (drawable.current as? ColorDrawable)?.color
+            is ColorDrawable -> drawable.color
+            else -> return false
+        } ?: return false
         return Color.alpha(color) == 255 &&
             Color.red(color) >= 248 && Color.green(color) >= 248 && Color.blue(color) >= 248
     }
@@ -462,6 +491,62 @@ internal object PageWallpaperUnderlay {
                 state.mutedPainters[painter] = original
             }
             if (painter.alpha != 0f) painter.alpha = 0f
+        }
+    }
+
+    private class ActionBarBgAccess(
+        val fields: List<java.lang.reflect.Field>,
+        val setters: List<java.lang.reflect.Method>
+    )
+
+    private val actionBarBgAccessCache = HashMap<Class<*>, ActionBarBgAccess>()
+
+    /**
+     * WeChat colors the title bar through HomeUI.setActionBarColor, which
+     * lands in ActionBarContainer.setPrimaryBackground: the color is painted
+     * in onDraw and never appears as the View background, so the walk and
+     * the patch loop cannot see or remove it. Locate the primary-background
+     * slots by signature (Drawable fields / single-Drawable setters),
+     * never by obfuscated name.
+     */
+    private fun actionBarBgAccess(view: View): ActionBarBgAccess {
+        return actionBarBgAccessCache.getOrPut(view.javaClass) {
+            val fields = ArrayList<java.lang.reflect.Field>()
+            var type: Class<*>? = view.javaClass
+            while (type != null && !type.name.startsWith("android.view.")) {
+                for (field in type.declaredFields) {
+                    if (field.type == Drawable::class.java) {
+                        runCatching { field.isAccessible = true }
+                        fields.add(field)
+                    }
+                }
+                type = type.superclass
+            }
+            val setters = view.javaClass.methods.filter { method ->
+                method.parameterTypes.size == 1 &&
+                    method.parameterTypes[0] == Drawable::class.java &&
+                    method.returnType == Void.TYPE &&
+                    !method.declaringClass.name.startsWith("android.")
+            }
+            ActionBarBgAccess(fields, setters)
+        }
+    }
+
+    private fun actionBarPrimaryBackgroundSet(view: View): Boolean {
+        val access = actionBarBgAccess(view)
+        return access.fields.any { field ->
+            runCatching { field.get(view) as? Drawable }.getOrNull() != null
+        }
+    }
+
+    private fun clearActionBarPrimaryBackground(view: View) {
+        val access = actionBarBgAccess(view)
+        if (access.setters.isEmpty()) return
+        for (setter in access.setters) {
+            runCatching {
+                setter.isAccessible = true
+                setter.invoke(view, null)
+            }
         }
     }
 
@@ -688,7 +773,12 @@ internal object PageWallpaperUnderlay {
                     else -> "补丁=未装"
                 }
                 val owns = MainSurfaceBackgrounds.owns(view)
-                found = "${view.javaClass.simpleName}/实背景=${background?.javaClass?.simpleName ?: "null"}${background?.let { retainedDetail(it) } ?: ""} $patchState 接管=$owns"
+                val primary = when {
+                    actionBarBgAccess(view).setters.isEmpty() -> "主底=?"
+                    actionBarPrimaryBackgroundSet(view) -> "主底=有"
+                    else -> "主底=无"
+                }
+                found = "${view.javaClass.simpleName}/实背景=${background?.javaClass?.simpleName ?: "null"}${background?.let { retainedDetail(it) } ?: ""} $patchState 接管=$owns $primary"
                 return
             }
             if (view is ViewGroup) for (i in 0 until view.childCount) {
