@@ -81,6 +81,9 @@ internal object PageWallpaperUnderlay {
         var conversationHeaderRepairs = 0
         var conversationTitleAnchors = 0
         var conversationTitleRepairs = 0
+        var conversationStripChecks = 0
+        var conversationStripIdleDraws = 0
+        var conversationStripSuppressions = 0
         var conversationHeaderState = "未观测"
         var lastConversationHeaderScanAt = 0L
         var cardDiag = "未观测"
@@ -651,7 +654,7 @@ internal object PageWallpaperUnderlay {
         // ListView headers. Only its ancestor backgrounds may be suppressed
         // even if their NinePatch or image-like drawable is non-neutral.
         // This never changes header layout, scroll handling, or text/icons.
-        fun patchHeader(view: View, depth: Int): Boolean {
+        fun patchHeader(view: View, depth: Int, titleStrip: Boolean): Boolean {
             val bounds = Rect()
             if (depth > 6 || !view.isShown || !view.getGlobalVisibleRect(bounds) ||
                 bounds.top >= decor.height * 0.36f) return false
@@ -669,7 +672,24 @@ internal object PageWallpaperUnderlay {
                     (label.startsWith("微信(") || label.startsWith("微信（")))
             } else false
             if (view is ViewGroup) for (i in 0 until view.childCount) {
-                if (patchHeader(view.getChildAt(i), depth + 1)) hasTitle = true
+                if (patchHeader(view.getChildAt(i), depth + 1, titleStrip)) hasTitle = true
+            }
+            // WeChat 8.0.80: the scrollable title strip is header item 1,
+            // a 144px-high LinearLayout at y=288..432 on a 2608px screen.
+            // Its two children already have SurfaceBackground, but a wrapper
+            // can still draw the original on focus or if its native drawable
+            // state becomes non-neutral. Keep ONLY those header surfaces
+            // idle-transparent while preserving native pressed feedback.
+            if (titleStrip && view is ViewGroup &&
+                bounds.width() >= decor.width * 0.58f && background is SurfaceBackground) {
+                val drew = background.drawsBackground()
+                if (drew) state.conversationStripIdleDraws++
+                if (!background.suppressFaintIdle || !background.ignoreIdleFocus) {
+                    background.suppressFaintIdle = true
+                    background.ignoreIdleFocus = true
+                    view.invalidate()
+                    state.conversationStripSuppressions++
+                }
             }
             if (view is ViewGroup && bounds.width() >= decor.width * 0.58f &&
                 bounds.height() >= 12 && background != null) {
@@ -710,7 +730,17 @@ internal object PageWallpaperUnderlay {
             val row = list.getChildAt(index) ?: continue
             if (!row.getGlobalVisibleRect(rect) || rect.top >= decor.height * 0.36f) continue
             shown++
-            if (patchHeader(row, 0)) titleRows++
+            // Restrict the geometry fallback to the proven second header,
+            // NOT the mini-program TaskBarContainer (header 0), nor any
+            // subsequent content rows or other tabs.
+            val titleStrip = first + index == 1 &&
+                row.javaClass.simpleName == "LinearLayout" &&
+                rect.width() >= decor.width * 0.65f &&
+                rect.height() >= decor.height * 0.035f &&
+                rect.height() <= decor.height * 0.085f &&
+                rect.top < decor.height * 0.30f
+            if (titleStrip) state.conversationStripChecks++
+            if (patchHeader(row, 0, titleStrip)) titleRows++
         }
         if (titleRows > 0) state.conversationTitleAnchors++
         state.conversationHeaderState =
@@ -1341,7 +1371,7 @@ internal object PageWallpaperUnderlay {
                 else -> "未装"
             }
             val draws = if (bg is SurfaceBackground) {
-                " 绘=${view.isPressed || view.isFocused || !isNeutralSurface(bg.drawable)}"
+                " 绘=${bg.drawsBackground()} 抑制闲置=${bg.suppressFaintIdle} 忽略焦点=${bg.ignoreIdleFocus}"
             } else ""
             out.add("${view.javaClass.simpleName}/" +
                 "${bg?.javaClass?.simpleName ?: "null"}${bg?.let { retainedDetail(it) } ?: ""} " +
@@ -1597,7 +1627,7 @@ internal object PageWallpaperUnderlay {
             if (drawsBackground()) super.draw(canvas)
         }
 
-        private fun drawsBackground(): Boolean =
+        fun drawsBackground(): Boolean =
             state.any {
                 it == android.R.attr.state_pressed ||
                     (it == android.R.attr.state_focused && !ignoreIdleFocus)
@@ -1677,6 +1707,8 @@ internal object PageWallpaperUnderlay {
             "资料卡淡底修复=${state.cardFaintRepairs} 标题区底板修复=${state.titleRegionRepairs} " +
             "会话滚动标题=${state.conversationHeaderState} 标题锚点命中=${state.conversationTitleAnchors} " +
             "标题定点修复=${state.conversationTitleRepairs} 标题Header修复=${state.conversationHeaderRepairs} " +
+            "滚动标题窄条命中=${state.conversationStripChecks} 修复前绘制=${state.conversationStripIdleDraws} " +
+            "窄条闲置抑制=${state.conversationStripSuppressions} " +
             "小程序展开=${state.taskBarState} 渐变透明度=${state.taskBarGradientAlpha} 已藏画笔=${state.taskBarHiddenCount} 画笔实况=${state.taskBarPainterSamples} " +
             "最近恢复原因=${restoreReasons[decor] ?: "无"} " +
             "行底色=${state.patches.count { !it.structural }} " +
