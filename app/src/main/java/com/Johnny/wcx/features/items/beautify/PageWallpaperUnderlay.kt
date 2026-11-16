@@ -76,6 +76,7 @@ internal object PageWallpaperUnderlay {
         // Taskbar painter readouts for the next diagnostic.
         var taskBarGradientAlpha = -1f
         var taskBarHiddenCount = 0
+        var taskBarPainterSamples = "无"
         var taskBarFullyExpandedAt = 0L
         // Backed-up ActionBar primary background (mBackground), restored
         // when wallpaper mode ends so the native title bar comes back.
@@ -577,7 +578,10 @@ internal object PageWallpaperUnderlay {
      *  original alpha so a full expansion can restore it. */
     private fun muteTaskBarPainters(state: State) {
         state.taskBarPainters.keys.toList().forEach { painter ->
-            if (!painter.isAttachedToWindow || !painter.isShown) return@forEach
+            // The gradient painter may be attached but temporarily not isShown
+            // during the first pull-down frames. Waiting for isShown lets a
+            // purple frame through before the next pre-draw pass.
+            if (!painter.isAttachedToWindow) return@forEach
             if (!state.mutedPainters.containsKey(painter)) {
                 val original = painter.alpha
                 if (original <= 0f) return@forEach
@@ -590,8 +594,14 @@ internal object PageWallpaperUnderlay {
 
     /** Read the shelf painters' current alpha into the diagnostic fields. */
     private fun recordTaskBarPainterState(state: State) {
-        state.taskBarGradientAlpha = state.taskBarPainters.keys.maxOfOrNull { it.alpha } ?: -1f
-        state.taskBarHiddenCount = state.taskBarPainters.keys.count { it.alpha == 0f }
+        val painters = state.taskBarPainters.keys.toList()
+        state.taskBarGradientAlpha = painters.maxOfOrNull { it.alpha } ?: -1f
+        state.taskBarHiddenCount = painters.count { it.alpha == 0f }
+        state.taskBarPainterSamples = painters.take(6).joinToString(",") { painter ->
+            "${painter.javaClass.simpleName}:${painter.alpha}/" +
+                "${if (painter.isAttachedToWindow) "挂载" else "未挂载"}/" +
+                "${if (painter.isShown) "可见" else "不可见"}"
+        }.ifEmpty { "无" }
     }
 
     private class ActionBarBgAccess(
@@ -1309,7 +1319,7 @@ internal object PageWallpaperUnderlay {
             "首页外壳修复=${state.firstScreenRepairs} " +
             "定点行处理=${state.rowRepairs}（通讯录=${state.rowRepairsContacts} 资料卡=${state.rowRepairsCard} 行底色类型=${state.rowBgType}） " +
             "资料卡=${state.cardDiag} " +
-            "小程序展开=${state.taskBarState} 渐变透明度=${state.taskBarGradientAlpha} 已藏画笔=${state.taskBarHiddenCount} " +
+            "小程序展开=${state.taskBarState} 渐变透明度=${state.taskBarGradientAlpha} 已藏画笔=${state.taskBarHiddenCount} 画笔实况=${state.taskBarPainterSamples} " +
             "最近恢复原因=${restoreReasons[decor] ?: "无"} " +
             "行底色=${state.patches.count { !it.structural }} " +
             "保留行背景=${state.retainedRows.joinToString(",").ifEmpty { "无" }} " +
