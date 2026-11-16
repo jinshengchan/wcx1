@@ -431,7 +431,11 @@ internal object PageWallpaperUnderlay {
         val exposed = header != null && header.isShown &&
             header.height > 0 && header.getGlobalVisibleRect(visible) && visible.height() > 0
         if (!exposed) {
-            restoreTaskBarPainters(state)
+            // Keep the painters muted while the shelf is hidden: restoring here
+            // left them at alpha 1.0, so any peek of the header while the chat
+            // list scrolls flashed the purple gradient before the next mute.
+            // They are only restored when the shelf is fully expanded below.
+            muteTaskBarPainters(state)
             state.taskBarState = "收起/未显示"
             return
         }
@@ -444,6 +448,12 @@ internal object PageWallpaperUnderlay {
             restoreTaskBarPainters(state)
             return
         }
+        muteTaskBarPainters(state)
+    }
+
+    /** Mute the shelf's gradient painters (alpha 0), remembering each one's
+     *  original alpha so a full expansion can restore it. */
+    private fun muteTaskBarPainters(state: State) {
         state.taskBarPainters.keys.toList().forEach { painter ->
             if (!painter.isAttachedToWindow || !painter.isShown) return@forEach
             if (!state.mutedPainters.containsKey(painter)) {
