@@ -237,8 +237,9 @@ internal object PageWallpaperUnderlay {
             if (depth > MAX_DEPTH || state.visited++ >= MAX_NODES || view.visibility != View.VISIBLE) return
             if (view is ImageView || !view.getGlobalVisibleRect(visibleRect)) return
             if (view !== decor) {
-                if (view.width < decor.width * 0.75f) return
-                val structural = view in structuralTargets
+                val bottomTab = ThemeHostAdapter.isBottomTab(view)
+                if (view.width < decor.width * 0.75f && !bottomTab) return
+                val structural = view in structuralTargets || bottomTab
                 val background = view.background
                 if (structural || isNeutralSurface(background)) {
                     makeTransparent(state, view, structural)
@@ -431,6 +432,41 @@ internal object PageWallpaperUnderlay {
         return if (found.isEmpty()) "无" else found.joinToString(";")
     }
 
+    /** Bounded, read-only samples for Me-header and Contacts/WeCom white surfaces. */
+    private fun unresolvedSurfaceSamples(decor: ViewGroup, state: State): String {
+        val pager = state.pager.get() ?: return "无"
+        val page = runCatching {
+            pager.javaClass.getMethod("getCurrentItem").invoke(pager) as? Int
+        }.getOrNull()
+        if (page != 1 && page != 3) return "非目标页"
+        val samples = ArrayList<String>()
+        val rect = Rect()
+        var visited = 0
+        fun visit(view: View, depth: Int) {
+            if (depth > MAX_DEPTH || visited++ >= MAX_NODES || samples.size >= 6 ||
+                view.visibility != View.VISIBLE || !view.getGlobalVisibleRect(rect)) return
+            val inRegion = if (page == 3) {
+                rect.top < decor.height * 0.38f
+            } else {
+                rect.top < decor.height * 0.85f && rect.bottom > decor.height * 0.12f
+            }
+            if (inRegion && view !== decor && view !is ImageView &&
+                view.width >= decor.width * 0.7f && rect.height() >= 48 &&
+                state.patches.none { it.view.get() === view && isPatchInstalled(it, view) }) {
+                view.background?.let { bg ->
+                    samples.add("${view.javaClass.simpleName}@${rect.top}-${rect.bottom}/" +
+                        "${bg.javaClass.simpleName}${retainedDetail(bg)}")
+                }
+            }
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                visit(view.getChildAt(i) ?: continue, depth + 1)
+                if (visited >= MAX_NODES || samples.size >= 6) break
+            }
+        }
+        runCatching { visit(decor, 0) }
+        return samples.joinToString(";").ifEmpty { "未发现未接管的可见底板" }
+    }
+
     private fun isNeutralSurface(drawable: Drawable?, depth: Int = 0): Boolean {
         if (drawable == null || depth > 4) return false
         val current = drawable.current
@@ -615,7 +651,8 @@ internal object PageWallpaperUnderlay {
             "行底色=${state.patches.count { !it.structural }} " +
             "保留行背景=${state.retainedRows.joinToString(",").ifEmpty { "无" }} " +
             "弹跳视图=${bounceViewBackgrounds(decor)}" +
-            " ListView实况=${listViewLiveState(decor, state)}"
+            " ListView实况=${listViewLiveState(decor, state)}" +
+            " 页区未处理底板=${unresolvedSurfaceSamples(decor, state)}"
     }
 
     private class WindowWallpaper(var bitmap: Bitmap, var shouldDraw: () -> Boolean) : Drawable() {

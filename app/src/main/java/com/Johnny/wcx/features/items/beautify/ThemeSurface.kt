@@ -862,19 +862,20 @@ internal object ThemeSurface {
      */
     fun onChattingFragmentShown(fragmentView: View?) {
         confirmedMainRef = null
-        if (!fragmentChatActive) {
-            noteEvent("聊天页 Fragment 出现 → 撤壁纸 + 容器兜底")
+        val entering = !fragmentChatActive
+        if (entering) {
+            noteEvent("聊天页 Fragment 出现 → 容器兜底 + 撤壁纸")
         }
         fragmentChatActive = true
-        // 不用 Fragment 根 View 做存活判定（isShown/detach 在 onViewCreated 与转场期间都会误导），
-        // 离开确认统一交给 checkChatPage 的「特征持续不命中」时间防抖。
+        // Prepare the chat's opaque root BEFORE removing the wallpaper, avoiding one blank frame.
+        // A duplicate Fragment callback must not clear the launcher repeatedly.
         anchorLeaveSince = 0L
-        runCatching {
+        (fragmentView as? ViewGroup)?.let { runCatching { ChatPageGuard.ensureOpaque(it) } }
+        if (entering) runCatching {
             liveActivities().forEach { act ->
                 if (ThemePages.isLauncher(act)) { TabWallpaperRenderer.clear(act); restoreWindow(act) }
             }
         }
-        (fragmentView as? ViewGroup)?.let { runCatching { ChatPageGuard.ensureOpaque(it) } }
     }
 
     /** 聊天页 Fragment 离开（onPause/onDestroyView）：回主界面时重挂。 */

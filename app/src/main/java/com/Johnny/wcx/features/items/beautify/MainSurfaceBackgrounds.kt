@@ -58,6 +58,14 @@ internal class MainSurfaceBackgrounds {
         owners[view] = WeakReference(drawable ?: nativeNull)
     }
 
+    /** Release only the native tab fill so the wallpaper underlay can own that surface. */
+    fun releaseForWallpaper(view: View): Boolean {
+        val patch = patches[view] ?: return false
+        if (patch.rule !== BackgroundRule.Native) return false
+        restore(view)
+        return true
+    }
+
     private fun restore(view: View) {
         val patch = patches.remove(view) ?: return
         if (view.background === patch.installed) PageWallpaperUnderlay.setBackgroundPreservingPadding(view, patch.original)

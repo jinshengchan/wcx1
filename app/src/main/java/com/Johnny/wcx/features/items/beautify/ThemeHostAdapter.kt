@@ -59,6 +59,16 @@ internal object ThemeHostAdapter {
         if (page in 0..3) observedPages[decor] = page!!
     }
 
+    /** The real LauncherUI tab strip, not arbitrary bottom-aligned controls. */
+    fun isBottomTab(view: View): Boolean {
+        var type: Class<*>? = view.javaClass
+        while (type != null) {
+            if (type.name == "com.tencent.mm.ui.LauncherUIBottomTabView") return true
+            type = type.superclass
+        }
+        return false
+    }
+
     /** Only pager ancestors, its actual page roots and concrete visible lists are structural. */
     fun structuralTargets(decor: ViewGroup, pager: ViewGroup): Set<View> {
         val session = sessions[decor] ?: return emptySet()
@@ -85,6 +95,18 @@ internal object ThemeHostAdapter {
                 targets.add(view)
                 session.lists[view] = true
                 session.rows += view.childCount
+                // Me's profile header is a ListView header, not an adapter-bound row.
+                // Only take the first visible header at the top of the Me tab.
+                if (session.actualPage == 3 && view.headerViewsCount > 0 && view.firstVisiblePosition == 0) {
+                    val header = view.getChildAt(0)
+                    val headerRect = android.graphics.Rect()
+                    if (header != null && header.width >= decor.width * 0.7f &&
+                        header.getGlobalVisibleRect(headerRect) &&
+                        headerRect.top <= decor.height * 0.28f &&
+                        headerRect.height() >= decor.height * 0.08f) {
+                        targets.add(header)
+                    }
+                }
                 val adapter = view.adapter
                 val method = adapter?.let {
                     runCatching {
