@@ -320,6 +320,62 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     @Volatile private var hookScrolledOk = false
     @Volatile private var hookSelectedOk = false
 
+    // The native HomeUI/LauncherUI ActionBarColor getter is distinct from
+    // ActionBarContainer's View/Drawable backgrounds. In some WeChat builds
+    // it is obfuscated; never hook an arbitrary int-returning method.
+    @Volatile private var actionBarColorHookStatus = "未检查"
+    @Volatile private var actionBarColorHookHits = 0
+    @Volatile private var actionBarColorOriginal: Int? = null
+    @Volatile private var actionBarColorGetterHooked = false
+
+    /**
+     * Read and override the host's OWN ActionBarColor accessor, not a guessed
+     * action-bar child background. This is a narrow, optional hook: if 8.0.80
+     * obfuscates the accessor, log that fact and keep the UI unchanged.
+     * Never add/reorder ActionBarContainer children or affect touch dispatch.
+     */
+    private fun hookNativeActionBarColor() {
+        if (actionBarColorGetterHooked) return
+        val launcherClass = runCatching {
+            ClassLoaders.HOST.loadClass("com.tencent.mm.ui.LauncherUI")
+        }.getOrNull() ?: run {
+            actionBarColorHookStatus = "LauncherUI 类不可用"
+            return
+        }
+        val getters = ArrayList<java.lang.reflect.Method>()
+        var type: Class<*>? = launcherClass
+        while (type != null && type != Any::class.java) {
+            type.declaredMethods.filterTo(getters) { method ->
+                method.name.equals("getActionBarColor", ignoreCase = true) &&
+                    method.parameterTypes.isEmpty() &&
+                    method.returnType == Int::class.javaPrimitiveType &&
+                    !java.lang.reflect.Modifier.isStatic(method.modifiers)
+            }
+            type = type.superclass
+        }
+        val getter = getters.firstOrNull() ?: run {
+            actionBarColorHookStatus = "未找到原生 getActionBarColor（可能已混淆）"
+            return
+        }
+        runCatching {
+            getter.isAccessible = true
+            getter.hookAfter {
+                val launcher = thisObject as? Activity ?: return@hookAfter
+                if (!ThemePages.isLauncher(launcher)) return@hookAfter
+                val original = result as? Int ?: return@hookAfter
+                actionBarColorOriginal = original
+                if (wallpaperSwitchOn() && usePageBackground() && ThemeSurface.onMainPage) {
+                    result = android.graphics.Color.TRANSPARENT
+                    actionBarColorHookHits++
+                }
+            }
+            actionBarColorGetterHooked = true
+            actionBarColorHookStatus = "已挂 ${getter.declaringClass.simpleName}.${getter.name}"
+        }.onFailure {
+            actionBarColorHookStatus = "挂载失败：${it.javaClass.simpleName}"
+        }
+    }
+
     /** 已挂过切页监听的 adapter，避免每次进主页重复 hook。 */
     private val hookedTabsAdapters: MutableSet<Any> =
         java.util.Collections.newSetFromMap(java.util.WeakHashMap<Any, Boolean>())
@@ -417,6 +473,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         }
         hookTabSwitch()
         hookLiveTabAdapters()
+        hookNativeActionBarColor()
         hookChattingPage()
         hookChattingFragment()
         ThemeSurface.registerCallbacks(true)
@@ -443,6 +500,10 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         hookedTabsAdapters.clear()
         hookSelectedOk = false
         hookScrolledOk = false
+        actionBarColorGetterHooked = false
+        actionBarColorHookStatus = "已停用"
+        actionBarColorHookHits = 0
+        actionBarColorOriginal = null
         chattingPageHooked = false
         chattingHookOk = false
         chattingFragmentHooked = false
@@ -966,6 +1027,29 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
                 }
             )
         }
+
+        // Read the native ActionBarColor resource without changing global
+        // Resources. Historical WeChat returns this resource from its getter;
+        // whether that still applies to this host is shown by hook hits.
+        val nativeActionBarResource = runCatching {
+            val launcher = ThemeSurface.liveActivities().firstOrNull(ThemePages::isLauncher)
+                ?: return@runCatching "无 LauncherUI"
+            val id = launcher.resources.getIdentifier(
+                "action_bar_color", "color", launcher.packageName
+            )
+            if (id == 0) "资源未找到"
+            else {
+                @Suppress("DEPRECATION")
+                val color = launcher.resources.getColor(id)
+                "#${Integer.toHexString(color).padStart(8, '0')}"
+            }
+        }.getOrDefault("读取失败")
+        appendLine(
+            "原生 ActionBarColor = 资源:$nativeActionBarResource " +
+                "Getter:$actionBarColorHookStatus " +
+                "原值:${actionBarColorOriginal?.let { "#${Integer.toHexString(it).padStart(8, '0')}" } ?: "未命中"} " +
+                "透明返回:$actionBarColorHookHits 次"
+        )
 
         // 分页是否生效，就看这两行：页码读不到 / 切页 hook 没挂上，都会「4 页全是主页那张」
         appendLine("doOnCreate hook = ${if (doOnCreateHooked) "已注册" else "未注册（功能没开过）"}")
