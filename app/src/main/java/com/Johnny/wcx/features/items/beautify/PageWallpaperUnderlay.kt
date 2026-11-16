@@ -68,6 +68,8 @@ internal object PageWallpaperUnderlay {
         var cardRow: WeakReference<View>? = null
         var lastCardCheckAt = 0L
         var lastSweepAt = 0L
+        var titleRegionRepairs = 0
+        var cardFaintRepairs = 0
         var cardDiag = "未观测"
         // Per-view-class host-write counts: the hostWrites total alone
         // cannot tell whether one view is rewritten every frame or many
@@ -745,22 +747,87 @@ internal object PageWallpaperUnderlay {
      *  images and non-neutral colors are left alone by isNeutralSurface. */
     private fun sweepTitleBarAndCard(state: State) {
         state.toolbarView?.get()?.let { toolbar ->
-            if (toolbar.isShown) sweepSubtree(state, toolbar, 0)
+            if (toolbar.isShown) {
+                sweepSubtree(state, toolbar, 0, false)
+                state.decor.get()?.let { sweepTitleRegion(state, it, toolbar) }
+            }
         }
         state.cardRow?.get()?.let { row ->
-            if (row.isShown) sweepSubtree(state, row, 0)
+            if (row.isShown) sweepSubtree(state, row, 0, true)
         }
     }
 
-    private fun sweepSubtree(state: State, view: View, depth: Int) {
+    private fun sweepSubtree(state: State, view: View, depth: Int, card: Boolean) {
         if (depth > 6 || !view.isShown) return
         val bg = view.background
-        if (bg != null && bg !is SurfaceBackground && isNeutralSurface(bg)) {
-            makeTransparent(state, view, false)
+        // MoreTabUI's personal-info row uses translucent neutral bfj 9-patches
+        // underneath its white selector. The generic neutral test deliberately
+        // rejects translucent 9-patches, so only suppress those inside THIS card.
+        val faint = card && bg is NinePatchDrawable && isFaintCardNinePatch(bg)
+        if (bg != null && bg !is SurfaceBackground && (isNeutralSurface(bg) || faint)) {
+            makeTransparent(state, view, false, faint)
+            if (faint) state.cardFaintRepairs++
         }
         if (view is ViewGroup) for (i in 0 until view.childCount) {
-            sweepSubtree(state, view.getChildAt(i) ?: continue, depth + 1)
+            sweepSubtree(state, view.getChildAt(i) ?: continue, depth + 1, card)
         }
+    }
+
+    /** A bounded probe of a CLONED drawable; never samples or mutates the live view. */
+    private fun isFaintCardNinePatch(drawable: NinePatchDrawable): Boolean = runCatching {
+        val source = drawable.constantState ?: return@runCatching false
+        val probe = source.newDrawable().mutate()
+        probe.state = drawable.state
+        probe.level = drawable.level
+        probe.setAlpha(drawable.alpha)
+        val bitmap = Bitmap.createBitmap(12, 12, Bitmap.Config.ARGB_8888)
+        try {
+            probe.setBounds(0, 0, 12, 12)
+            probe.draw(Canvas(bitmap))
+            var nonEmpty = false
+            for (y in 3..8) for (x in 3..8) {
+                val c = bitmap.getPixel(x, y)
+                val alpha = Color.alpha(c)
+                if (alpha > 0) nonEmpty = true
+                if (alpha > 0x33) return@runCatching false
+                val spread = maxOf(Color.red(c), Color.green(c), Color.blue(c)) -
+                    minOf(Color.red(c), Color.green(c), Color.blue(c))
+                if (alpha > 0 && spread > 12) return@runCatching false
+            }
+            nonEmpty
+        } finally { bitmap.recycle() }
+    }.getOrDefault(false)
+
+    /**
+     * Title bars can have neutral paint on a sibling of ActionBarContainer
+     * (not in its subtree). Search only the title's visible screen rectangle;
+     * never touch text, icons, tab badges, or main-page list backgrounds.
+     */
+    private fun sweepTitleRegion(state: State, decor: ViewGroup, toolbar: View) {
+        val target = Rect()
+        if (!toolbar.getGlobalVisibleRect(target)) return
+        if (target.height() <= 0 || target.top >= decor.height * 0.26f) return
+        val visible = Rect()
+        var checked = 0
+        fun walk(view: View, depth: Int) {
+            if (depth > 16 || checked++ >= 1100 || view.visibility != View.VISIBLE ||
+                !view.getGlobalVisibleRect(visible) || !Rect.intersects(visible, target)) return
+            if (view !== decor && view !is ImageView && view !is android.widget.TextView &&
+                visible.width() >= decor.width * 0.60f && visible.height() > 8 &&
+                visible.height() <= maxOf(target.height() * 2, (decor.height * 0.16f).toInt())) {
+                val bg = view.background
+                if (bg != null && bg !is SurfaceBackground && isNeutralSurface(bg) &&
+                    !(bg is ColorDrawable && Color.alpha(bg.color) == 0)) {
+                    makeTransparent(state, view, false)
+                    if (view.background is SurfaceBackground) state.titleRegionRepairs++
+                }
+            }
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                walk(view.getChildAt(i) ?: continue, depth + 1)
+                if (checked >= 1100) break
+            }
+        }
+        walk(decor, 0)
     }
 
     private fun taskBarNativeOpen(view: View?): Boolean? {
@@ -860,7 +927,7 @@ internal object PageWallpaperUnderlay {
             view.setPadding(left, top, right, bottom)
         }
     }
-    private fun makeTransparent(state: State, view: View, structural: Boolean = true) {
+    private fun makeTransparent(state: State, view: View, structural: Boolean = true, suppressFaintIdle: Boolean = false) {
         // 壁纸模式下 ListView 例外：它被 MainSurfaceBackgrounds 按 lists→background 接管（多为 Native，
         // 即微信默认灰），不例外就永远盖住壁纸，诊断也看不到。顶栏与 Tab 栏在壁纸模式 + Native/Inherit
         // 时已由 MainPageAppearance 释放归属（同款），这里照常打补丁；仍被接管的（包里配了纯色）不动。
@@ -872,7 +939,8 @@ internal object PageWallpaperUnderlay {
             if (patch != null) state.patches.remove(patch)
             return
         }
-        val transparent = if (structural) ColorDrawable(Color.TRANSPARENT) else SurfaceBackground(original)
+        val transparent = if (structural) ColorDrawable(Color.TRANSPARENT)
+            else SurfaceBackground(original, suppressFaintIdle)
         if (patch == null) {
             state.patches.add(Patch(WeakReference(view), original, WeakReference(transparent), structural))
         } else {
@@ -1270,7 +1338,10 @@ internal object PageWallpaperUnderlay {
     }
 
     /** Suppress only idle neutral fill; the platform wrapper forwards padding, states and ripple callbacks. */
-    private class SurfaceBackground(original: Drawable) : DrawableWrapper(original) {
+    private class SurfaceBackground(
+        original: Drawable,
+        private val suppressFaintIdle: Boolean = false
+    ) : DrawableWrapper(original) {
         @Deprecated("Deprecated in Java")
         override fun getOpacity(): Int = if (drawsBackground()) PixelFormat.TRANSLUCENT else PixelFormat.TRANSPARENT
 
@@ -1281,7 +1352,7 @@ internal object PageWallpaperUnderlay {
         private fun drawsBackground(): Boolean =
             state.any {
                 it == android.R.attr.state_pressed || it == android.R.attr.state_focused
-            } || !isNeutralSurface(drawable)
+            } || (!isNeutralSurface(drawable) && !suppressFaintIdle)
     }
 
     // View.setBackgroundColor may recolor our ColorDrawable in place without changing identity.
@@ -1352,7 +1423,7 @@ internal object PageWallpaperUnderlay {
             "宿主回写=${state.hostWrites} 回写分布=${state.hostWritesByClass.entries.sortedByDescending { it.value }.take(4).joinToString(",") { "${it.key}=${it.value}" }.ifEmpty { "无" }} " +
             "首页外壳修复=${state.firstScreenRepairs} " +
             "定点行处理=${state.rowRepairs}（通讯录=${state.rowRepairsContacts} 资料卡=${state.rowRepairsCard} 行底色类型=${state.rowBgType}） " +
-            "资料卡=${state.cardDiag} " +
+            "资料卡=${state.cardDiag} 资料卡淡底修复=${state.cardFaintRepairs} 标题区底板修复=${state.titleRegionRepairs} " +
             "小程序展开=${state.taskBarState} 渐变透明度=${state.taskBarGradientAlpha} 已藏画笔=${state.taskBarHiddenCount} 画笔实况=${state.taskBarPainterSamples} " +
             "最近恢复原因=${restoreReasons[decor] ?: "无"} " +
             "行底色=${state.patches.count { !it.structural }} " +
