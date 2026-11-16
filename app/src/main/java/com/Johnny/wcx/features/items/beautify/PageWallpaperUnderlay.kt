@@ -654,7 +654,7 @@ internal object PageWallpaperUnderlay {
         // ListView headers. Only its ancestor backgrounds may be suppressed
         // even if their NinePatch or image-like drawable is non-neutral.
         // This never changes header layout, scroll handling, or text/icons.
-        fun patchHeader(view: View, depth: Int, titleStrip: Boolean): Boolean {
+        fun patchHeader(view: View, depth: Int, headerCandidate: Boolean): Boolean {
             val bounds = Rect()
             if (depth > 6 || !view.isShown || !view.getGlobalVisibleRect(bounds) ||
                 bounds.top >= decor.height * 0.36f) return false
@@ -672,23 +672,30 @@ internal object PageWallpaperUnderlay {
                     (label.startsWith("微信(") || label.startsWith("微信（")))
             } else false
             if (view is ViewGroup) for (i in 0 until view.childCount) {
-                if (patchHeader(view.getChildAt(i), depth + 1, titleStrip)) hasTitle = true
+                if (patchHeader(view.getChildAt(i), depth + 1, headerCandidate)) hasTitle = true
             }
-            // WeChat 8.0.80: the scrollable title strip is header item 1,
-            // a 144px-high LinearLayout at y=288..432 on a 2608px screen.
-            // Its two children already have SurfaceBackground, but a wrapper
-            // can still draw the original on focus or if its native drawable
-            // state becomes non-neutral. Keep ONLY those header surfaces
-            // idle-transparent while preserving native pressed feedback.
-            if (titleStrip && view is ViewGroup &&
-                bounds.width() >= decor.width * 0.58f && background is SurfaceBackground) {
-                val drew = background.drawsBackground()
-                if (drew) state.conversationStripIdleDraws++
-                if (!background.suppressFaintIdle || !background.ignoreIdleFocus) {
-                    background.suppressFaintIdle = true
-                    background.ignoreIdleFocus = true
-                    view.invalidate()
-                    state.conversationStripSuppressions++
+            // The second ConversationListView header contains the observed
+            // 144px-high LinearLayout at y=288..432. Its OUTER adapter row
+            // need not itself be a LinearLayout. Identify the visible strip
+            // by its own geometry, never by the adapter-row class.
+            val titleStrip = headerCandidate && view is android.widget.LinearLayout &&
+                bounds.width() >= decor.width * 0.65f &&
+                bounds.height() >= decor.height * 0.035f &&
+                bounds.height() <= decor.height * 0.085f &&
+                bounds.top < decor.height * 0.30f
+            if (titleStrip) state.conversationStripChecks++
+            // Only idle backgrounds already under SurfaceBackground ownership,
+            // inside this exact header. Preserve pressed feedback and views.
+            if (titleStrip && view is ViewGroup) {
+                val surface = background as? SurfaceBackground
+                if (surface != null) {
+                    if (surface.drawsBackground()) state.conversationStripIdleDraws++
+                    if (!surface.suppressFaintIdle || !surface.ignoreIdleFocus) {
+                        surface.suppressFaintIdle = true
+                        surface.ignoreIdleFocus = true
+                        view.invalidate()
+                        state.conversationStripSuppressions++
+                    }
                 }
             }
             if (view is ViewGroup && bounds.width() >= decor.width * 0.58f &&
@@ -730,17 +737,14 @@ internal object PageWallpaperUnderlay {
             val row = list.getChildAt(index) ?: continue
             if (!row.getGlobalVisibleRect(rect) || rect.top >= decor.height * 0.36f) continue
             shown++
-            // Restrict the geometry fallback to the proven second header,
-            // NOT the mini-program TaskBarContainer (header 0), nor any
-            // subsequent content rows or other tabs.
-            val titleStrip = first + index == 1 &&
-                row.javaClass.simpleName == "LinearLayout" &&
-                rect.width() >= decor.width * 0.65f &&
-                rect.height() >= decor.height * 0.035f &&
-                rect.height() <= decor.height * 0.085f &&
-                rect.top < decor.height * 0.30f
-            if (titleStrip) state.conversationStripChecks++
-            if (patchHeader(row, 0, titleStrip)) titleRows++
+            // Only the adapter's second header. Root class and bounds
+            // are diagnostic: the old root-class gate incorrectly excluded
+            // the nested LinearLayout visible in earlier on-device dumps.
+            val headerCandidate = first + index == 1
+            if (headerCandidate) {
+                samples.add("header1-root=${row.javaClass.simpleName}@${rect.top}-${rect.bottom}")
+            }
+            if (patchHeader(row, 0, headerCandidate)) titleRows++
         }
         if (titleRows > 0) state.conversationTitleAnchors++
         state.conversationHeaderState =
