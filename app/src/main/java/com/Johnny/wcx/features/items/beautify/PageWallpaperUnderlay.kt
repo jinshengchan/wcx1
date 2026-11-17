@@ -1323,7 +1323,21 @@ internal object PageWallpaperUnderlay {
                     else -> "补丁=未装"
                 }
                 val owns = MainSurfaceBackgrounds.owns(view)
-                found.add("${view.javaClass.simpleName}/实背景=${background?.javaClass?.simpleName ?: "null"}${background?.let { retainedDetail(it) } ?: ""} $patchState 接管=$owns headerViewsCount=${view.headerViewsCount} firstVisible=${view.firstVisiblePosition}")
+                // A VISIBLE view can belong to an offscreen adjacent tab.
+                // Locate the white PullDownListView before deciding it is
+                // responsible for the moving title; this is read-only.
+                val onScreen = Rect()
+                val visibleNow = view.isShown && view.getGlobalVisibleRect(onScreen)
+                val at = if (visibleNow) "@${onScreen.left},${onScreen.top}-${onScreen.right},${onScreen.bottom}" else "@屏幕外"
+                val ancestors = ArrayList<String>(6)
+                var ancestor = view.parent as? View
+                repeat(6) {
+                    if (ancestor != null) {
+                        ancestors.add(ancestor!!.javaClass.simpleName)
+                        ancestor = ancestor!!.parent as? View
+                    }
+                }
+                found.add("${view.javaClass.simpleName}$at/父链=${ancestors.joinToString(">")}/实背景=${background?.javaClass?.simpleName ?: "null"}${background?.let { retainedDetail(it) } ?: ""} $patchState 接管=$owns headerViewsCount=${view.headerViewsCount} firstVisible=${view.firstVisiblePosition}")
             }
             if (view is ViewGroup) for (i in 0 until view.childCount) {
                 visit(view.getChildAt(i) ?: continue, depth + 1)
@@ -1332,6 +1346,59 @@ internal object PageWallpaperUnderlay {
         }
         runCatching { visit(decor, 0) }.onFailure { return "未知" }
         return if (found.isEmpty()) "无" else found.joinToString(";")
+    }
+
+    /**
+     * Read-only, on-demand evidence from the actual LauncherUI hierarchy.
+     * The scrolling title and fixed title coexist during the native upward
+     * animation. Identify both labels and their ancestor chains; never change
+     * their visibility, backgrounds, ordering, translation, or touch handling.
+     */
+    private fun titleLayerLiveState(decor: ViewGroup): String {
+        val labels = ArrayList<String>(5)
+        val containers = ArrayList<String>(8)
+        val opaque = ArrayList<String>(6)
+        var visited = 0
+        val rect = Rect()
+        fun ancestors(view: View): String {
+            val out = ArrayList<String>(5)
+            var parent = view.parent as? View
+            repeat(5) {
+                if (parent != null) {
+                    out.add(parent!!.javaClass.simpleName)
+                    parent = parent!!.parent as? View
+                }
+            }
+            return out.joinToString(">")
+        }
+        fun walk(view: View, depth: Int) {
+            if (depth > MAX_DEPTH || visited++ >= MAX_NODES) return
+            val cls = view.javaClass.simpleName
+            val label = (view as? android.widget.TextView)?.text?.toString()?.trim().orEmpty()
+            val isTitle = label == "微信" || label.startsWith("微信(") || label.startsWith("微信（")
+            val isContainer = cls == "ActionBarContainer" || cls == "TaskBarContainer"
+            val bg = view.background as? ColorDrawable
+            val isWhite = bg != null && bg.color == Color.rgb(237, 237, 237) &&
+                view.width >= decor.width * 0.65f
+            if (isTitle || isContainer || isWhite) {
+                val shown = view.isShown && view.getGlobalVisibleRect(rect)
+                val bounds = if (shown) "@${rect.left},${rect.top}-${rect.right},${rect.bottom}" else "@屏幕外"
+                val info = "$cls$bounds/父=${ancestors(view)}/移动Y=${view.translationY}"
+                if (isTitle && labels.size < 5) labels.add(info)
+                if (isContainer && containers.size < 8) containers.add(info)
+                if (isWhite && opaque.size < 6) opaque.add(info)
+            }
+            if (view is ViewGroup && depth < MAX_DEPTH) {
+                for (i in 0 until view.childCount) {
+                    if (visited >= MAX_NODES) break
+                    walk(view.getChildAt(i) ?: continue, depth + 1)
+                }
+            }
+        }
+        runCatching { walk(decor, 0) }
+        return "文字=${labels.joinToString(";").ifEmpty { "未检测" }} " +
+            "容器=${containers.joinToString(";").ifEmpty { "未检测" }} " +
+            "灰底=${opaque.joinToString(";").ifEmpty { "未检测" }}"
     }
 
     /** Top-bar live state: the action-bar container's real background + patch + ownership.
@@ -1733,6 +1800,7 @@ internal object PageWallpaperUnderlay {
             "弹跳视图=${bounceViewBackgrounds(decor)}" +
             " ListView实况=${listViewLiveState(decor, state)}" +
             " 顶栏=${toolbarLiveState(decor, state)}" +
+            " 双标题层定位=${titleLayerLiveState(decor)}" +
             " 标题栏子树=${subtreeDump(state.toolbarView?.get(), state)}" +
             " 资料卡子树=${subtreeDump(state.cardRow?.get(), state)}" +
             " 遮挡排查=${coveringDumps(decor, state)}" +
