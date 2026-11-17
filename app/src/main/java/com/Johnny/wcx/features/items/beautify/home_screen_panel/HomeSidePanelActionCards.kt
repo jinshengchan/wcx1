@@ -1,5 +1,6 @@
 package com.Johnny.wcx.features.items.beautify.home_screen_panel
 
+import com.Johnny.wcx.features.items.beautify.ThemeOwnedAppearance
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.MutableTransitionState
@@ -448,6 +449,7 @@ private fun HomeSidePanelActionItem(
                     Icon(spec.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     Text(
                         spec.labelRes,
+                        color = ThemeOwnedAppearance.color(ThemeOwnedAppearance.current(), "drawer", "title", androidx.compose.ui.graphics.Color.Unspecified),
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Medium,
                     )
@@ -470,7 +472,7 @@ private fun HomeSidePanelActionItem(
                 modifier = Modifier.fillMaxWidth(),
                 onClick = onActionClick,
             ) {
-                Text(spec.labelRes)
+                Text(spec.labelRes, color = ThemeOwnedAppearance.color(ThemeOwnedAppearance.current(), "drawer", "title", androidx.compose.ui.graphics.Color.Unspecified))
             }
         }
         val badgeAlignment = when (placement) {

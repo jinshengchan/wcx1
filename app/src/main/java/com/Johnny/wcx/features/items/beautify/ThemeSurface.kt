@@ -147,6 +147,9 @@ internal object ThemeSurface {
     @Volatile
     private var fragmentChatActive = false
 
+    @Volatile
+    private var fragmentChatEnteredAt = 0L
+
     /** 聊天页可见性 ②：纯 View 特征识别（ChatPageGuard 维护），仅在锚点不可用的版本上生效 */
     @Volatile
     private var viewChatActive = false
@@ -180,13 +183,84 @@ internal object ThemeSurface {
     var onMainPage = true
         private set
 
+    private var confirmedMainRef: WeakReference<Activity>? = null
+
     @Volatile
-    private var lastChatHit: ChatPageGuard.Hit? = null
+    private var lastChatHit: String? = null
+
+    @Volatile
+    private var lastChatBottomDiag: String = "未观测"
 
     @Volatile
     private var lastChatCheckAt = 0L
 
-    private val chatWatched = java.util.WeakHashMap<ViewGroup, Boolean>()
+    private class LockedChatBottomDrawable : android.graphics.drawable.ColorDrawable(AndroidColor.TRANSPARENT) {
+        override fun setColor(color: Int) {
+            // Block host from recoloring the bottom 48px inset back to #F7F7F7
+            super.setColor(AndroidColor.TRANSPARENT)
+        }
+    }
+
+    private class MainWatcher(activity: Activity, decor: ViewGroup) {
+        val activity = WeakReference(activity)
+        val decor = WeakReference(decor)
+        var observer: WeakReference<android.view.ViewTreeObserver>? = null
+        var layout: android.view.ViewTreeObserver.OnGlobalLayoutListener? = null
+        var focus: android.view.ViewTreeObserver.OnWindowFocusChangeListener? = null
+        var attach: View.OnAttachStateChangeListener? = null
+    }
+
+    private val mainWatchers = java.util.WeakHashMap<ViewGroup, MainWatcher>()
+
+    private fun stopObserving(watcher: MainWatcher) {
+        watcher.observer?.get()?.takeIf { it.isAlive }?.let { observer ->
+            watcher.layout?.let(observer::removeOnGlobalLayoutListener)
+            watcher.focus?.let(observer::removeOnWindowFocusChangeListener)
+        }
+        watcher.observer = null
+        watcher.layout = null
+        watcher.focus = null
+    }
+
+    private fun observeMain(watcher: MainWatcher) {
+        val decor = watcher.decor.get() ?: return
+        val observer = decor.viewTreeObserver
+        if (watcher.observer?.get() === observer) return
+        stopObserving(watcher)
+        val layout = android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            if (ThemeStore.wallpaperSwitchOn()) watcher.activity.get()?.let { runCatching { checkChatPage(it) } }
+        }
+        val focus = android.view.ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
+            if (hasFocus && ThemeStore.wallpaperSwitchOn() && !chatPageVisible) {
+                watcher.activity.get()?.let { applyNow(it) }
+            }
+        }
+        watcher.observer = WeakReference(observer)
+        watcher.layout = layout
+        watcher.focus = focus
+        observer.addOnGlobalLayoutListener(layout)
+        observer.addOnWindowFocusChangeListener(focus)
+    }
+
+    private fun ensureMainWatcher(activity: Activity, decor: ViewGroup) {
+        val watcher = mainWatchers.getOrPut(decor) {
+            MainWatcher(activity, decor).also { state ->
+                val attach = object : View.OnAttachStateChangeListener {
+                    override fun onViewAttachedToWindow(view: View) { observeMain(state) }
+                    override fun onViewDetachedFromWindow(view: View) { stopObserving(state) }
+                }
+                state.attach = attach
+                decor.addOnAttachStateChangeListener(attach)
+            }
+        }
+        observeMain(watcher)
+    }
+
+    private fun removeMainWatcher(decor: ViewGroup) {
+        val watcher = mainWatchers.remove(decor) ?: return
+        stopObserving(watcher)
+        watcher.attach?.let(decor::removeOnAttachStateChangeListener)
+    }
 
     /**
      * 锚点「已离开」的起始时间戳（**基于时间**防抖）。
@@ -211,13 +285,13 @@ internal object ThemeSurface {
         val hit = lastChatHit
         val byFragment = if (fragmentChatActive) "Fragment锚点=命中" else "Fragment锚点=未命中"
         val byView = if (hit != null) {
-            "特征=命中（输入框=${hit.hasInput} 列表=${hit.hasList} 标题=${hit.hasTitle} ${hit.detail}）"
+            "特征=命中（$hit）"
         } else {
             "特征=未命中[${ChatPageGuard.lastMissInfo}]"
         }
         val main = if (onMainPage) "主页面=✓" else "主页面=✗"
         val out = if (chatPageVisible) "聊天页中：$byFragment，$byView" else "不是聊天页（$byFragment，$byView）"
-        return "$out [$main ${ChatPageGuard.mainPageInfo}]"
+        return "$out [$main ${ChatPageGuard.mainPageInfo}] 聊天底栏=$lastChatBottomDiag"
     }
 
     /**
@@ -226,15 +300,7 @@ internal object ThemeSurface {
      * 聊天页若是主界面内部 Fragment（用户实机确认），切换页面不会走 Activity 生命周期，
      * 但一定会触发一次布局 —— 所以 GlobalLayout 是最可靠的时机；再叠 400ms 节流防抖。
      */
-    private fun ensureChatWatcher(activity: Activity, decor: ViewGroup) {
-        if (chatWatched[decor] == true) return
-        chatWatched[decor] = true
-        runCatching {
-            decor.viewTreeObserver.addOnGlobalLayoutListener {
-                runCatching { checkChatPage(activity) }
-            }
-        }.onFailure { WeLogger.w(TAG, "注册聊天页检测监听失败：${it.message}") }
-    }
+    private fun ensureChatWatcher(activity: Activity, decor: ViewGroup) = ensureMainWatcher(activity, decor)
 
     /** 跑一次聊天页检测；状态切换时做对应动作。 */
     fun checkChatPage(activity: Activity, force: Boolean = false) {
@@ -244,13 +310,14 @@ internal object ThemeSurface {
 
         val hit = ChatPageGuard.detect(activity)
         val visible = hit != null
-        lastChatHit = hit
+        lastChatHit = hit?.let { "输入框=${it.hasInput} 列表=${it.hasList} 标题=${it.hasTitle} ${it.detail}" }
 
         // ── ⓪ 正向判定：先问「这里是不是主页面」（放行条件之一，先算以便本次事件就用上） ──
-        onMainPage = ChatPageGuard.detectMainPage(activity, chatPageVisible)
+        updateMainPage(activity, visible)
 
         // ── ① 实时特征命中 = 在聊天页（最高优先，特征命中就绝不放行）──
         if (visible) {
+            confirmedMainRef = null
             anchorLeaveSince = 0L
             val entered = !viewChatActive
             viewChatActive = true
@@ -259,15 +326,18 @@ internal object ThemeSurface {
             if (entered) {
                 noteEvent("识别到聊天页 → 撤壁纸 + 容器兜底不透明")
                 // 撤掉主界面壁纸层（双保险之一；另一层是容器自身的挡色背景）
-                runCatching { TabWallpaperRenderer.clear(activity) }
+                runCatching { TabWallpaperRenderer.clear(activity); restoreWindow(activity) }
             }
+            runCatching { clearChatFooterBottomInset(activity, hit?.container) }
             return
         }
 
         // ── ② 正向权威：已充分确认在主页面（4 个 Tab / FAB / 会话列表），
         //          却还挂着聊天页状态 —— 那必然是 Fragment onPause 迟到的残留（实测最久 21 秒）。
-        //          以实际视图为准，直接清掉并重挂 —— 这就是「回到主页面 4 页全空」的根治。
-        if (onMainPage && fragmentChatActive) {
+        //          注意：必须排除刚触发 onChattingFragmentShown 的前 1200ms 转场动画期（此时聊天页刚滑入、
+        //          底部 4 个 Tab 尚未隐藏，不能在同一秒把刚进入的聊天页当成残留清掉）。
+        if (onMainPage && fragmentChatActive && now - fragmentChatEnteredAt >= 1200L) {
+            ChatPageGuard.restoreAll()
             fragmentChatActive = false
             viewChatActive = false
             anchorLeaveSince = 0
@@ -297,8 +367,18 @@ internal object ThemeSurface {
             }
         }
 
-        if (wasVisible && onMainPage) {
-            noteEvent("离开聊天页 → 重挂壁纸")
+        if (!onMainPage || !ThemeStore.wallpaperSwitchOn()) return
+        val attached = isAttached(activity)
+        val profile = ThemeRuntime.current(activity)?.profile
+        val pageRule = profile?.background(listOf("chats", "contacts", "discover", "me").getOrElse(currentTabIndex(activity)) { "chats" })
+        val hasWallpaper = ThemeStore.mainWallpaperEnabled() && (attached ||
+            pageRule is BackgroundRule.Image || pageRule is BackgroundRule.Solid || pageRule === BackgroundRule.Transparent ||
+            (profile == null && fileForTab(ThemeMaterials.tabWallpaperFiles(ThemeStore.activeThemeIdOrEmpty()), currentTabIndex(activity)) != null))
+        val needsWallpaper = hasWallpaper && !attached
+        val needsText = ThemeStore.mainTextColorEnabled() && !MainPageAppearance.isApplied(activity) &&
+            (ThemeStore.mainTitleColor() != null || MainPageAppearance.hasProfileColors(profile) || MainTabAssets.configured(profile) || MainSurfaceBackgrounds.configured(profile) || (hasWallpaper && ThemeStore.usePageBackground()))
+        if (onMainPage && (wasVisible || ((needsWallpaper || needsText) && activity.window?.decorView?.hasWindowFocus() == true))) {
+            noteEvent("主页面图层缺失或离开聊天页 → 重挂壁纸")
             runCatching { applyTabWallpapers(activity) }
         }
     }
@@ -316,10 +396,25 @@ internal object ThemeSurface {
     /** 当前前台 Activity 的类名（诊断用）。 */
     fun foregroundName(): String = resumedRef?.get()?.javaClass?.simpleName ?: "null"
 
-    /** 记录哪些 Activity 真的挂过，避免对没挂过的页面白跑 removeWallpaper。 */
-    private val wallpaperAttached = java.util.WeakHashMap<Activity, Boolean>()
+    /** 挂载状态只从真实图层读取，撤销后不保留另一份布尔标记。 */
+    fun isAttached(activity: Activity): Boolean = TabWallpaperRenderer.isMasked(activity)
 
-    fun isAttached(activity: Activity): Boolean = wallpaperAttached[activity] == true
+    var lastWallpaperDrawDecision = "尚未判定"
+        private set
+
+    private fun canDrawWallpaper(): Boolean {
+        val decision = when {
+            !onMainPage -> "拦截：未确认主页面（${ChatPageGuard.mainPageInfo}）"
+            chatPageVisible -> "拦截：聊天页可见"
+            !ThemeStore.wallpaperSwitchOn() -> "拦截：主题开关关闭"
+            else -> "允许"
+        }
+        if (decision != lastWallpaperDrawDecision) {
+            lastWallpaperDrawDecision = decision
+            WeLogger.i(TAG, "背景绘制判定：$decision")
+        }
+        return decision == "允许"
+    }
 
     /** 已挂过切页监听的 adapter，避免每次进主页重复 hook。 */
     private val hookedTabsAdapters: MutableSet<Any> =
@@ -367,7 +462,8 @@ internal object ThemeSurface {
             resumedRef = java.lang.ref.WeakReference(activity)
             noteEvent("前台 → ${activity.javaClass.simpleName}")
             // 总开关关掉时一个字节都不动，避免「关了主题还在改窗口 / 还在挂背景」
-            if (!ThemeStore.wallpaperSwitchOn() || ThemeStore.activeThemeIdOrEmpty().isEmpty()) return
+            if (!ThemeStore.wallpaperSwitchOn()) return
+            if (ThemePages.isLauncher(activity)) ThemeScheduleController.onLauncherEntry(activity)
             // 非主界面进前台：先把主界面遮罩藏掉（聊天页半透明时会透出后面这张壁纸）
             if (!ThemePages.isLauncher(activity)) hideLauncherWallpapers()
             // 回前台若判定「还在聊天页」（如相册 → 聊天页返回），不挂壁纸，免得闪一帧又浸透。
@@ -401,12 +497,17 @@ internal object ThemeSurface {
         override fun onActivityStopped(activity: Activity) {}
         override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
         override fun onActivityDestroyed(activity: Activity) {
+            if (ThemePages.isLauncher(activity)) {
+                TabWallpaperRenderer.clear(activity)
+                (activity.window?.decorView as? ViewGroup)?.let(::removeMainWatcher)
+            }
             windowBackups.remove(System.identityHashCode(activity))
-            wallpaperAttached.remove(activity)
         }
     }
 
     fun registerCallbacks(register: Boolean) {
+        if (!register) { lastChatHit = null; confirmedMainRef = null }
+        if (!register) mainWatchers.keys.toList().forEach(::removeMainWatcher)
         try {
             val app = hostApp ?: return
             if (register && !callbacksRegistered) {
@@ -429,7 +530,6 @@ internal object ThemeSurface {
         val actRef: WeakReference<Activity>,
         val statusBarColor: Int,
         val navBarColor: Int,
-        val sysUi: Int,
         val contrastStatusEnforced: Boolean,
         val contrastNavEnforced: Boolean
     )
@@ -451,7 +551,6 @@ internal object ThemeSurface {
                     WeakReference(activity),
                     w.statusBarColor,
                     w.navigationBarColor,
-                    w.decorView.systemUiVisibility,
                     Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && w.isStatusBarContrastEnforced,
                     Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && w.isNavigationBarContrastEnforced
                 )
@@ -463,9 +562,6 @@ internal object ThemeSurface {
                 w.isStatusBarContrastEnforced = false
                 w.isNavigationBarContrastEnforced = false
             }
-            @Suppress("DEPRECATION")
-            w.decorView.systemUiVisibility = w.decorView.systemUiVisibility or
-                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         } catch (e: Throwable) {
             WeLogger.w(TAG, "applyImmersive 异常：${e.message}", e)
         }
@@ -483,10 +579,156 @@ internal object ThemeSurface {
                 act.window?.isStatusBarContrastEnforced = backup.contrastStatusEnforced
                 act.window?.isNavigationBarContrastEnforced = backup.contrastNavEnforced
             }
-            @Suppress("DEPRECATION")
-            act.window?.decorView?.systemUiVisibility = backup.sysUi
         } catch (e: Throwable) {
             WeLogger.w(TAG, "restoreWindow 异常：${e.message}", e)
+        }
+    }
+
+    /**
+     * 清理聊天页底部输入框（ChatFooter）最底端那条 48px 的 #F7F7F7 垫片/背景条，
+     * 并输出底部 y=2400..2608 的真实视图与背景诊断到 noteEvent，彻底锁定是谁画了 #F7F7F7。
+     */
+    private fun clearChatFooterBottomInset(activity: Activity, rootHint: View? = null) {
+        val w = activity.window ?: return
+        val decor = w.decorView as? ViewGroup ?: return
+        fun sweepBottom() {
+            if (decor.height <= 0) return
+            @Suppress("DEPRECATION")
+            w.navigationBarColor = AndroidColor.TRANSPARENT
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                w.isNavigationBarContrastEnforced = false
+            }
+            decor.findViewById<View>(android.R.id.navigationBarBackground)?.let { navBg ->
+                navBg.background = null
+                navBg.alpha = 0f
+                navBg.visibility = View.INVISIBLE
+            }
+            val loc = IntArray(2)
+            val rootLoc = IntArray(2)
+            decor.getLocationOnScreen(rootLoc)
+            var visited = 0
+            var cleared = 0
+            val chatHits = ArrayList<String>(14)
+            fun bgDesc(bg: android.graphics.drawable.Drawable?): String {
+                if (bg == null) return "null"
+                if (bg is LockedChatBottomDrawable) return "LockedTrans"
+                val cur = bg.current
+                return if (cur is android.graphics.drawable.ColorDrawable) {
+                    String.format("Color(#%08X)", cur.color)
+                } else {
+                    cur.javaClass.simpleName
+                }
+            }
+            fun isInputBox(view: View, top: Int, bottom: Int): Boolean {
+                if (view is android.widget.EditText) return true
+                val s = view.javaClass.simpleName
+                if (s.contains("EditText") || s.contains("MMEditText")) return true
+                return view.width in 100..(decor.width * 0.72f).toInt() && bottom < decor.height - 20
+            }
+            fun walk(view: View, depth: Int, inChat: Boolean, inFooter: Boolean) {
+                if (depth > 28 || visited++ >= 2000 || view.visibility != View.VISIBLE) return
+                val cls = view.javaClass.name
+                val simple = view.javaClass.simpleName
+                // 直接跳过主界面 ViewPager 与底部 Tab 栏，专注入聊天页子树（TestTimeForChatting / ChattingUILayout）
+                if (simple.contains("ViewPager") || simple.contains("LauncherUIBottomTabView") || simple == "MainUIView") {
+                    return
+                }
+                val insideChat = inChat ||
+                    simple == "TestTimeForChatting" ||
+                    simple == "SwipeBackLayout" ||
+                    simple == "ChattingUILayout" ||
+                    cls.contains(".chatting.")
+                val insideFooter = inFooter || cls.contains("ChatFooter") || simple.contains("ChatFooter")
+                if (view.width > 0 && view.height > 0) {
+                    view.getLocationOnScreen(loc)
+                    val top = loc[1] - rootLoc[1]
+                    val bottom = top + view.height
+                    val lp = view.layoutParams as? ViewGroup.MarginLayoutParams
+                    val marB = lp?.bottomMargin ?: 0
+                    val padB = view.paddingBottom
+
+                    if (insideChat || insideFooter) {
+                        // 1. 屏幕最底端 48px 垫片（top >= decor.height - 100 && bottom >= decor.height - 4 && width >= 75%）
+                        val isBottomInsetStrip = bottom >= decor.height - 4 &&
+                            top >= decor.height - 100 &&
+                            view.width >= decor.width * 0.75f
+                        // 2. 聊天页全屏根容器（SwipeBackLayout@0-2608 #FFFFFFFF、ChattingUILayout@0-2608 #FFEDEDED + padB=48 等）
+                        val isChatRootContainer = view is ViewGroup &&
+                            bottom >= decor.height - 4 &&
+                            view.width >= decor.width * 0.75f &&
+                            (simple == "ChattingUILayout" || simple == "SwipeBackLayout" || simple == "FrostedContentView" || top == 0)
+                        // 3. ChatFooter 或聊天底部容器（top >= decor.height - 260 && bottom >= decor.height - 4）
+                        val isFooterShell = (insideFooter || top >= decor.height - 260 || isChatRootContainer) &&
+                            bottom >= decor.height - 4 &&
+                            view.width >= decor.width * 0.75f &&
+                            !isInputBox(view, top, bottom) &&
+                            view !is android.widget.ImageView &&
+                            !simple.contains("WeImageView")
+                        if (isBottomInsetStrip || isFooterShell) {
+                            val bg = view.background
+                            if (bg != null && bg !is LockedChatBottomDrawable) {
+                                val pL = view.paddingLeft
+                                val pT = view.paddingTop
+                                val pR = view.paddingRight
+                                val pB = view.paddingBottom
+                                view.background = LockedChatBottomDrawable()
+                                view.setPadding(pL, pT, pR, pB)
+                                cleared++
+                            }
+                            var type: Class<*>? = view.javaClass
+                            while (type != null && !type.name.startsWith("android.")) {
+                                for (field in type.declaredFields) {
+                                    if (android.graphics.Paint::class.java.isAssignableFrom(field.type)) {
+                                        runCatching {
+                                            field.isAccessible = true
+                                            val p = field.get(view) as? android.graphics.Paint
+                                            if (p != null) {
+                                                val c = p.color
+                                                val r = AndroidColor.red(c)
+                                                val g = AndroidColor.green(c)
+                                                val b = AndroidColor.blue(c)
+                                                if (AndroidColor.alpha(c) > 0 && r >= 210 && g >= 210 && b >= 210 && maxOf(r, g, b) - minOf(r, g, b) <= 12) {
+                                                    p.color = AndroidColor.TRANSPARENT
+                                                    p.alpha = 0
+                                                    view.invalidate()
+                                                    cleared++
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                type = type.superclass
+                            }
+                        }
+                        // 记录聊天页根容器及底部视图（用于诊断 bottom 是否停在 2560、是否有 padB=48/marB=48 或特殊背景）
+                        if (view.width >= decor.width * 0.75f &&
+                            (bottom >= decor.height - 96 || simple == "TestTimeForChatting" || simple == "SwipeBackLayout" || simple == "ChattingUILayout" || insideFooter || view is android.widget.ImageView)) {
+                            val bg = view.background
+                            if (chatHits.size < 14 && (bg != null || padB > 0 || marB > 0 || top >= decor.height - 260 || simple == "TestTimeForChatting" || simple == "ChattingUILayout" || view is android.widget.ImageView)) {
+                                chatHits.add("$simple@$top-$bottom(bg=${bgDesc(bg)} padB=$padB marB=$marB)")
+                            }
+                        }
+                    }
+                }
+                if (view is ViewGroup) {
+                    for (i in 0 until view.childCount) {
+                        walk(view.getChildAt(i) ?: continue, depth + 1, insideChat, insideFooter)
+                    }
+                }
+            }
+            runCatching { walk(decor, 0, false, false) }
+            if (chatHits.isNotEmpty()) {
+                lastChatBottomDiag = "清=$cleared[${chatHits.joinToString(";")}]"
+            }
+        }
+        try {
+            sweepBottom()
+            decor.post { runCatching { sweepBottom() } }
+            for (delay in longArrayOf(120L, 320L, 650L, 1100L)) {
+                decor.postDelayed({ runCatching { sweepBottom() } }, delay)
+            }
+        } catch (e: Throwable) {
+            WeLogger.w(TAG, "清理 ChatFooter 底部白条异常：${e.message}", e)
         }
     }
 
@@ -513,8 +755,6 @@ internal object ThemeSurface {
      * - 其它页面：不动；只有真的挂过才去还原
      */
     fun applyTo(activity: Activity) {
-        if (ThemeStore.activeThemeIdOrEmpty().isEmpty()) return
-        applyImmersive(activity)
         when {
             ThemePages.isScanner(activity) || ThemePages.isPhotoViewer(activity) -> removeWallpaper(activity)
             ThemePages.isChatting(activity) -> {
@@ -526,7 +766,7 @@ internal object ThemeSurface {
                 // 任何其它页面（设置页 / 朋友圈 / 小程序 / 扫码…）在前台时，
                 // 主界面遮罩一律隐藏：主题只允许出现在主页/通讯录/发现/我 这 4 个 Tab 上。
                 hideLauncherWallpapers()
-                if (wallpaperAttached[activity] == true) removeWallpaper(activity)
+                if (isAttached(activity)) removeWallpaper(activity)
             }
         }
     }
@@ -628,9 +868,9 @@ internal object ThemeSurface {
         return null
     }
 
-    /** tabIndex 对应的图片文件；该页没设就退回第一张有图的页。 */
+    /** 素材层已解析继承规则；有效页码的 null 表示用户明确恢复了原生背景。 */
     private fun fileForTab(files: List<java.io.File?>, tab: Int): java.io.File? =
-        files.getOrNull(tab) ?: files.firstOrNull { it != null }
+        if (tab in 0..3) files.getOrNull(tab) else files.firstOrNull { it != null }
 
     /**
      * 主界面窗口焦点监听：进聊天页 / 其它页面时**必然失焦**，这是最可靠的一道闸。
@@ -639,30 +879,7 @@ internal object ThemeSurface {
      * 主界面可能不 pause，`onActivityPaused` 里那次撤遮罩就不会执行 →
      * 聊天页就会透出主界面壁纸。窗口焦点变化在两种情况下都会触发。
      */
-    private val focusWatched = java.util.WeakHashMap<ViewGroup, Boolean>()
-
-    private fun ensureWindowFocusWatcher(activity: Activity, decor: ViewGroup) {
-        if (focusWatched[decor] == true) return
-        focusWatched[decor] = true
-        runCatching {
-            decor.viewTreeObserver.addOnWindowFocusChangeListener { hasFocus ->
-                // 注意：**失焦一律不撤壁纸**。
-                // 微信里 window 焦点会被输入法弹出、Fragment 切换、页面转场反复触发 true/false，
-                // 且「获得焦点」回调不保证与失焦对称（实测日志：丢一次就永久没图）。
-                // 撤壁纸只由「聊天页状态」与「非 Launcher 的 Activity 到前台」决定，见 hideLauncherWallpapers()。
-                if (hasFocus) {
-                    if (ThemeStore.wallpaperSwitchOn() && ThemeStore.activeThemeIdOrEmpty().isNotEmpty() && !chatPageVisible) {
-                        noteEvent("主界面获得焦点 → 补挂")
-                        WeLogger.i(TAG, "主界面重新获得窗口焦点 → 补挂壁纸遮罩")
-                        runCatching { applyTabWallpapers(activity) }
-                            .onFailure { WeLogger.w(TAG, "补挂失败：${it.message}") }
-                    }
-                } else {
-                    WeLogger.i(TAG, "主界面失焦（不撤壁纸，交给聊天页状态/Activity 切换处理）")
-                }
-            }
-        }.onFailure { WeLogger.w(TAG, "注册窗口焦点监听失败：${it.message}") }
-    }
+    private fun ensureWindowFocusWatcher(activity: Activity, decor: ViewGroup) = ensureMainWatcher(activity, decor)
 
     /** 主界面 doOnCreate / 返回主界面时：挂一次 4 页背景（给 Feature 侧 hook 调用）。 */
     fun applyNow(activity: Activity) {
@@ -692,94 +909,108 @@ internal object ThemeSurface {
      * 现在两条信号都接，页码取不到时还有 getCurrentItem()/ViewPager2 兜底。
      */
     fun onTabSelected(activity: Activity, position: Int) {
+        (activity.window?.decorView as? ViewGroup)?.let { ThemeHostAdapter.pageObserved(it, position) }
         runCatching { checkChatPage(activity) }
-        if (position == lastTabIndex) return
+        if (position == TabWallpaperRenderer.lastTab && isAttached(activity)) return
         lastTabIndex = position
         runCatching { updateTabWallpaper(activity, position) }
             .onFailure { WeLogger.w(TAG, "切 Tab 换背景（onPageSelected）失败：${it.message}") }
+        // 切页落定后再脏一次：切页瞬间那次 walk 可能赶在新页行绑定完之前，漏掉的行会一直灰到下次滚动。
+        (activity.window?.decorView as? ViewGroup)?.let { PageWallpaperUnderlay.markDirtyAfterSettle(it) }
     }
 
     /**
      * 挂 / 刷新 4 个页面的背景。
      *
-     * 不往视图树塞任何节点（不占 index、不依赖自绘层布局），
-     * 全部交给 [TabWallpaperRenderer] 写 DecorView 的 foreground。
+     * 由 [TabWallpaperRenderer] 选择全屏窗口底图或兼容的 foreground 遮罩。
      */
-    private fun applyTabWallpapers(activity: Activity) {
-        // 【总开关闸】焦点补挂 / 切页 / 锚点离开 等所有入口最终都会走到这里。
-        // 总开关关掉时一律拦掉，并把已挂的清干净 —— 否则关掉主题后 4 个界面还显示背景。
+    private fun updateMainPage(activity: Activity, detectedChat: Boolean = false) {
+        val detected = ChatPageGuard.detectMainPage(activity, chatPageVisible)
+        if (detected && ThemePages.isLauncher(activity) && !detectedChat) confirmedMainRef = WeakReference(activity)
+        val retained = !detected && onMainPage && ThemePages.isLauncher(activity) && confirmedMainRef?.get() === activity &&
+            !detectedChat && !chatPageVisible && !ChatPageGuard.mainPageHasInput
+        if (detectedChat || chatPageVisible || ChatPageGuard.mainPageHasInput) confirmedMainRef = null
+        if (retained) noteEvent("主页特征暂缺，保留已挂载背景：${ChatPageGuard.mainPageInfo}")
+        onMainPage = !detectedChat && !ChatPageGuard.mainPageHasInput && (detected || retained)
+    }
+
+    private fun applyTabWallpapers(activity: Activity, tabHint: Int? = null) {
         if (!ThemeStore.wallpaperSwitchOn()) {
-            runCatching {
-                TabWallpaperRenderer.clear(activity)
-                wallpaperAttached.remove(activity)
-            }
+            TabWallpaperRenderer.clear(activity)
+            restoreWindow(activity)
             return
         }
-        // 【正向闸】挂载前刷新「是否在 4 个 Tab 主页面」：不在主页面一律不挂。
-        // 聊天页与二级页面都不需要壁纸，挂上去只会带来「挂着却要挡着不画」的不一致。
-        runCatching { onMainPage = ChatPageGuard.detectMainPage(activity, chatPageVisible) }
-        if (!onMainPage) {
-            noteEvent("挂载前识别到非主页面 → 跳过挂载")
-            return
-        }
-        if (wallpaperFailStreak >= 3) return
-        val decor = activity.window?.decorView as? ViewGroup
-        if (decor == null) {
-            WeLogger.w(TAG, "跳过挂载：decorView 不可用（${activity.javaClass.name}）")
-            return
-        }
-        // 装一次焦点监听 / 聊天页检测监听
+        val decor = activity.window?.decorView as? ViewGroup ?: return
+        // 首次布局可能还没有 Tab；先安装监听，布局完成后才能补挂。
         ensureWindowFocusWatcher(activity, decor)
         ensureChatWatcher(activity, decor)
-        // 不再因「没有窗口焦点」拒绝挂载：返回主界面时焦点常晚几十~几百毫秒才到，
-        // 一旦拒绝就再没人补挂 → 表现为「退回主界面 4 页全空」。
-        // DecorView 的 foreground 只在该窗口可见时才绘制，后台挂着不会漏到别的页面。
-        val activeId = ThemeStore.activeThemeIdOrEmpty()
-        val files = runCatching { ThemeMaterials.tabWallpaperFiles(activeId) }.getOrDefault(emptyList())
-        if (files.all { it == null }) {
-            WeLogger.w(TAG, "跳过挂载：当前主题没有可用壁纸文件（active=$activeId）")
+        runCatching { updateMainPage(activity) }
+        if (!onMainPage || chatPageVisible) {
             TabWallpaperRenderer.clear(activity)
+            restoreWindow(activity)
+            noteEvent("非主页面或聊天页可见 → 撤下主页主题")
             return
         }
-        // 以当前真实页码为准：LauncherUI 重建后 lastTabIndex 是上一次的残值，会挂错图
-        val tab = currentTabIndex(activity).takeIf { it in 0..3 } ?: lastTabIndex
-        if (tab in 0..3) lastTabIndex = tab
-        // 页码取不到时兜底第一张可用图，宁可显示「主页」那张，也不要一片空白
-        val file = fileForTab(files, tab) ?: files.firstOrNull { it != null }
-        val alphaPct = ThemeStore.overlayOpacity()
-        val result = TabWallpaperRenderer.apply(activity, file, tab, alphaPct) {
-            onMainPage && !chatPageVisible && ThemeStore.wallpaperSwitchOn()
+        val tab = tabHint?.takeIf { it in 0..3 } ?: currentTabIndex(activity)
+        ThemeHostAdapter.pageObserved(decor, tabHint?.takeIf { it in 0..3 } ?: readRealTabIndex(activity))
+        lastTabIndex = tab
+        val effective = ThemeRuntime.current(activity)
+        val profile = effective?.profile
+        val background = if (ThemeStore.mainWallpaperEnabled()) {
+            profile?.background(listOf("chats", "contacts", "discover", "me").getOrElse(tab) { "chats" })
+        } else BackgroundRule.Native
+        val files = if (ThemeStore.mainWallpaperEnabled() && profile == null) {
+            runCatching { ThemeMaterials.tabWallpaperFiles(ThemeStore.activeThemeIdOrEmpty()) }.getOrDefault(emptyList())
+        } else emptyList()
+        val file = if (background is BackgroundRule.Image) effective?.asset(background.asset) else fileForTab(files, tab)
+        val color = when (background) {
+            is BackgroundRule.Solid -> background.argb
+            BackgroundRule.Transparent -> AndroidColor.TRANSPARENT
+            else -> null
         }
+        if (file == null && color == null) {
+            TabWallpaperRenderer.clear(activity)
+            restoreWindow(activity)
+            MainPageAppearance.apply(activity, null, ThemeStore.mainTextColorEnabled(), ThemeStore.mainTitleColor(), profile) {
+                canDrawWallpaper()
+            }
+            if (file == null && color == null) wallpaperFailStreak = 0
+            return
+        }
+        val fullscreen = color != null || ThemeStore.usePageBackground()
+        if (fullscreen) restoreWindow(activity)
+        val result = if (color != null) TabWallpaperRenderer.applyColor(
+            activity, color, tab, ThemeStore.mainTextColorEnabled(), ThemeStore.mainTitleColor(), profile
+        ) { canDrawWallpaper() } else TabWallpaperRenderer.apply(
+            activity, file, tab, ThemeStore.overlayOpacity(), fullscreen,
+            ThemeStore.mainTextColorEnabled(), ThemeStore.mainTitleColor(), profile,
+            (background as? BackgroundRule.Image)?.opacity ?: 1f
+        ) { canDrawWallpaper() }
         if (result != "ok") {
+            if (result.startsWith("等待底图：")) return
+            restoreWindow(activity)
+            MainPageAppearance.apply(activity, null, ThemeStore.mainTextColorEnabled(), ThemeStore.mainTitleColor(), profile) {
+                canDrawWallpaper()
+            }
             wallpaperFailStreak += 1
             WeLogger.w(TAG, "挂载 4 页背景失败（第 $wallpaperFailStreak 次）：$result")
             return
         }
+        if (!fullscreen) applyImmersive(activity)
         wallpaperFailStreak = 0
-        wallpaperAttached[activity] = true
-        noteEvent("挂上 Tab=$tab ${file?.name ?: "null"}")
-
+        val source = file?.absolutePath ?: String.format("solid:#%08X", color)
+        noteEvent("挂上 Tab=$tab ${file?.name ?: source}")
         val info = files.mapIndexed { i, f -> "${TAB_NAMES[i]}=${f != null}" }.joinToString("，")
-        val logKey = "$info|tab=$tab|${file?.absolutePath}"
+        val logKey = "$info|tab=$tab|$source"
         if (logKey != lastLoggedWallpaper) {
             lastLoggedWallpaper = logKey
-            WeLogger.i(TAG, "4 页背景已写入前景遮罩（$info），Tab=$tab，文件=${file?.absolutePath ?: "null"}")
+            WeLogger.i(TAG, "4 页背景已写入（$info），Tab=$tab，来源=$source")
         }
     }
 
-    /** 切 Tab：换一张图（同一套前景遮罩，只换 bitmap）。 */
+    /** 切页与恢复使用同一套开关、选图和文字规则。 */
     private fun updateTabWallpaper(activity: Activity, position: Int) {
-        runCatching {
-            if (!ThemeStore.wallpaperSwitchOn()) return@runCatching
-            if (wallpaperAttached[activity] != true) return@runCatching
-            val files = ThemeMaterials.tabWallpaperFiles(ThemeStore.activeThemeIdOrEmpty())
-            if (files.all { it == null }) return@runCatching
-            val file = fileForTab(files, position) ?: files.firstOrNull { it != null }
-            val result = TabWallpaperRenderer.apply(activity, file, position, ThemeStore.overlayOpacity()) {
-                onMainPage && !chatPageVisible && ThemeStore.wallpaperSwitchOn()
-            }
-            WeLogger.i(TAG, "切页换图 → Tab=$position 文件=${file?.name ?: "null"} 结果=$result")
-        }.onFailure { WeLogger.w(TAG, "切 Tab 换背景失败：${it.message}") }
+        applyTabWallpapers(activity, position)
     }
 
     /** 改透明度后重挂一次（前景遮罩的 alpha 每次 apply 重算）。 */
@@ -794,23 +1025,32 @@ internal object ThemeSurface {
      * 明文未混淆；而 ChattingUI 是外部/通知进入时才用的 Activity）。
      */
     fun onChattingFragmentShown(fragmentView: View?) {
-        if (!fragmentChatActive) {
-            noteEvent("聊天页 Fragment 出现 → 撤壁纸 + 容器兜底")
+        confirmedMainRef = null
+        val entering = !fragmentChatActive
+        if (entering) {
+            noteEvent("聊天页 Fragment 出现 → 容器兜底 + 撤壁纸")
         }
+        // Prepare the chat's opaque root while the old wallpaper is still drawable.
+        // Closing the render gate first can create a blank transition frame.
+        (fragmentView as? ViewGroup)?.let { runCatching { ChatPageGuard.ensureOpaque(it) } }
         fragmentChatActive = true
-        // 不用 Fragment 根 View 做存活判定（isShown/detach 在 onViewCreated 与转场期间都会误导），
-        // 离开确认统一交给 checkChatPage 的「特征持续不命中」时间防抖。
+        fragmentChatEnteredAt = android.os.SystemClock.uptimeMillis()
         anchorLeaveSince = 0L
-        runCatching {
+        if (entering) runCatching {
             liveActivities().forEach { act ->
-                if (ThemePages.isLauncher(act)) TabWallpaperRenderer.clear(act)
+                if (ThemePages.isLauncher(act)) {
+                    TabWallpaperRenderer.clear(act)
+                    restoreWindow(act)
+                    clearChatFooterBottomInset(act, fragmentView)
+                }
             }
         }
-        (fragmentView as? ViewGroup)?.let { runCatching { ChatPageGuard.ensureOpaque(it) } }
     }
 
     /** 聊天页 Fragment 离开（onPause/onDestroyView）：回主界面时重挂。 */
     fun onChattingFragmentHidden() {
+        ChatPageGuard.restoreAll()
+        lastChatHit = null
         val wasActive = fragmentChatActive
         fragmentChatActive = false
         anchorLeaveSince = 0L
@@ -831,6 +1071,7 @@ internal object ThemeSurface {
      * 聊天页一出现就把主界面的壁纸遮罩**整个撤掉** —— 不存在就无从透出。
      */
     fun onChattingPageShown(activity: Activity?) {
+        confirmedMainRef = null
         noteEvent("聊天页出现(${activity?.javaClass?.simpleName ?: "?"}) → 撤遮罩")
         // 聊天页自己窗口上也清一遍：万一历史上被误挂过，一并不留
         if (activity != null) runCatching { TabWallpaperRenderer.clear(activity) }
@@ -846,6 +1087,8 @@ internal object ThemeSurface {
      * 拿不到焦点也没关系 —— 焦点监听和 onActivityResumed 都会补。
      */
     fun onChattingPageClosed() {
+        ChatPageGuard.restoreAll()
+        lastChatHit = null
         runCatching {
             liveActivities()
                 .firstOrNull {
@@ -872,6 +1115,7 @@ internal object ThemeSurface {
                 // 只置 null 的话遮罩对象仍在，任何一次重挂/保活都会把它写回来，
                 // 聊天页（半透明窗口）就会透出主界面壁纸。
                 TabWallpaperRenderer.clear(act)
+                restoreWindow(act)
             }
         }.onFailure { WeLogger.w(TAG, "撤掉主界面遮罩失败：${it.message}") }
     }
@@ -892,6 +1136,7 @@ internal object ThemeSurface {
         java.util.WeakHashMap<Activity, android.graphics.drawable.Drawable?>()
 
     private fun applyChattingWallpaper(activity: Activity) {
+        clearChatFooterBottomInset(activity)
         val src = ThemeMaterials.wallpaperSourceFor(activity, ThemeStore.activeThemeIdOrEmpty())
         if (src == null) {
             restoreWindowBackground(activity)
@@ -936,11 +1181,12 @@ internal object ThemeSurface {
             }
         }
         restoreWindowBackground(activity)
-        wallpaperAttached.remove(activity)
     }
 
     /** 撤掉所有存活页面的壁纸与窗口还原。 */
     fun removeAllLive() {
+        ChatPageGuard.restoreAll()
+        lastChatHit = null
         liveActivities().forEach { act ->
             runCatching { removeWallpaper(act) }
             runCatching { restoreWindow(act) }
@@ -971,7 +1217,7 @@ internal object ThemeSurface {
                 "  content=" + (content?.let { "${it.javaClass.simpleName} childCount=${it.childCount}" } ?: "未找到")
             )
             appendLine("  " + runCatching { TabWallpaperRenderer.describe(activity) }.getOrDefault("遮罩诊断异常"))
-            appendLine("  wallpaperAttached=" + (wallpaperAttached[activity] == true))
+            appendLine("  背景图层当前挂载=" + isAttached(activity))
         }
     }
 }

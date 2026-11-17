@@ -120,14 +120,20 @@ internal object ThemeMaterials {
 
     /** 4 个页面各自的壁纸文件；内置主题没有分页素材时用同一张全局图。 */
     fun tabWallpaperFiles(activeId: String): List<File?> {
+        ThemeStore.profileSnapshot(activeId)?.let { snapshot ->
+            return listOf("chats", "contacts", "discover", "me").map { key ->
+                (snapshot.profile.background(key) as? BackgroundRule.Image)?.let { snapshot.asset(it.asset) }
+            }
+        }
         val pack = ThemePack.active()
         val builtin: File? = BuiltinThemes.find(activeId)?.let { theme ->
             runCatching { ensureExtracted(theme) }
             ThemePaths.wallpaperFile(theme).takeIf { it.exists() }?.toFile()
         }
-        return listOf("chats", "contacts", "discover", "me").map { key ->
+        val defaults = listOf("chats", "contacts", "discover", "me").map { key ->
             pack?.wallpaperFor(key) ?: builtin
         }
+        return ThemeStore.resolveMainWallpapers(activeId, defaults)
     }
 
     /**
@@ -150,6 +156,10 @@ internal object ThemeMaterials {
         if (activity != null && !ThemePages.isLauncher(activity)) return null
 
         val key = activity?.let { ThemePages.pageWallpaperKey(it) }
+        ThemeStore.profileSnapshot(activeId)?.let { snapshot ->
+            val rule = snapshot.profile.background(key?.takeIf { it in ThemeProfile.PAGE_KEYS } ?: "chats")
+            return (rule as? BackgroundRule.Image)?.let { snapshot.asset(it.asset)?.toPath() }
+        }
         ThemePack.active()?.let { pack ->
             val candidates = buildList {
                 if (key != null) pack.wallpaperFor(key)?.let(::add)

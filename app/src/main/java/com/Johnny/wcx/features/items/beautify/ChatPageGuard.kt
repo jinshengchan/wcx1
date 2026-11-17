@@ -59,6 +59,7 @@ internal object ChatPageGuard {
     private val savedBackground = WeakHashMap<ViewGroup, android.graphics.drawable.Drawable?>()
 
     private val patched = WeakHashMap<ViewGroup, Boolean>()
+    private val installedBackground = WeakHashMap<ViewGroup, java.lang.ref.WeakReference<android.graphics.drawable.Drawable>>()
 
     /** 最近一次识别未命中的原因（诊断用；命中时写「命中」）。 */
     @Volatile
@@ -153,6 +154,9 @@ internal object ChatPageGuard {
     var mainPageInfo: String = "未检测"
         private set
 
+    var mainPageHasInput: Boolean = false
+        private set
+
     /**
      * **正向识别「当前是不是 4 个 Tab 主页面」** —— 主题背景的唯一放行条件。
      *
@@ -168,6 +172,7 @@ internal object ChatPageGuard {
      *    这是关键反证：聊天页无论别的怎么变，底部输入框一定在。
      */
     fun detectMainPage(activity: Activity, chatPageVisible: Boolean): Boolean = runCatching {
+        mainPageHasInput = false
         val decor = activity.window?.decorView as? ViewGroup ?: return false
         val content = decor.findViewById<ViewGroup>(android.R.id.content) ?: return false
         val screenH = decor.height.takeIf { it > 0 } ?: return false
@@ -189,6 +194,7 @@ internal object ChatPageGuard {
                 // 反证 1：底部输入框（聊天页铁证）
                 if (v is EditText && rect.top > screenH * 0.70f && rect.height() > 10) {
                     bottomInput = true
+                    mainPageHasInput = true
                 }
                 // 正证据 A：大面积会话列表（主页面内容区）
                 if (!bigList && isRecyclerLike(v) &&
@@ -296,22 +302,28 @@ internal object ChatPageGuard {
      */
     fun ensureOpaque(container: ViewGroup): Boolean = runCatching {
         val current = container.background
-        val alpha = when (current) {
+        val ours = current != null && current === installedBackground[container]?.get()
+        val original = if (ours) savedBackground[container] else current
+        val alpha = when (original) {
             null -> 0
-            is ColorDrawable -> current.color ushr 24 and 0xFF
+            is ColorDrawable -> original.color ushr 24 and 0xFF
             else -> 255   // 图片 / 九宫格 / 渐变：默认按不透明处理，不动它
         }
         if (alpha >= 255) {
-            patched[container] = true
+            savedBackground.remove(container)
+            installedBackground.remove(container)
             return true
         }
-        if (!savedBackground.containsKey(container)) savedBackground[container] = current
+        if (!ours) savedBackground[container] = original
         val night = (container.resources.configuration.uiMode and
             Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
         val fallback = if (night) 0xFF191919.toInt() else 0xFFFFFFFF.toInt()
         // 半透明色：保留它自己的色相，只把 alpha 拉满，视觉改动最小
-        val color = (current as? ColorDrawable)?.color?.let { (it and 0x00FFFFFF) or (0xFF shl 24) } ?: fallback
-        container.setBackgroundColor(color)
+        val color = (original as? ColorDrawable)?.color?.let { (it and 0x00FFFFFF) or (0xFF shl 24) } ?: fallback
+        if (ours && (current as? ColorDrawable)?.color == color) return true
+        val drawable = ColorDrawable(color)
+        PageWallpaperUnderlay.setBackgroundPreservingPadding(container, drawable)
+        installedBackground[container] = java.lang.ref.WeakReference(drawable)
         patched[container] = true
         WeLogger.i(TAG, "聊天页容器原背景不透明性不足，已补不透明底色")
         true
@@ -325,9 +337,15 @@ internal object ChatPageGuard {
         if (container == null) return
         runCatching {
             if (savedBackground.containsKey(container)) {
-                container.background = savedBackground.remove(container)
+                val original = savedBackground.remove(container)
+                if (container.background === installedBackground[container]?.get()) {
+                    PageWallpaperUnderlay.setBackgroundPreservingPadding(container, original)
+                }
+                installedBackground.remove(container)
                 patched.remove(container)
             }
         }.onFailure { WeLogger.w(TAG, "还原聊天页容器背景失败：${it.message}") }
     }
+
+    fun restoreAll() { savedBackground.keys.toList().forEach(::restore) }
 }

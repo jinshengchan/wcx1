@@ -6,7 +6,6 @@ import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
-import android.graphics.BitmapFactory
 import android.graphics.Outline
 import android.os.Bundle
 import android.view.MotionEvent
@@ -36,7 +35,6 @@ import com.Johnny.wcx.features.api.ui.WeMainActivityBeautifyApi
 
 import com.Johnny.wcx.features.core.SwitchFeature
 import java.lang.reflect.Method
-import com.Johnny.wcx.features.items.beautify.ThemePack
 import com.Johnny.wcx.features.items.beautify.AddMainScreenFab
 import com.Johnny.wcx.ui.utils.LifecycleOwnerProvider
 import com.Johnny.wcx.ui.utils.dpToPx
@@ -544,7 +542,9 @@ object HomeSidePanel : SwitchFeature() {
                     FrameLayout.LayoutParams.MATCH_PARENT,
                 )
             )
-            applyPanelBackground()
+            // ThemeOwnedBackground is the sole owner, including legacy wallpaper_panel fallback.
+            panelBgView.setImageDrawable(null)
+            panelBgView.alpha = 0f
 
             parent.addView(
                 contentWrapper,
@@ -1400,27 +1400,6 @@ object HomeSidePanel : SwitchFeature() {
             // bringToFront() 每次都会在父容器里摘掉再插回去并触发 requestLayout，
             // 放进逐帧动画里就是持续掉帧。只在刚变可见时抬一次。
             if (becameVisible) overlayRoot.bringToFront()
-        }
-
-        /** 侧滑栏背景图（主题包里的 wallpaper_panel.png），透明度由 theme_panel_alpha 控制。 */
-        private fun applyPanelBackground() {
-            runCatching {
-                val pack = ThemePack.active()
-                val file = pack?.asset(pack.manifest.optString("wallpaper_panel"))
-                if (file == null || !file.isFile) {
-                    panelBgView.setImageDrawable(null)
-                    panelBgView.alpha = 0f
-                    return
-                }
-                val bitmap = BitmapFactory.decodeFile(file.absolutePath)
-                if (bitmap == null) {
-                    panelBgView.alpha = 0f
-                    return
-                }
-                panelBgView.setImageBitmap(bitmap)
-                val pct = com.Johnny.wcx.preferences.WePrefs.getIntOrDef("theme_panel_alpha", 100)
-                panelBgView.alpha = pct.coerceIn(0, 100) / 100f
-            }.onFailure { com.Johnny.wcx.utils.WeLogger.w("HomeSidePanel", "加载侧滑栏背景失败：${it.message}") }
         }
 
         private fun updateDrawerWidth(): Boolean {

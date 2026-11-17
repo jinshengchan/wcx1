@@ -86,6 +86,7 @@ object CustomMessageBubbles : ClickableFeature(), WeChatMessageViewApi.ICreateVi
 
     // Guards the parse-failure toast so it fires at most once per Feature lifecycle.
     private var colorParseErrorToasted = false
+    private var unsupportedThemeBubbleWarned = false
 
     // The bubble images are source nine-patch PNGs (with black border markers), read in applyBubble.
     private const val LEFT_BUBBLE_FILE = "left_bubble.9.png"   // 对方
@@ -117,10 +118,12 @@ object CustomMessageBubbles : ClickableFeature(), WeChatMessageViewApi.ICreateVi
         colorParseErrorToasted = false
 //        hookVoiceIconTint()
         WeChatMessageViewApi.addListener(this)
+        refreshBoundViews()
     }
 
     override fun onDisable() {
         WeChatMessageViewApi.removeListener(this)
+        refreshBoundViews()
     }
 
     /**
@@ -190,27 +193,51 @@ object CustomMessageBubbles : ClickableFeature(), WeChatMessageViewApi.ICreateVi
         view.javaClass == TextView::class.java
                 && view.tag?.javaClass?.name?.startsWith("com.tencent.mm.ui.chatting.viewitems") == true
 
+    private data class Binding(val type: MessageType?, val self: Boolean)
+    private val boundRows = java.util.WeakHashMap<View, Binding>()
+    private val rowAttach = object : View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(view: View) {
+            boundRows[view]?.let { renderBound(view, it) }
+        }
+        override fun onViewDetachedFromWindow(view: View) { ChatThemeAppearance.restoreRow(view) }
+    }
+
+    internal fun refreshBoundViews() {
+        boundRows.entries.toList().forEach { (view, binding) ->
+            ChatThemeAppearance.restoreRow(view)
+            if (view.isAttachedToWindow) renderBound(view, binding)
+        }
+    }
+
     override fun onCreateView(param: XC_MethodHook.MethodHookParam, view: View) {
-        val msgInfo = WeChatMessageViewApi.getMsgInfoFromParam(param)
+        val message = WeChatMessageViewApi.getMsgInfoFromParam(param)
+        val binding = Binding(message.type, message.isSelfSender)
+        if (!boundRows.containsKey(view)) view.addOnAttachStateChangeListener(rowAttach)
+        boundRows[view] = binding
+        renderBound(view, binding)
+    }
+
+    private fun renderBound(view: View, msgInfo: Binding) {
+        ChatThemeAppearance.restoreRow(view)
 
         @Suppress("DEPRECATION")
         when (msgInfo.type) {
             MessageType.TEXT, MessageType.LINK, MessageType.GROUP_NOTE, MessageType.QUOTE -> {
-                val neatTextView = view.findViewWhich<MMNeat7extView> { it is MMNeat7extView }!!
-                applyForegroundColor(neatTextView, msgInfo.isSelfSender)
-                applyBubble(neatTextView, msgInfo.isSelfSender)
+                val neatTextView = view.findViewWhich<MMNeat7extView> { it is MMNeat7extView } ?: return
+                applyForegroundColor(neatTextView, msgInfo.self, view)
+                applyBubble(neatTextView, msgInfo.self, msgInfo.type == MessageType.TEXT)
             }
 
             MessageType.VOIP -> {
                 val bubbleView = view.findViewWhich<LinearLayout> {
                     it.javaClass == LinearLayout::class.java
                             && it.tag?.javaClass?.name?.startsWith("com.tencent.mm.ui.chatting.viewitems") == true
-                }!!
-                val bubbleTextView = bubbleView.findViewWhich<TextView> { it is TextView }!!
-                val bubbleIconView = bubbleView.findViewWhich<LinearLayout> { it !== bubbleView && it is LinearLayout }!!
-                applyForegroundColor(bubbleTextView, msgInfo.isSelfSender)
-                applyForegroundColorByBackgroundColorFilter(bubbleIconView, msgInfo.isSelfSender)
-                applyBubble(bubbleView, msgInfo.isSelfSender)
+                } ?: return
+                val bubbleTextView = bubbleView.findViewWhich<TextView> { it is TextView } ?: return
+                val bubbleIconView = bubbleView.findViewWhich<LinearLayout> { it !== bubbleView && it is LinearLayout } ?: return
+                applyForegroundColor(bubbleTextView, msgInfo.self, view)
+                applyForegroundColorByBackgroundColorFilter(bubbleIconView, msgInfo.self)
+                applyBubble(bubbleView, msgInfo.self)
             }
 
             MessageType.VOICE -> {
@@ -221,7 +248,7 @@ object CustomMessageBubbles : ClickableFeature(), WeChatMessageViewApi.ICreateVi
                 //     whose bubble background WeChat resets on every bind
                 // Style every bubble-bearing view so the overlay keeps our custom bubble too.
                 view.findViewsWhich<View> { hasBubbleTag(it) || it is AnimImageView }
-                    .forEach { applyBubble(it, msgInfo.isSelfSender) }
+                    .forEach { applyBubble(it, msgInfo.self) }
 
                 // The visible duration text (e.g. "5''") lives in a separate untagged TextView
                 // that shares the innermost bubble container with the static bubble and the wave
@@ -234,14 +261,14 @@ object CustomMessageBubbles : ClickableFeature(), WeChatMessageViewApi.ICreateVi
                             && (0 until v.childCount).any { v.getChildAt(it) is AnimImageView }
                 }
                 container.findViewsWhich<TextView> { it is TextView }
-                    .forEach { applyForegroundColor(it, msgInfo.isSelfSender) }
+                    .forEach { applyForegroundColor(it, msgInfo.self, view) }
 
                 // The play icon is a compound drawable, not text, so setTextColor never touches it.
                 // Its frames are built via uk.e() which bakes in a PorterDuff color filter, so a tint
                 // list can't override them either. Overwrite the filter directly. The idle icon sits
                 // on the static bubble now; the playing frames get swapped onto the AnimImageView on
                 // click, so we stash the color as a tag and let hookVoiceIconTint() re-apply it then.
-//                val iconColor = getForegroundColor(view.context, msgInfo.isSelfSender)
+//                val iconColor = getForegroundColor(view.context, msgInfo.self)
 //                if (iconColor != -1) {
 //                    container.findViewsWhich<TextView> { it is TextView }.forEach { tv ->
 //                        if (tv is AnimImageView) tv.setTag(ICON_TINT_TAG, iconColor)
@@ -252,28 +279,44 @@ object CustomMessageBubbles : ClickableFeature(), WeChatMessageViewApi.ICreateVi
 
             else -> {}
         }
+        ChatThemeAppearance.applyBody(view, msgInfo.type, msgInfo.self)
     }
 
-    private fun applyBubble(bubbleView: View, isSelfSender: Boolean) {
+    private fun applyBubble(bubbleView: View, isSelfSender: Boolean, useTheme: Boolean = true) {
         val context = bubbleView.context
+        val configured = if (useTheme) ChatThemeAppearance.bubble(context, isSelfSender) else ChatThemeAppearance.Bubble.Inherit
+        if (configured === ChatThemeAppearance.Bubble.Native) return
+        val theme = configured
+        val original = bubbleView.background
+        val originalPadding = intArrayOf(bubbleView.paddingLeft, bubbleView.paddingTop, bubbleView.paddingRight, bubbleView.paddingBottom)
+        if (theme is ChatThemeAppearance.Bubble.Solid) {
+            bubbleView.background = android.graphics.drawable.ColorDrawable(theme.color)
+            bubbleView.setPadding(originalPadding[0], originalPadding[1], originalPadding[2], originalPadding[3])
+            ChatThemeAppearance.rememberBubble(bubbleView, original, originalPadding)
+            return
+        }
+        if (theme === ChatThemeAppearance.Bubble.Inherit && !isEnabled) return
 
         val rawColor = if (isSelfSender) {
             if (context.isDarkMode) bgThisDark else bgThisLight
         } else {
             if (context.isDarkMode) bgThatDark else bgThatLight
         }
-        val color = parseColor(context, rawColor, label = "背景色", fallback = 0)
+        val color = if (theme is ChatThemeAppearance.Bubble.Image) 0 else parseColor(context, rawColor, label = "背景色", fallback = 0)
 
         val fileName = if (isSelfSender) RIGHT_BUBBLE_FILE else LEFT_BUBBLE_FILE
-        val file = KnownPaths.moduleAssets / fileName
+        val file = if (theme is ChatThemeAppearance.Bubble.Image) theme.file.toPath() else KnownPaths.moduleAssets / fileName
 
         val bitmap = if (file.exists()) {
             runCatching { BitmapFactory.decodeFile(file.absolutePathString()) }.getOrNull()
         } else null
 
-        if (bitmap == null) {
+        if (bitmap == null || (theme is ChatThemeAppearance.Bubble.Image && (bitmap.width <= 2 || bitmap.height <= 2))) {
             if (color != 0) {
-                bubbleView.background?.mutate()?.setTint(color)
+                val drawable = original?.constantState?.newDrawable()?.mutate() ?: return
+                drawable.setTint(color)
+                bubbleView.background = drawable
+                ChatThemeAppearance.rememberBubble(bubbleView, original, originalPadding)
             }
             return
         }
@@ -287,6 +330,13 @@ object CustomMessageBubbles : ClickableFeature(), WeChatMessageViewApi.ICreateVi
         val bitmapCreateBitmap = Bitmap.createBitmap(bitmap, 1, 1, bitmap.width - 2, bitmap.height - 2)
         val arrayList1 = getRanges(bitmap, z = true, z2 = false)
         val arrayList2 = getRanges(bitmap, z = false, z2 = false)
+        if (theme is ChatThemeAppearance.Bubble.Image && (arrayList1.isEmpty() || arrayList2.isEmpty())) {
+            if (!unsupportedThemeBubbleWarned) {
+                unsupportedThemeBubbleWarned = true
+                WeLogger.w(TAG, "主题气泡缺少九宫格标记，跳过该图片")
+            }
+            return
+        }
         val range1 = getRanges(bitmap, z = true, z2 = true).firstOrNull()
         val range2 = getRanges(bitmap, z = false, z2 = true).firstOrNull()
         val rect = Rect(
@@ -341,10 +391,12 @@ object CustomMessageBubbles : ClickableFeature(), WeChatMessageViewApi.ICreateVi
             }
         }
 
+        if (theme is ChatThemeAppearance.Bubble.Image) stateListDrawable.alpha = (theme.opacity * 255).toInt().coerceIn(0, 255)
         bubbleView.apply {
             background = stateListDrawable
             setPadding(paddingLeft, paddingTop, paddingRight, paddingBottom)
         }
+        ChatThemeAppearance.rememberBubble(bubbleView, original, originalPadding)
     }
 
     /**
@@ -368,6 +420,7 @@ object CustomMessageBubbles : ClickableFeature(), WeChatMessageViewApi.ICreateVi
     private const val NO_FOREGROUND_COLOR = Int.MIN_VALUE
 
     private fun getForegroundColor(context: Context, isSelfSender: Boolean): Int {
+        if (!isEnabled) return NO_FOREGROUND_COLOR
         val rawColor = if (isSelfSender) {
             if (context.isDarkMode) thisDark else thisLight
         } else {
@@ -376,28 +429,34 @@ object CustomMessageBubbles : ClickableFeature(), WeChatMessageViewApi.ICreateVi
         return parseColor(context, rawColor, label = "前景色", fallback = NO_FOREGROUND_COLOR)
     }
 
-    private fun applyForegroundColor(view: MMNeat7extView, isSelfSender: Boolean) {
+    private fun applyForegroundColor(view: MMNeat7extView, isSelfSender: Boolean, owner: View) {
         val color = getForegroundColor(view.context, isSelfSender)
         if (color == NO_FOREGROUND_COLOR) return
 
-        view.setTextColor(color)
+        val text = runCatching { view.wrappedTextView }.getOrNull() ?: return
+        ChatThemeAppearance.applyText(text, color, owner)
     }
 
-    private fun applyForegroundColor(view: TextView, isSelfSender: Boolean) {
+    private fun applyForegroundColor(view: TextView, isSelfSender: Boolean, owner: View) {
         val color = getForegroundColor(view.context, isSelfSender)
         if (color == NO_FOREGROUND_COLOR) return
 
-        view.setTextColor(color)
+        ChatThemeAppearance.applyText(view, color, owner)
     }
 
     private fun applyForegroundColorByBackgroundColorFilter(view: View, isSelfSender: Boolean) {
         val color = getForegroundColor(view.context, isSelfSender)
         if (color == NO_FOREGROUND_COLOR) return
 
-        view.background?.mutate()?.colorFilter = PorterDuffColorFilter(
+        val original = view.background ?: return
+        val drawable = original.constantState?.newDrawable()?.mutate() ?: return
+        drawable.colorFilter = PorterDuffColorFilter(
             color,
             PorterDuff.Mode.SRC_IN
         )
+        val padding = intArrayOf(view.paddingLeft, view.paddingTop, view.paddingRight, view.paddingBottom)
+        view.background = drawable
+        ChatThemeAppearance.rememberBubble(view, original, padding)
     }
 
     /**

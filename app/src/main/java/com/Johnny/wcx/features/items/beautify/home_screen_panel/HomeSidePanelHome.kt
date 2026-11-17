@@ -1,5 +1,7 @@
 package com.Johnny.wcx.features.items.beautify.home_screen_panel
 
+import com.Johnny.wcx.features.items.beautify.ThemeOwnedAppearance
+import com.Johnny.wcx.features.items.beautify.ThemeOwnedBackground
 import android.graphics.PorterDuff
 import android.widget.ImageView
 import androidx.compose.animation.core.Animatable
@@ -105,6 +107,7 @@ internal fun HomeSidePanelHome(
         }
     }
     val editorTranslation = with(LocalDensity.current) { 8.dp.toPx() }
+    ThemeOwnedBackground(ThemeOwnedAppearance.current(), "drawer", "list", Modifier.fillMaxSize()) {
     LazyColumn(
         state = listState,
         userScrollEnabled = dragSnapshot == null,
@@ -124,12 +127,14 @@ internal fun HomeSidePanelHome(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item(key = "profile-header") {
+            ThemeOwnedBackground(ThemeOwnedAppearance.current(), "drawer", "header", Modifier.fillMaxWidth()) {
             HomeSidePanelProfileHeader(
                 profile = state.profile,
                 editing = state.editing,
                 panelState = panelState,
                 modifier = Modifier.padding(start = 18.dp, top = 14.dp, end = 18.dp),
             )
+            }
         }
         displayedCards.forEachIndexed { visualIndex, indexedCard ->
             if (cardInsertionIndex == visualIndex) {
@@ -196,6 +201,7 @@ internal fun HomeSidePanelHome(
         item(key = "bottom-space") {
             Box(Modifier.size(4.dp))
         }
+    }
     }
 }
 
@@ -392,6 +398,7 @@ private fun HomeSidePanelProfileHeader(
         ) {
             Text(
                 homeSidePanelProfileDisplayName(profile, "微信用户"),
+                color = ThemeOwnedAppearance.color(ThemeOwnedAppearance.current(), "drawer", "accountInfo", Color.Unspecified),
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
@@ -558,9 +565,9 @@ internal fun HomeSidePanelToolbarContent(
         ) {
             Text(
                 text = homeSidePanelProfileDisplayName(profile, "微信用户"),
+                color = ThemeOwnedAppearance.color(ThemeOwnedAppearance.current(), "drawer", "accountInfo", MaterialTheme.colorScheme.onSurface),
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

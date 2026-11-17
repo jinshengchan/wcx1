@@ -16,21 +16,10 @@ import java.io.File
 /**
  * 4 个 Tab（主页 / 通讯录 / 发现 / 我）主题背景渲染器 —— 2026-10-27 从零重写。
  *
- * ## 为什么用 DecorView 的 foreground（前景遮罩）
- *
- * 历史踩过的三种做法全部放弃：
- * 1. 往 DecorView index 0 插层：会改变子节点顺序，微信 LauncherUI 空闲时预加载聊天页
- *    （`com.tencent.mm.ui.bg.queueIdle`）按索引找窗口容器拿到错节点 → `setVisibility` NPE 崩微信。
- * 2. 插进 `android.R.id.content` 底层：被微信各页不透明根容器整块盖住，永远看不见。
- * 3. 自绘 View 挂 DecorView 顶层：后台 Activity 不走 layout，那一层永远 0×0 画不出来。
- *
- * foreground 一次解决全部三个问题：
- * - **绘制顺序**：`View#dispatchDraw` 之后才画 foreground，位于**所有子 View 之上**，
- *   任何容器底色都盖不住它（不需要清背景、不需要近千行清底板逻辑）。
- * - **不新增子 View**：`childCount` / `getChildAt(0)` 完全不变，微信按索引找容器的代码不受影响。
- * - **尺寸**：bounds 由 DecorView 自身决定，DecorView 必然布局，不存在 0×0。
- * - **触摸**：foreground 只负责画，**不参与事件分发** —— 点击、滑动、长按全部照常落到原页面。
- * - **浓度**：用 [Drawable.setAlpha] 表达「壁纸透明度 %」，文字 / 时间 / 分割线始终透得过来。
+ * 全屏模式由 [PageWallpaperUnderlay] 绘制窗口背景并维护可逆的透明底色，
+ * [MainPageAppearance] 负责文字和图标；本类管理解码缓存、模式切换和诊断。
+ * 兼容模式保留 DecorView.foreground 半透明遮罩。两种模式均不插入或移动子视图，
+ * 避免影响微信按子节点索引查找窗口容器，也不参与触摸分发。
  */
 internal object TabWallpaperRenderer {
 
@@ -58,6 +47,11 @@ internal object TabWallpaperRenderer {
     /** 只对挂过的窗口做清理，避免白跑。 */
     private val masked = java.util.WeakHashMap<ViewGroup, Boolean>()
 
+    /** Settings hide the launcher wallpaper; preserve the scene before that cleanup. */
+    private val detachedSnapshots = java.util.WeakHashMap<ViewGroup, String>()
+    private val renderedTabs = java.util.WeakHashMap<ViewGroup, Int>()
+    private val pageSnapshots = java.util.WeakHashMap<ViewGroup, LinkedHashMap<Int, String>>()
+
     // ── 诊断快照（主题诊断页直接读，不用再猜） ──
     @Volatile var lastAt = 0L
         private set
@@ -71,13 +65,14 @@ internal object TabWallpaperRenderer {
         private set
     @Volatile private var lastDrawable: WallpaperMaskDrawable? = null
 
-    private fun ok(activity: Activity, file: File, tab: Int, alphaPct: Int): String {
+    private fun ok(activity: Activity, source: String, tab: Int, alphaPct: Int, mode: String = "前景遮罩"): String {
+        (activity.window?.decorView as? ViewGroup)?.let { renderedTabs[it] = tab }
         lastAt = System.currentTimeMillis()
         lastTab = tab
-        lastPath = file.absolutePath
+        lastPath = source
         lastAlphaPct = alphaPct
-        lastResult = "ok"
-        WeLogger.d(TAG, "前景遮罩已写入 ${activity.javaClass.simpleName} tab=$tab alpha=${alphaPct}% ${file.name}")
+        lastResult = "ok($mode)"
+        WeLogger.d(TAG, "$mode 已写入 ${activity.javaClass.simpleName} tab=$tab alpha=${alphaPct}% $source")
         return "ok"
     }
 
@@ -88,7 +83,7 @@ internal object TabWallpaperRenderer {
     }
 
     /**
-     * 写入 / 刷新某个窗口的前景遮罩。
+     * 写入 / 刷新某个窗口的背景及文字。
      *
      * @param file      当前 Tab 的壁纸文件；null 表示这页没有素材（会清掉遮罩）
      * @param tab       当前 Tab，仅用于快照与日志
@@ -100,6 +95,11 @@ internal object TabWallpaperRenderer {
         file: File?,
         tab: Int,
         alphaPct: Int,
+        useUnderlay: Boolean = false,
+        textColorEnabled: Boolean = true,
+        titleColor: Int? = null,
+        profile: ThemeProfile? = null,
+        backgroundOpacity: Float = 1f,
         shouldDraw: () -> Boolean = { true }
     ): String {
         val decor = activity.window?.decorView as? ViewGroup ?: return fail("decorView 不可用")
@@ -107,11 +107,50 @@ internal object TabWallpaperRenderer {
             clear(activity)
             return fail("本页没有壁纸文件")
         }
-        if (!file.exists()) return fail("文件不存在：${file.absolutePath}")
-        val bmp = loadBitmap(file) ?: return fail("解码失败：${file.absolutePath}")
+        if (!file.exists()) { clear(activity); return fail("文件不存在：${file.absolutePath}") }
+        val bmp = loadBitmap(file) ?: run { clear(activity); return fail("解码失败：${file.absolutePath}") }
+        return renderDecoded(activity, bmp, file.absolutePath, tab, alphaPct, useUnderlay,
+            textColorEnabled, titleColor, profile, backgroundOpacity, shouldDraw)
+    }
 
+    fun applyColor(activity: Activity, argb: Int, tab: Int, textColorEnabled: Boolean = true,
+                   titleColor: Int? = null, profile: ThemeProfile? = null, shouldDraw: () -> Boolean = { true }): String {
+        val key = "solid:$argb"
+        val bitmap = bitmapCache[key]?.takeUnless { it.isRecycled } ?: Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+            .apply { eraseColor(argb); bitmapCache[key] = this }
+        return renderDecoded(activity, bitmap, String.format("solid:#%08X", argb), tab, 100, true,
+            textColorEnabled, titleColor, profile, 1f, shouldDraw, false)
+    }
+
+    private fun renderDecoded(activity: Activity, bmp: Bitmap, source: String, tab: Int, alphaPct: Int,
+                              useUnderlay: Boolean, textColorEnabled: Boolean, titleColor: Int?,
+                              profile: ThemeProfile?, opacity: Float, shouldDraw: () -> Boolean,
+                              allowForegroundFallback: Boolean = true): String {
+        val decor = activity.window?.decorView as? ViewGroup ?: return fail("decorView 不可用")
+
+        if (renderedTabs[decor]?.let { it != tab } == true) rememberScene(activity)
+        var underlayFailure: String? = null
+        if (useUnderlay) {
+            clearForeground(activity)
+            val result = PageWallpaperUnderlay.apply(activity, bmp, opacity, shouldDraw)
+            if (result == "ok") {
+                MainPageAppearance.apply(activity, bmp, textColorEnabled, titleColor, profile, opacity,
+                    PageWallpaperUnderlay.backdropColor(activity), ThemeStore.mainWallpaperEnabled(), shouldDraw)
+                return ok(activity, source, tab, (opacity * 100).toInt(), "全屏底图")
+            }
+            if (!allowForegroundFallback) {
+                MainPageAppearance.apply(activity, null, textColorEnabled, titleColor, profile, shouldDraw)
+                return fail("等待底图：$result")
+            }
+            underlayFailure = result
+            WeLogger.w(TAG, "页面底图未就绪，使用兼容遮罩：$result")
+        }
+        PageWallpaperUnderlay.clear(activity)
+        MainPageAppearance.apply(activity, null, textColorEnabled, titleColor, profile, shouldDraw)
+
+        val effectiveAlpha = (alphaPct.coerceIn(MIN_ALPHA_PCT, MAX_ALPHA_PCT) * opacity.coerceIn(0f, 1f)).toInt()
         val mask = WallpaperMaskDrawable(bmp, shouldDraw)
-        mask.setAlpha(alphaPct.coerceIn(MIN_ALPHA_PCT, MAX_ALPHA_PCT) * 255 / 100)
+        mask.setAlpha(effectiveAlpha * 255 / 100)
         if (!savedForeground.containsKey(decor)) savedForeground[decor] = decor.foreground
         runCatching { decor.foreground = mask }
             .onFailure { return fail("setForeground 抛异常：${it.message}") }
@@ -124,8 +163,10 @@ internal object TabWallpaperRenderer {
             runCatching { mask.setBounds(0, 0, decor.width, decor.height) }
         }
         runCatching { decor.invalidate() }
-        reassertLater(activity, mask, alphaPct)
-        return ok(activity, file, tab, alphaPct)
+        reassertLater(activity, mask, effectiveAlpha)
+        val result = ok(activity, source, tab, effectiveAlpha)
+        if (underlayFailure != null) lastResult = "回退前景遮罩：$underlayFailure"
+        return result
     }
 
     /**
@@ -144,7 +185,7 @@ internal object TabWallpaperRenderer {
                 if (decor.foreground === mask) return@postDelayed
                 // 被微信换掉了 → 写回我们的遮罩（原 foreground 早在第一次 apply 时备份过）
                 runCatching {
-                    mask.setAlpha(alphaPct.coerceIn(MIN_ALPHA_PCT, MAX_ALPHA_PCT) * 255 / 100)
+                    mask.setAlpha(alphaPct.coerceIn(0, MAX_ALPHA_PCT) * 255 / 100)
                     if (decor.width > 0 && decor.height > 0) mask.setBounds(0, 0, decor.width, decor.height)
                     decor.foreground = mask
                     decor.invalidate()
@@ -154,22 +195,67 @@ internal object TabWallpaperRenderer {
         }
     }
 
-    /** 彻底撤销：还回窗口原来的 foreground。 */
+    /** Only live renderer state is evidence; a previous restore reason must not replace it. */
+    private fun rememberScene(activity: Activity): String? {
+        val decor = activity.window?.decorView as? ViewGroup ?: return null
+        val underlay = PageWallpaperUnderlay.describe(activity, includeHistory = false)
+        if (underlay == null && !masked.containsKey(decor)) return null
+        val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+        val tab = renderedTabs[decor]
+        val snapshot = "$time Tab=${tab ?: "未知"} ${underlay ?: describeCurrent(activity)}\n    ${ThemeHostAdapter.describe(decor)}"
+        if (tab in 0..3) {
+            val pages = pageSnapshots.getOrPut(decor) { LinkedHashMap() }
+            pages.remove(tab)
+            pages[tab!!] = snapshot
+        }
+        return snapshot
+    }
+
+    /** 撤销两种图层，并保留撤销前的真实绘制现场。 */
     fun clear(activity: Activity) {
+        val decor = activity.window?.decorView as? ViewGroup
+        rememberScene(activity)?.let { snapshot ->
+            if (decor != null) detachedSnapshots[decor] = snapshot
+            WeLogger.i(TAG, "背景撤销前：$snapshot")
+        }
+        renderedTabs.remove(decor)
+        PageWallpaperUnderlay.clear(activity)
+        MainPageAppearance.clear(activity)
+        clearForeground(activity)
+    }
+
+    private fun clearForeground(activity: Activity) {
         val decor = activity.window?.decorView as? ViewGroup ?: return
         if (masked.remove(decor) == null) return
         val mask = masks.remove(decor)
         if (lastDrawable === mask) lastDrawable = null
-        runCatching { decor.foreground = savedForeground.remove(decor) }
+        val original = savedForeground.remove(decor)
+        runCatching { if (decor.foreground === mask) decor.foreground = original }
             .onFailure { WeLogger.w(TAG, "还原 foreground 失败：${it.message}") }
         runCatching { decor.invalidate() }
     }
 
     fun isMasked(activity: Activity): Boolean =
-        runCatching { masked[activity.window?.decorView as? ViewGroup] == true }.getOrDefault(false)
+        PageWallpaperUnderlay.isAttached(activity) ||
+            runCatching {
+                val decor = activity.window?.decorView as? ViewGroup ?: return@runCatching false
+                val mask = masks[decor]
+                mask != null && decor.foreground === mask
+            }.getOrDefault(false)
 
-    /** 诊断文本：这一屏到底有没有遮罩、画了几次、尺寸多少。 */
+    /** 当前状态和上次撤销前的现场分开展示，避免把历史写入当作仍在显示。 */
     fun describe(activity: Activity): String {
+        val decor = activity.window?.decorView as? ViewGroup
+        val previous = detachedSnapshots[decor]
+        val appearance = MainPageAppearance.describe(activity)?.let { "\n  $it" }.orEmpty()
+        val pages = pageSnapshots[decor]?.entries?.filter { it.value != previous }?.joinToString("") {
+            "\n  切页前现场 Tab=${it.key}：${it.value}"
+        }.orEmpty()
+        return describeCurrent(activity) + appearance + (if (previous == null) "" else "\n  上次撤销前：$previous") + pages
+    }
+
+    private fun describeCurrent(activity: Activity): String {
+        PageWallpaperUnderlay.describe(activity)?.let { return it }
         val decor = activity.window?.decorView as? ViewGroup ?: return "decorView 不可用"
         val mask = masks[decor]
         val fg = decor.foreground
