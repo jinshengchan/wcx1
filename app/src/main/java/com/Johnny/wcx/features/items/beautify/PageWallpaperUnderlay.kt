@@ -1571,8 +1571,9 @@ internal object PageWallpaperUnderlay {
         if (MainSurfaceBackgrounds.owns(view) && !(view is ListView && state.wallpaper.shouldDraw())) return
         val patch = state.patches.firstOrNull { it.view.get() === view }
         if (patch != null && isPatchInstalled(patch, view)) return
-        val lockedFirstScreen = structural &&
-            view.javaClass.simpleName == "FirstScreenFrameLayout" &&
+        val simpleName = view.javaClass.simpleName
+        val lockedFirstScreen = (structural || simpleName == "ChattingUILayout" || simpleName == "SwipeBackLayout") &&
+            (simpleName == "FirstScreenFrameLayout" || simpleName == "ChattingUILayout" || simpleName == "SwipeBackLayout") &&
             view.width >= (state.decor.get()?.width ?: Int.MAX_VALUE) * 0.90f
         val original = view.background
         if (original == null && !lockedFirstScreen) {

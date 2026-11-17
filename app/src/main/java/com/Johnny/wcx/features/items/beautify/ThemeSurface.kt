@@ -652,8 +652,13 @@ internal object ThemeSurface {
                         val isBottomInsetStrip = bottom >= decor.height - 4 &&
                             top >= decor.height - 100 &&
                             view.width >= decor.width * 0.75f
-                        // 2. ChatFooter 或聊天底部容器（top >= decor.height - 260 && bottom >= decor.height - 4）
-                        val isFooterShell = (insideFooter || top >= decor.height - 260) &&
+                        // 2. 聊天页全屏根容器（SwipeBackLayout@0-2608 #FFFFFFFF、ChattingUILayout@0-2608 #FFEDEDED + padB=48 等）
+                        val isChatRootContainer = view is ViewGroup &&
+                            bottom >= decor.height - 4 &&
+                            view.width >= decor.width * 0.75f &&
+                            (simple == "ChattingUILayout" || simple == "SwipeBackLayout" || simple == "FrostedContentView" || top == 0)
+                        // 3. ChatFooter 或聊天底部容器（top >= decor.height - 260 && bottom >= decor.height - 4）
+                        val isFooterShell = (insideFooter || top >= decor.height - 260 || isChatRootContainer) &&
                             bottom >= decor.height - 4 &&
                             view.width >= decor.width * 0.75f &&
                             !isInputBox(view, top, bottom) &&
