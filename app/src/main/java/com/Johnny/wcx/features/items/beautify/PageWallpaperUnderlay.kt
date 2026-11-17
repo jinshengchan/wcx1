@@ -132,6 +132,8 @@ internal object PageWallpaperUnderlay {
         // the taskbar animation repeatedly writes alpha while the shelf moves.
         // INVISIBLE (never GONE) retains layout and avoids frame-by-frame alpha tug-of-war.
         val mutedPainterVisibility = WeakHashMap<View, Int>()
+        val mutedPaintColors = WeakHashMap<Paint, Int>()
+        var taskBarPaintZeroed = 0
         var lastTaskBarScanAt = 0L
         var taskBarState = "未观测"
         val retainedRows = LinkedHashSet<String>()
@@ -288,7 +290,14 @@ internal object PageWallpaperUnderlay {
      * the mini-program shelf expands/moves down, leave native painting alone.
      */
     fun drawScrollingHeaderUnderChildren(header: View, canvas: Canvas): Boolean {
-        if (header.javaClass.name != "com.tencent.mm.plugin.taskbar.ui.TaskBarContainer") return false
+        val clsName = header.javaClass.name
+        val simpleName = header.javaClass.simpleName
+        val isTaskBar = clsName == "com.tencent.mm.plugin.taskbar.ui.TaskBarContainer" || simpleName == "TaskBarContainer"
+        val isActionBar = simpleName == "ActionBarContainer" || simpleName == "ActionBarOverlayLayout"
+        val isHeaderLayout = header is android.widget.LinearLayout ||
+            header is android.widget.RelativeLayout ||
+            header is android.widget.FrameLayout
+        if (!isTaskBar && !isActionBar && !isHeaderLayout) return false
         val decor = header.rootView as? ViewGroup ?: return false
         val state = states[decor]?.get() ?: return false
         if (decor.background !== state.wallpaper || !state.wallpaper.shouldDraw()) return false
@@ -296,30 +305,36 @@ internal object PageWallpaperUnderlay {
         val currentPage = runCatching {
             pager.javaClass.getMethod("getCurrentItem").invoke(pager) as? Int
         }.getOrNull()
-        if (currentPage != 0 || !pager.isShown || !header.isShown) {
+        if (currentPage != 0 || !header.isShown) {
             state.scrollingTitleSkips++
             return false
         }
-        var parent = header.parent as? View
-        var isConversationHeader = false
-        for (i in 0 until 7) {
-            val node = parent ?: break
-            if (node is ListView && node.javaClass.simpleName == "ConversationListView") {
-                isConversationHeader = true
-                break
-            }
-            parent = node.parent as? View
+        // Only skip when the mini-program shelf is confirmed fully expanded
+        if (state.taskBarState.startsWith("完全展开")) {
+            state.scrollingTitleSkips++
+            return false
         }
-        if (!isConversationHeader || header.width < decor.width * 0.80f ||
-            header.height <= 0 || header.height > decor.height * 0.18f) return false
+        if (!isActionBar) {
+            var parent = header.parent as? View
+            var isConversationHeader = false
+            for (i in 0 until 8) {
+                val node = parent ?: break
+                if (node is ListView && node.javaClass.simpleName == "ConversationListView") {
+                    isConversationHeader = true
+                    break
+                }
+                parent = node.parent as? View
+            }
+            if (!isConversationHeader) return false
+        }
+        if (header.width < decor.width * 0.70f || header.height <= 0) return false
 
         val location = IntArray(2)
         val rootLocation = IntArray(2)
         header.getLocationOnScreen(location)
         decor.getLocationOnScreen(rootLocation)
-        // Only the collapsed, moving top strip; not the full mini-app shelf.
         val top = location[1] - rootLocation[1]
-        if (top > decor.height * 0.08f || top + header.height <= 0) return false
+        if (top > decor.height * 0.85f || top + header.height <= 0) return false
 
         val checkpoint = canvas.save()
         try {
@@ -390,10 +405,11 @@ internal object PageWallpaperUnderlay {
         // layout pass (particularly on returning from the mini-program pull-down).
         // Keep this check O(1); it never touches children, badges or touch handlers.
         state.firstScreen?.get()?.let { shell ->
-            val color = (shell.background as? ColorDrawable)?.color
+            val bg = shell.background
+            val color = (bg as? ColorDrawable)?.color
             if (shell.isShown && shell.width >= decor.width * 0.9f &&
-                color != null && Color.alpha(color) == 255 && isNeutralColor(color) &&
-                state.patches.none { it.view.get() === shell && isPatchInstalled(it, shell) }) {
+                bg !is LockedTransparentShell &&
+                ((color != null && Color.alpha(color) != 0 && isNeutralColor(color)) || isNeutralSurface(bg))) {
                 state.firstScreenRepairs++
                 makeTransparent(state, shell, true)
             }
@@ -488,7 +504,8 @@ internal object PageWallpaperUnderlay {
         }
         fun walk(view: View, depth: Int) {
             if (depth > MAX_DEPTH || state.visited++ >= MAX_NODES || view.visibility != View.VISIBLE) return
-            if (view is ImageView || !view.getGlobalVisibleRect(visibleRect)) return
+            if (!view.getGlobalVisibleRect(visibleRect)) return
+            if (view is ImageView && view.width < decor.width * 0.60f) return
             if (view !== decor) {
                 val bottomTab = ThemeHostAdapter.isBottomTab(view)
                 val toolbar = MainSurfaceBackgrounds.isToolbar(view)
@@ -830,10 +847,97 @@ internal object PageWallpaperUnderlay {
      * headers of tab 0. No reparenting, intercepting touches, or disabling
      * the list's native vertical scroll.
      */
+    private val paintFieldsCache = HashMap<Class<*>, List<java.lang.reflect.Field>>()
+    private val textGetterCache = HashMap<Class<*>, java.lang.reflect.Method?>()
+
+    private fun extractViewText(view: View): String {
+        if (view is android.widget.TextView) return view.text?.toString()?.trim().orEmpty()
+        val cls = view.javaClass
+        val getter = textGetterCache.getOrPut(cls) {
+            runCatching {
+                cls.methods.firstOrNull {
+                    (it.name == "getText" || it.name == "getContent") &&
+                        it.parameterTypes.isEmpty() &&
+                        CharSequence::class.java.isAssignableFrom(it.returnType)
+                }?.apply { isAccessible = true }
+            }.getOrNull()
+        } ?: return ""
+        return runCatching { (getter.invoke(view) as? CharSequence)?.toString()?.trim().orEmpty() }.getOrDefault("")
+    }
+
+    private fun isInsideBottomTab(view: View?): Boolean {
+        var cur = view?.parent
+        while (cur is View) {
+            val name = cur.javaClass.simpleName
+            if (name.contains("LauncherUIBottomTabView") || name.contains("BottomTabView")) return true
+            cur = cur.parent
+        }
+        return false
+    }
+
+    /**
+     * WeChat's TaskBarContainer / TaskBarBottomView (and custom header views) draw
+     * the rounded-top-corner #EDEDED title bar cap directly in onDraw/dispatchDraw
+     * using internal Paint fields (so view.background is null). Zero the alpha of
+     * any opaque neutral gray/white Paint on these header views while collapsed or
+     * partially pulled down, and restore the exact color when fully expanded or cleared.
+     */
+    private fun muteNeutralPaintsOnView(state: State, view: View) {
+        // Never touch text views or icon views
+        if (view is android.widget.TextView || view is ImageView) return
+        val simple = view.javaClass.simpleName
+        if (simple.contains("TextView") || simple.contains("ImageView")) return
+        if (extractViewText(view).isNotEmpty()) return
+        val fields = paintFieldsCache.getOrPut(view.javaClass) {
+            val list = ArrayList<java.lang.reflect.Field>()
+            var type: Class<*>? = view.javaClass
+            while (type != null && !type.name.startsWith("android.")) {
+                for (field in type.declaredFields) {
+                    if (Paint::class.java.isAssignableFrom(field.type)) {
+                        runCatching { field.isAccessible = true }
+                        list.add(field)
+                    }
+                }
+                type = type.superclass
+            }
+            list
+        }
+        if (fields.isEmpty()) return
+        var invalidated = false
+        for (field in fields) {
+            val paint = runCatching { field.get(view) as? Paint }.getOrNull() ?: continue
+            val color = paint.color
+            val alpha = Color.alpha(color)
+            val r = Color.red(color)
+            val g = Color.green(color)
+            val b = Color.blue(color)
+            val spread = maxOf(r, g, b) - minOf(r, g, b)
+            // Target light neutral fills (#D8D8D8..#FFFFFF, such as #EDEDED = 237,237,237)
+            if (alpha > 0 && r >= 210 && g >= 210 && b >= 210 && spread <= 12) {
+                if (!state.mutedPaintColors.containsKey(paint)) {
+                    state.mutedPaintColors[paint] = color
+                }
+                paint.color = Color.TRANSPARENT
+                state.taskBarPaintZeroed++
+                invalidated = true
+            }
+        }
+        if (invalidated) view.invalidate()
+    }
+
+    private fun restoreMutedPaints(state: State) {
+        if (state.mutedPaintColors.isEmpty()) return
+        state.mutedPaintColors.entries.toList().forEach { (paint, originalColor) ->
+            if (paint.color == Color.TRANSPARENT) {
+                paint.color = originalColor
+            }
+        }
+        state.mutedPaintColors.clear()
+    }
+
     private fun refreshConversationHeaders(state: State, decor: ViewGroup, pager: ViewGroup, page: Int?) {
         if (page != 0) return
         val now = SystemClock.uptimeMillis()
-        if (!state.dirty && now - state.lastConversationHeaderScanAt < 200L) return
         state.lastConversationHeaderScanAt = now
         var visited = 0
         var conversation: ListView? = null
@@ -867,40 +971,44 @@ internal object PageWallpaperUnderlay {
         val samples = ArrayList<String>()
         val headerRoots = ArrayList<String>()
         val stripDrawStates = ArrayList<String>()
-        // Identify the SCROLLING "微信" title by its TextView inside actual
-        // ListView headers. Only its ancestor backgrounds may be suppressed
-        // even if their NinePatch or image-like drawable is non-neutral.
-        // This never changes header layout, scroll handling, or text/icons.
+        val shelfFullyExpanded = state.taskBarState.startsWith("完全展开")
         fun patchHeader(view: View, depth: Int, insideStrip: Boolean): Boolean {
             val bounds = Rect()
-            if (depth > 6 || !view.isShown || !view.getGlobalVisibleRect(bounds) ||
-                bounds.top >= decor.height * 0.36f) return false
+            if (depth > 14 || !view.isShown || !view.getGlobalVisibleRect(bounds) ||
+                bounds.top >= decor.height * 0.70f) return false
             val background = view.background
-            if (samples.size < 8 && (background != null || depth == 0)) {
+            if (samples.size < 12 && (background != null || depth <= 2)) {
                 val fg = view.foreground
                 samples.add("${view.javaClass.simpleName}@${bounds.top}-${bounds.bottom}/" +
                     "bg=${background?.javaClass?.simpleName ?: "null"}" +
                     "${background?.let { retainedDetail(it) } ?: ""}/" +
                     "fg=${fg?.javaClass?.simpleName ?: "null"}")
             }
-            var hasTitle = if (view is android.widget.TextView) {
-                val label = view.text?.toString()?.trim().orEmpty()
-                label == "微信" || (label.length <= 15 &&
-                    (label.startsWith("微信(") || label.startsWith("微信（")))
-            } else false
-            // The previous versions ONLY considered adapter header index 1,
-            // but the on-device dump shows the strip at y=288..432 without
-            // any header1-root event. Identify it inside ANY currently
-            // visible header, by precise on-screen geometry.
-            val titleStrip = view is android.widget.LinearLayout &&
+            val label = extractViewText(view)
+            val desc = view.contentDescription?.toString()?.trim().orEmpty()
+            var hasTitle = !isInsideBottomTab(view) && (
+                label == "微信" || (label.length <= 15 && (label.startsWith("微信(") || label.startsWith("微信（"))) ||
+                desc == "微信" || (desc.length <= 15 && (desc.startsWith("微信(") || desc.startsWith("微信（")))
+            )
+            // Identify the scrolling title strip inside ANY currently visible header by geometry
+            // (covering both resting y=144..288 and pulled-down y=288..1600 positions).
+            val titleStrip = (view is android.widget.LinearLayout ||
+                view is android.widget.RelativeLayout ||
+                view is android.widget.FrameLayout) &&
                 bounds.width() >= decor.width * 0.65f &&
-                bounds.height() >= decor.height * 0.035f &&
-                bounds.height() <= decor.height * 0.085f &&
-                bounds.top >= decor.height * 0.05f &&
-                bounds.top < decor.height * 0.30f
-            if (titleStrip) state.conversationStripChecks++
+                bounds.height() >= decor.height * 0.030f &&
+                bounds.height() <= decor.height * 0.10f &&
+                bounds.top >= 0 &&
+                bounds.top < decor.height * 0.65f
+            if (titleStrip) {
+                state.conversationStripChecks++
+                hasTitle = true
+            }
             val withinStrip = insideStrip || titleStrip
-            if (withinStrip && view is ViewGroup && background is SurfaceBackground) {
+            if (!shelfFullyExpanded && (withinStrip || depth <= 4)) {
+                muteNeutralPaintsOnView(state, view)
+            }
+            if (withinStrip && background is SurfaceBackground) {
                 val wasDrawing = background.drawsBackground()
                 if (wasDrawing) state.conversationStripIdleDraws++
                 if (stripDrawStates.size < 6) {
@@ -918,35 +1026,44 @@ internal object PageWallpaperUnderlay {
             if (view is ViewGroup) for (i in 0 until view.childCount) {
                 if (patchHeader(view.getChildAt(i), depth + 1, withinStrip)) hasTitle = true
             }
-            if (view is ViewGroup && bounds.width() >= decor.width * 0.58f &&
-                bounds.height() >= 12 && background != null) {
-                val base = background.current
-                val transparent = base is ColorDrawable && Color.alpha(base.color) == 0
-                if (hasTitle) {
-                    // When a title-specific background is not strictly neutral
-                    // (e.g. a white nine-patch with a shaded border), the old
-                    // neutral-only pass leaves the scrolling title opaque.
-                    val wrapper = background as? SurfaceBackground
-                    if (wrapper != null) {
-                        if (!wrapper.suppressFaintIdle) {
-                            wrapper.suppressFaintIdle = true
-                            view.invalidate()
-                            state.conversationTitleRepairs++
-                        }
-                    } else if (!transparent) {
-                        makeTransparent(state, view, false, true)
-                        if (view.background is SurfaceBackground) {
-                            state.conversationTitleRepairs++
-                            repaired++
-                        }
+            val isIcon = (view is ImageView && bounds.width() < decor.width * 0.50f) ||
+                view.javaClass.simpleName.contains("WeImageView")
+            if (!isIcon && (withinStrip || (view is ViewGroup && bounds.width() >= decor.width * 0.58f && bounds.height() >= 12))) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && (hasTitle || withinStrip)) {
+                    val fg = view.foreground
+                    if (fg != null && fg !is SurfaceBackground && isNeutralSurface(fg)) {
+                        view.foreground = null
                     }
-                } else if (bounds.height() <= decor.height / 4 &&
-                    background !is SurfaceBackground &&
-                    !transparent && isNeutralSurface(background)) {
-                    makeTransparent(state, view, false)
-                    if (view.background is SurfaceBackground) {
-                        repaired++
-                        state.conversationHeaderRepairs++
+                }
+                if (background != null) {
+                    val base = background.current
+                    val transparent = base is ColorDrawable && Color.alpha(base.color) == 0
+                    if (hasTitle || withinStrip) {
+                        val wrapper = background as? SurfaceBackground
+                        if (wrapper != null) {
+                            if (!wrapper.suppressFaintIdle || !wrapper.ignoreIdleFocus) {
+                                wrapper.suppressFaintIdle = true
+                                wrapper.ignoreIdleFocus = true
+                                view.invalidate()
+                                state.conversationTitleRepairs++
+                            }
+                        } else if (!transparent) {
+                            makeTransparent(state, view, false, true)
+                            (view.background as? SurfaceBackground)?.let { installed ->
+                                installed.suppressFaintIdle = true
+                                installed.ignoreIdleFocus = true
+                                state.conversationTitleRepairs++
+                                repaired++
+                            }
+                        }
+                    } else if (bounds.height() <= decor.height / 4 &&
+                        background !is SurfaceBackground &&
+                        !transparent && isNeutralSurface(background)) {
+                        makeTransparent(state, view, false)
+                        if (view.background is SurfaceBackground) {
+                            repaired++
+                            state.conversationHeaderRepairs++
+                        }
                     }
                 }
             }
@@ -955,7 +1072,7 @@ internal object PageWallpaperUnderlay {
         for (index in 0 until list.childCount) {
             if (first + index >= headerCount) break
             val row = list.getChildAt(index) ?: continue
-            if (!row.getGlobalVisibleRect(rect) || rect.top >= decor.height * 0.36f) continue
+            if (!row.getGlobalVisibleRect(rect) || rect.top >= decor.height * 0.70f) continue
             shown++
             if (headerRoots.size < 6) {
                 headerRoots.add("${first + index}:${row.javaClass.simpleName}@" +
@@ -966,6 +1083,7 @@ internal object PageWallpaperUnderlay {
         if (titleRows > 0) state.conversationTitleAnchors++
         state.conversationHeaderState =
             "Header=$headerCount 首项=$first 可见=$shown 标题行=$titleRows 本轮修复=$repaired " +
+            "画笔清零=${state.taskBarPaintZeroed} " +
             "根=${headerRoots.joinToString(",")} " +
             "窄条绘制=${stripDrawStates.joinToString(",").ifEmpty { "无" }} " +
             "背景=${samples.joinToString(";").ifEmpty { "无" }}"
@@ -1067,6 +1185,35 @@ internal object PageWallpaperUnderlay {
     /** Mute the shelf's gradient painters (alpha 0), remembering each one's
      *  original alpha so a full expansion can restore it. */
     private fun muteTaskBarPainters(state: State) {
+        state.taskBarHeader?.get()?.let { header ->
+            fun muteHeaderPaints(v: View, depth: Int) {
+                if (depth > 8) return
+                muteNeutralPaintsOnView(state, v)
+                if (v is ViewGroup) for (i in 0 until v.childCount) {
+                    v.getChildAt(i)?.let { muteHeaderPaints(it, depth + 1) }
+                }
+            }
+            muteHeaderPaints(header, 0)
+        }
+        state.toolbarView?.get()?.let { toolbar ->
+            fun muteToolbarPaints(v: View, depth: Int) {
+                if (depth > 8) return
+                muteNeutralPaintsOnView(state, v)
+                if (v is ViewGroup) for (i in 0 until v.childCount) {
+                    v.getChildAt(i)?.let { muteToolbarPaints(it, depth + 1) }
+                }
+            }
+            muteToolbarPaints(toolbar, 0)
+            (toolbar.parent as? ViewGroup)?.let { parent ->
+                for (i in 0 until parent.childCount) {
+                    parent.getChildAt(i)?.let { sibling ->
+                        if (sibling !== toolbar && sibling.height in 1..(toolbar.height * 3)) {
+                            muteToolbarPaints(sibling, 0)
+                        }
+                    }
+                }
+            }
+        }
         state.taskBarPainters.keys.toList().forEach { painter ->
             if (!painter.isAttachedToWindow) return@forEach
             val name = painter.javaClass.simpleName
@@ -1178,15 +1325,27 @@ internal object PageWallpaperUnderlay {
     }
 
     private fun clearActionBarPrimaryBackground(state: State, view: View) {
-        val setter = primaryBackgroundSetter(view) ?: return
+        val access = actionBarBgAccess(view)
         if (state.toolbarPrimaryBackup == null) {
             state.toolbarPrimaryBackup = runCatching {
                 primaryBackgroundField(view)?.get(view) as? Drawable
             }.getOrNull()
         }
-        runCatching {
-            setter.isAccessible = true
-            setter.invoke(view, null)
+        for (setter in access.setters) {
+            if (setter.name == "setPrimaryBackground" || setter.name == "setStackedBackground" || setter.name == "setSplitBackground") {
+                runCatching {
+                    setter.isAccessible = true
+                    setter.invoke(view, null)
+                }
+            }
+        }
+        for (field in access.fields) {
+            runCatching {
+                val cur = field.get(view) as? Drawable
+                if (cur != null && cur !is SurfaceBackground) {
+                    field.set(view, null)
+                }
+            }
         }
     }
 
@@ -1338,6 +1497,7 @@ internal object PageWallpaperUnderlay {
     }
 
     private fun restoreTaskBarPainters(state: State) {
+        restoreMutedPaints(state)
         state.mutedPainterVisibility.entries.toList().forEach { (view, original) ->
             if (view.visibility == View.INVISIBLE) view.visibility = original
         }
@@ -1595,12 +1755,16 @@ internal object PageWallpaperUnderlay {
         fun walk(view: View, depth: Int) {
             if (depth > MAX_DEPTH || visited++ >= MAX_NODES) return
             val cls = view.javaClass.simpleName
-            val label = (view as? android.widget.TextView)?.text?.toString()?.trim().orEmpty()
-            val isTitle = label == "微信" || label.startsWith("微信(") || label.startsWith("微信（")
+            val label = extractViewText(view)
+            val isTitle = !isInsideBottomTab(view) &&
+                (label == "微信" || label.startsWith("微信(") || label.startsWith("微信（"))
             val isContainer = cls == "ActionBarContainer" || cls == "TaskBarContainer"
-            val bg = view.background as? ColorDrawable
-            val isWhite = bg != null && bg.color == Color.rgb(237, 237, 237) &&
-                view.width >= decor.width * 0.65f
+            val rawBg = view.background
+            val unwrappedBg = (rawBg as? SurfaceBackground)?.drawable ?: rawBg
+            val bg = (unwrappedBg?.current as? ColorDrawable) ?: (rawBg as? ColorDrawable)
+            val isWhite = bg != null && Color.alpha(bg.color) != 0 && isNeutralColor(bg.color) &&
+                view.width >= decor.width * 0.65f &&
+                (rawBg !is SurfaceBackground || rawBg.drawsBackground())
             if (isTitle || isContainer || isWhite) {
                 val shown = view.isShown && view.getGlobalVisibleRect(rect)
                 val bounds = if (shown) "@${rect.left},${rect.top}-${rect.right},${rect.bottom}" else "@屏幕外"
