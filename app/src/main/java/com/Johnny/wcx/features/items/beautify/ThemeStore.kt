@@ -354,6 +354,12 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     @Volatile private var homeBarSetterHits = 0
     @Volatile private var homeBarSetterLastColor: Int? = null
     @Volatile private var homeBarSetterHooked = false
+    // WeXposed m448: ActionBarContainer.setPrimaryBackground(Drawable) is the
+    // second title-bar setter. wcx1 only cleared it post-hoc (direct invoke);
+    // the before-hook below intercepts WeChat's own writes at the source.
+    @Volatile private var primaryBackgroundSetterStatus = "未检查"
+    @Volatile private var primaryBackgroundSetterHits = 0
+    @Volatile private var primaryBackgroundSetterHooked = false
     @Volatile private var scrollingTitleHooked = false
     @Volatile private var scrollingTitleHookStatus = "未检查"
     @Volatile private var scrollingTitleHookHits = 0
@@ -479,6 +485,75 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
             homeBarSetterStatus = "已挂 ${method.declaringClass.simpleName}.${method.name}"
         }.onFailure {
             homeBarSetterStatus = "挂载失败：${it.javaClass.simpleName}"
+        }
+    }
+
+    /**
+     * WeXposed m448: intercept ActionBarContainer.setPrimaryBackground(Drawable)
+     * with a before-hook and replace the argument. WeChat repaints the title
+     * bar through this setter on paths that never pass HomeUI.setActionBarColor
+     * (direct writes, ActionBar setup, theme changes); wcx1 previously only
+     * cleared the primary background after the fact by invoking the setter
+     * with null, so the host could re-white it every frame. The hook stops
+     * the write at the source; the 500ms subtree sweep stays as fallback.
+     *
+     * Guard (m448, theme color = transparent in wallpaper mode):
+     * - null arg: leave it. Null already means "no primary background", and
+     *   wcx1's own clear path invokes the setter with null.
+     * - ColorDrawable with color 0 (transparent) or #F2F2F2: leave it.
+     * - Any other ColorDrawable, or any non-ColorDrawable: replace with a
+     *   transparent ColorDrawable.
+     * Only in wallpaper mode, on the main page, in LauncherUI, and only when
+     * the active theme leaves the toolbar background to the native/Inherit
+     * rule (same guards as hookHomeActionBarColorWriter). Title text and
+     * icons are untouched: this setter only changes the background drawable.
+     * The class is the AppCompat one (the only ActionBarContainer in 8.0.80);
+     * if it cannot be loaded or the setter is not unique, log and leave the
+     * host untouched.
+     */
+    private fun hookPrimaryBackgroundSetter() {
+        if (primaryBackgroundSetterHooked) return
+        val containerClass = runCatching {
+            ClassLoaders.HOST.loadClass("androidx.appcompat.widget.ActionBarContainer")
+        }.getOrNull() ?: run {
+            primaryBackgroundSetterStatus = "ActionBarContainer 类不可用"
+            return
+        }
+        val setter = containerClass.methods.singleOrNull { method ->
+            method.name == "setPrimaryBackground" &&
+                method.parameterTypes.size == 1 &&
+                method.parameterTypes[0] == android.graphics.drawable.Drawable::class.java &&
+                method.returnType == Void.TYPE &&
+                !java.lang.reflect.Modifier.isStatic(method.modifiers)
+        } ?: run {
+            primaryBackgroundSetterStatus = "未找到 setPrimaryBackground(Drawable)"
+            return
+        }
+        runCatching {
+            setter.isAccessible = true
+            setter.hookBefore {
+                if (!wallpaperSwitchOn() || !usePageBackground() || !ThemeSurface.onMainPage)
+                    return@hookBefore
+                val launcher = ThemeSurface.liveActivities().firstOrNull {
+                    ThemePages.isLauncher(it) && PageWallpaperUnderlay.isAttached(it)
+                } ?: return@hookBefore
+                val toolbarRule = ThemeRuntime.current(launcher)?.profile
+                    ?.background("chrome", "toolbarBackground") ?: BackgroundRule.Inherit
+                if (toolbarRule !== BackgroundRule.Native &&
+                    toolbarRule !== BackgroundRule.Inherit) return@hookBefore
+                val drawable = args.getOrNull(0) as? android.graphics.drawable.Drawable ?: return@hookBefore
+                if (drawable is android.graphics.drawable.ColorDrawable) {
+                    val color = drawable.color
+                    if (color == android.graphics.Color.TRANSPARENT || color == 0xFFF2F2F2.toInt())
+                        return@hookBefore
+                }
+                args[0] = android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT)
+                primaryBackgroundSetterHits++
+            }
+            primaryBackgroundSetterHooked = true
+            primaryBackgroundSetterStatus = "已挂 ${setter.declaringClass.simpleName}.${setter.name}"
+        }.onFailure {
+            primaryBackgroundSetterStatus = "挂载失败：${it.javaClass.simpleName}"
         }
     }
 
@@ -658,6 +733,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         hookLiveTabAdapters()
         hookNativeActionBarColor()
         hookHomeActionBarColorWriter()
+        hookPrimaryBackgroundSetter()
         hookScrollingTitleDraw()
         hookChattingPage()
         hookChattingFragment()
@@ -693,6 +769,9 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         homeBarSetterStatus = "已停用"
         homeBarSetterHits = 0
         homeBarSetterLastColor = null
+        primaryBackgroundSetterHooked = false
+        primaryBackgroundSetterStatus = "已停用"
+        primaryBackgroundSetterHits = 0
         actionBarColorHookStatus = "已停用"
         actionBarColorHookHits = 0
         actionBarColorOriginal = null
@@ -1246,6 +1325,10 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
             "HomeUI 滚动标题写入 = $homeBarSetterStatus " +
                 "拦截:$homeBarSetterHits 次 原值:" +
                 (homeBarSetterLastColor?.let { "#${Integer.toHexString(it).padStart(8, '0')}" } ?: "未命中")
+        )
+        appendLine(
+            "标题栏主底 setter = $primaryBackgroundSetterStatus " +
+                "拦截:$primaryBackgroundSetterHits 次"
         )
         appendLine("会话滚动标题画布 = $scrollingTitleHookStatus 绘制:${scrollingTitleHookHits} 次")
 
