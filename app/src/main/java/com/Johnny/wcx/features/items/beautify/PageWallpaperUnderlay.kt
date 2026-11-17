@@ -91,6 +91,12 @@ internal object PageWallpaperUnderlay {
         var conversationHeaderState = "未观测"
         var lastConversationHeaderScanAt = 0L
         var cardDiag = "未观测"
+        // Read-only cold-start evidence for the transient native "静音播放"
+        // quarter-circle on Me. Retained until the settings snapshot.
+        var muteHintFirstHit = "未捕获"
+        var muteHintNearby = "未记录"
+        var muteHintProbes = 0
+        var muteHintLastProbeAt = 0L
         // Per-view-class host-write counts: the hostWrites total alone
         // cannot tell whether one view is rewritten every frame or many
         // views once each.
@@ -362,6 +368,7 @@ internal object PageWallpaperUnderlay {
                 state.toolbarLastInstantTab = page ?: -1
             }
         }
+        if (page == 3) sampleMeMuteHint(state, decor)
         // Keep the visible AccountInfoPreference row transparent in the SAME
         // frame after a ListView rebind. The old 140/500ms checks could expose
         // its native white selector briefly when WeChat recycled the first row.
@@ -611,6 +618,72 @@ internal object PageWallpaperUnderlay {
             }
         }
         walk(pager, 0, false)
+    }
+
+
+    /**
+     * Read-only startup diagnostic for the native Me-page mute-play hint.
+     * On this host it appears only after a cold launch with wallpaper mode,
+     * then disappears on switching tabs. Never hide/move/reorder this view:
+     * it may be part of the native pull-down interaction.
+     */
+    private fun sampleMeMuteHint(state: State, decor: ViewGroup) {
+        if (state.muteHintFirstHit != "未捕获" || state.muteHintProbes >= 12) return
+        val now = SystemClock.uptimeMillis()
+        if (now - state.muteHintLastProbeAt < 250L) return
+        state.muteHintLastProbeAt = now
+        state.muteHintProbes++
+        val nearby = ArrayList<String>(6)
+        val bounds = Rect()
+        var visited = 0
+        fun parents(view: View): String {
+            val path = ArrayList<String>(6)
+            var node = view.parent as? View
+            for (i in 0 until 6) {
+                val current = node ?: break
+                val bg = current.background
+                path.add(
+                    "${current.javaClass.simpleName}" +
+                        "/bg=${bg?.javaClass?.simpleName ?: "null"}" +
+                        "${bg?.let { retainedDetail(it) } ?: ""}" +
+                        "/a=${current.alpha}/y=${current.translationY}"
+                )
+                node = current.parent as? View
+            }
+            return path.joinToString(">")
+        }
+        fun visit(view: View, depth: Int) {
+            if (depth > MAX_DEPTH || visited++ >= 1400 || state.muteHintFirstHit != "未捕获") return
+            val text = (view as? android.widget.TextView)?.text?.toString().orEmpty()
+            val desc = view.contentDescription?.toString().orEmpty()
+            val matchingHint = text.contains("静音播放") || desc.contains("静音播放")
+            val inLowerLeft = view.isShown && view.getGlobalVisibleRect(bounds) &&
+                bounds.left < decor.width * 0.48f &&
+                bounds.bottom > decor.height * 0.68f
+            if (matchingHint && inLowerLeft) {
+                state.muteHintFirstHit = "${view.javaClass.simpleName}" +
+                    "@${bounds.left},${bounds.top}-${bounds.right},${bounds.bottom}" +
+                    "/alpha=${view.alpha}/translationY=${view.translationY}" +
+                    "/父链=${parents(view)}"
+                return
+            }
+            val bg = view.background
+            if (inLowerLeft && bg != null && nearby.size < 6 &&
+                bounds.width() in 90..(decor.width * 0.55f).toInt() &&
+                bounds.height() in 55..(decor.height * 0.32f).toInt()) {
+                nearby.add(
+                    "${view.javaClass.simpleName}@${bounds.left},${bounds.top}-${bounds.right},${bounds.bottom}" +
+                        "/bg=${bg.javaClass.simpleName}${retainedDetail(bg)}" +
+                        "/父=${(view.parent as? View)?.javaClass?.simpleName ?: "无"}"
+                )
+            }
+            if (view is ViewGroup) for (i in 0 until view.childCount) {
+                if (visited >= 1400 || state.muteHintFirstHit != "未捕获") break
+                visit(view.getChildAt(i) ?: continue, depth + 1)
+            }
+        }
+        runCatching { visit(decor, 0) }
+        if (nearby.isNotEmpty()) state.muteHintNearby = nearby.joinToString(";")
     }
 
     /**
@@ -1788,6 +1861,7 @@ internal object PageWallpaperUnderlay {
             "资料卡=${state.cardDiag} 资料卡重绑=${state.cardRebinds} 立即修复=${state.cardImmediateRepairs} " +
             "资料卡焦点抑制=${state.cardFocusSuppressed} 返回主页复查=${state.launcherReturnChecks} " +
             "资料卡淡底修复=${state.cardFaintRepairs} 标题区底板修复=${state.titleRegionRepairs} " +
+            "首次我页静音提示=探测:${state.muteHintProbes},命中:${state.muteHintFirstHit},邻近:${state.muteHintNearby} " +
             "顶栏即时恢复=Primary:${state.toolbarInstantPrimaryRepairs},View:${state.toolbarInstantViewRepairs},最后Tab:${state.toolbarLastInstantTab} " +
             "会话滚动标题=${state.conversationHeaderState} 标题锚点命中=${state.conversationTitleAnchors} " +
             "标题定点修复=${state.conversationTitleRepairs} 标题Header修复=${state.conversationHeaderRepairs} " +
