@@ -779,7 +779,7 @@ internal object PageWallpaperUnderlay {
      * gestures and the same widget after startup remain host-controlled.
      */
     private fun updateColdStartStoryMute(state: State, page: Int?) {
-        if (!state.storyMuteGuardArmed) return
+        if (!state.storyMuteGuardArmed || page == null) return
         if (page != 3) {
             // First startup can briefly land on tab 0 before restoring
             // the previously selected Me tab. Keep the one-shot guard
