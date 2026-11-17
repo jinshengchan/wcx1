@@ -568,6 +568,26 @@ internal object ThemeSurface {
         }
     }
 
+    /**
+     * 聊天页底部 48px 白条（#F7F7F7）的修复：
+     * 进聊天页时 restoreWindow() 会把 navigationBarColor 还回微信原生 #F7F7F7；
+     * 而聊天页（Fragment 路径）与主界面共用 LauncherUI 窗口，底部导航栏区域就露出灰条。
+     * 只清导航栏、不动状态栏：聊天页标题栏保持微信原生；也不改 restoreWindow 本身，
+     * 回主界面时它还要负责恢复。
+     */
+    private fun applyTransparentNavBar(activity: Activity) {
+        val w = activity.window ?: return
+        try {
+            @Suppress("DEPRECATION")
+            w.navigationBarColor = AndroidColor.TRANSPARENT
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                w.isNavigationBarContrastEnforced = false
+            }
+        } catch (e: Throwable) {
+            WeLogger.w(TAG, "聊天页导航栏透明化异常：${e.message}", e)
+        }
+    }
+
     // ══════════════════════════════════════════════════════════
     // 挂载分发
     // ══════════════════════════════════════════════════════════
@@ -873,7 +893,7 @@ internal object ThemeSurface {
         anchorLeaveSince = 0L
         if (entering) runCatching {
             liveActivities().forEach { act ->
-                if (ThemePages.isLauncher(act)) { TabWallpaperRenderer.clear(act); restoreWindow(act) }
+                if (ThemePages.isLauncher(act)) { TabWallpaperRenderer.clear(act); restoreWindow(act); applyTransparentNavBar(act) }
             }
         }
     }
@@ -967,6 +987,10 @@ internal object ThemeSurface {
         java.util.WeakHashMap<Activity, android.graphics.drawable.Drawable?>()
 
     private fun applyChattingWallpaper(activity: Activity) {
+        // 独立 ChattingUI Activity 路径：它的窗口从未被 applyImmersive 碰过，
+        // navigationBarColor 一直是微信原生 #F7F7F7，同样置透明。
+        // Fragment 路径已在 onChattingFragmentShown 里处理，这里是第二条路的兜底。
+        applyTransparentNavBar(activity)
         val src = ThemeMaterials.wallpaperSourceFor(activity, ThemeStore.activeThemeIdOrEmpty())
         if (src == null) {
             restoreWindowBackground(activity)
