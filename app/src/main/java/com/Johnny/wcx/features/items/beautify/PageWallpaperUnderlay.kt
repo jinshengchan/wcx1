@@ -97,6 +97,10 @@ internal object PageWallpaperUnderlay {
         var muteHintNearby = "未记录"
         var muteHintProbes = 0
         var muteHintLastProbeAt = 0L
+        // Actual draw hook for the scrolling TaskBarContainer, distinct
+        // from the fixed ActionBarContainer and mini-program gesture layer.
+        var scrollingTitleDraws = 0
+        var scrollingTitleSkips = 0
         // Per-view-class host-write counts: the hostWrites total alone
         // cannot tell whether one view is rewritten every frame or many
         // views once each.
@@ -260,6 +264,64 @@ internal object PageWallpaperUnderlay {
         state.preDraw = null
         state.layout = null
         state.scroll = null
+    }
+
+    /**
+     * Paint the full-window wallpaper in the NATIVE scrolling header draw
+     * pass, after TaskBarContainer's own paint but before its child controls.
+     * Calling this from a class-specific onDraw-after or dispatchDraw-before
+     * hook never changes Android's view tree, translations or touch dispatch.
+     *
+     * This is NOT the stationary ActionBarContainer. Gate strictly to the
+     * first visible ConversationListView header at the top of page 0; when
+     * the mini-program shelf expands/moves down, leave native painting alone.
+     */
+    fun drawScrollingHeaderUnderChildren(header: View, canvas: Canvas): Boolean {
+        if (header.javaClass.name != "com.tencent.mm.plugin.taskbar.ui.TaskBarContainer") return false
+        val decor = header.rootView as? ViewGroup ?: return false
+        val state = states[decor]?.get() ?: return false
+        if (decor.background !== state.wallpaper || !state.wallpaper.shouldDraw()) return false
+        val pager = state.pager.get() ?: return false
+        val currentPage = runCatching {
+            pager.javaClass.getMethod("getCurrentItem").invoke(pager) as? Int
+        }.getOrNull()
+        if (currentPage != 0 || !pager.isShown || !header.isShown) {
+            state.scrollingTitleSkips++
+            return false
+        }
+        var parent = header.parent as? View
+        var isConversationHeader = false
+        for (i in 0 until 7) {
+            val node = parent ?: break
+            if (node is ListView && node.javaClass.simpleName == "ConversationListView") {
+                isConversationHeader = true
+                break
+            }
+            parent = node.parent as? View
+        }
+        if (!isConversationHeader || header.width < decor.width * 0.80f ||
+            header.height <= 0 || header.height > decor.height * 0.18f) return false
+
+        val location = IntArray(2)
+        val rootLocation = IntArray(2)
+        header.getLocationOnScreen(location)
+        decor.getLocationOnScreen(rootLocation)
+        // Only the collapsed, moving top strip; not the full mini-app shelf.
+        val top = location[1] - rootLocation[1]
+        if (top > decor.height * 0.08f || top + header.height <= 0) return false
+
+        val checkpoint = canvas.save()
+        try {
+            canvas.translate(
+                (rootLocation[0] - location[0]).toFloat(),
+                (rootLocation[1] - location[1]).toFloat()
+            )
+            state.wallpaper.draw(canvas)
+            state.scrollingTitleDraws++
+        } finally {
+            canvas.restoreToCount(checkpoint)
+        }
+        return true
     }
 
     fun findPager(content: ViewGroup): ViewGroup? {
@@ -1862,6 +1924,7 @@ internal object PageWallpaperUnderlay {
             "资料卡焦点抑制=${state.cardFocusSuppressed} 返回主页复查=${state.launcherReturnChecks} " +
             "资料卡淡底修复=${state.cardFaintRepairs} 标题区底板修复=${state.titleRegionRepairs} " +
             "首次我页静音提示=探测:${state.muteHintProbes},命中:${state.muteHintFirstHit},邻近:${state.muteHintNearby} " +
+            "滚动标题绘制=覆盖:${state.scrollingTitleDraws},跳过:${state.scrollingTitleSkips} " +
             "顶栏即时恢复=Primary:${state.toolbarInstantPrimaryRepairs},View:${state.toolbarInstantViewRepairs},最后Tab:${state.toolbarLastInstantTab} " +
             "会话滚动标题=${state.conversationHeaderState} 标题锚点命中=${state.conversationTitleAnchors} " +
             "标题定点修复=${state.conversationTitleRepairs} 标题Header修复=${state.conversationHeaderRepairs} " +
