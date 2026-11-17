@@ -603,10 +603,12 @@ internal object ThemeSurface {
                 navBg.alpha = 0f
                 navBg.visibility = View.INVISIBLE
             }
-            val rect = android.graphics.Rect()
+            val loc = IntArray(2)
+            val rootLoc = IntArray(2)
+            decor.getLocationOnScreen(rootLoc)
             var visited = 0
             var cleared = 0
-            val bottomHits = ArrayList<String>(12)
+            val chatHits = ArrayList<String>(14)
             fun bgDesc(bg: android.graphics.drawable.Drawable?): String {
                 if (bg == null) return "null"
                 if (bg is LockedChatBottomDrawable) return "LockedTrans"
@@ -617,72 +619,88 @@ internal object ThemeSurface {
                     cur.javaClass.simpleName
                 }
             }
-            fun isInputBox(view: View, r: android.graphics.Rect): Boolean {
+            fun isInputBox(view: View, top: Int, bottom: Int): Boolean {
                 if (view is android.widget.EditText) return true
                 val s = view.javaClass.simpleName
                 if (s.contains("EditText") || s.contains("MMEditText")) return true
-                return r.width() in 100..(decor.width * 0.72f).toInt() && r.bottom < decor.height - 20
+                return view.width in 100..(decor.width * 0.72f).toInt() && bottom < decor.height - 20
             }
             fun walk(view: View, depth: Int, inChat: Boolean, inFooter: Boolean) {
-                if (depth > 26 || visited++ >= 1600 || view.visibility != View.VISIBLE) return
+                if (depth > 28 || visited++ >= 2000 || view.visibility != View.VISIBLE) return
                 val cls = view.javaClass.name
                 val simple = view.javaClass.simpleName
-                val insideChat = inChat || simple == "TestTimeForChatting" || simple == "ChattingUILayout" || cls.contains(".chatting.")
+                // 直接跳过主界面 ViewPager 与底部 Tab 栏，专注入聊天页子树（TestTimeForChatting / ChattingUILayout）
+                if (simple.contains("ViewPager") || simple.contains("LauncherUIBottomTabView") || simple == "MainUIView") {
+                    return
+                }
+                val insideChat = inChat ||
+                    simple == "TestTimeForChatting" ||
+                    simple == "SwipeBackLayout" ||
+                    simple == "ChattingUILayout" ||
+                    cls.contains(".chatting.")
                 val insideFooter = inFooter || cls.contains("ChatFooter") || simple.contains("ChatFooter")
-                if (view.getGlobalVisibleRect(rect)) {
-                    val isBottomInsetStrip = rect.bottom >= decor.height - 4 &&
-                        rect.top >= decor.height - 100 &&
-                        rect.width() >= decor.width * 0.75f
-                    val isFooterShell = (insideFooter || (insideChat && rect.top >= decor.height - 240)) &&
-                        rect.bottom >= decor.height - 4 &&
-                        rect.width() >= decor.width * 0.75f &&
-                        !isInputBox(view, rect) &&
-                        view !is android.widget.ImageView &&
-                        !simple.contains("WeImageView")
-                    if (isBottomInsetStrip || isFooterShell) {
-                        val bg = view.background
-                        if (bg != null && bg !is LockedChatBottomDrawable) {
-                            val left = view.paddingLeft
-                            val top = view.paddingTop
-                            val right = view.paddingRight
-                            val bottom = view.paddingBottom
-                            view.background = LockedChatBottomDrawable()
-                            view.setPadding(left, top, right, bottom)
-                            cleared++
-                        }
-                        var type: Class<*>? = view.javaClass
-                        while (type != null && !type.name.startsWith("android.")) {
-                            for (field in type.declaredFields) {
-                                if (android.graphics.Paint::class.java.isAssignableFrom(field.type)) {
-                                    runCatching {
-                                        field.isAccessible = true
-                                        val p = field.get(view) as? android.graphics.Paint
-                                        if (p != null) {
-                                            val c = p.color
-                                            val r = AndroidColor.red(c)
-                                            val g = AndroidColor.green(c)
-                                            val b = AndroidColor.blue(c)
-                                            if (AndroidColor.alpha(c) > 0 && r >= 210 && g >= 210 && b >= 210 && maxOf(r, g, b) - minOf(r, g, b) <= 12) {
-                                                p.color = AndroidColor.TRANSPARENT
-                                                p.alpha = 0
-                                                view.invalidate()
-                                                cleared++
+                if (view.width > 0 && view.height > 0) {
+                    view.getLocationOnScreen(loc)
+                    val top = loc[1] - rootLoc[1]
+                    val bottom = top + view.height
+                    val lp = view.layoutParams as? ViewGroup.MarginLayoutParams
+                    val marB = lp?.bottomMargin ?: 0
+                    val padB = view.paddingBottom
+
+                    if (insideChat || insideFooter) {
+                        // 1. 屏幕最底端 48px 垫片（top >= decor.height - 100 && bottom >= decor.height - 4 && width >= 75%）
+                        val isBottomInsetStrip = bottom >= decor.height - 4 &&
+                            top >= decor.height - 100 &&
+                            view.width >= decor.width * 0.75f
+                        // 2. ChatFooter 或聊天底部容器（top >= decor.height - 260 && bottom >= decor.height - 4）
+                        val isFooterShell = (insideFooter || top >= decor.height - 260) &&
+                            bottom >= decor.height - 4 &&
+                            view.width >= decor.width * 0.75f &&
+                            !isInputBox(view, top, bottom) &&
+                            view !is android.widget.ImageView &&
+                            !simple.contains("WeImageView")
+                        if (isBottomInsetStrip || isFooterShell) {
+                            val bg = view.background
+                            if (bg != null && bg !is LockedChatBottomDrawable) {
+                                val pL = view.paddingLeft
+                                val pT = view.paddingTop
+                                val pR = view.paddingRight
+                                val pB = view.paddingBottom
+                                view.background = LockedChatBottomDrawable()
+                                view.setPadding(pL, pT, pR, pB)
+                                cleared++
+                            }
+                            var type: Class<*>? = view.javaClass
+                            while (type != null && !type.name.startsWith("android.")) {
+                                for (field in type.declaredFields) {
+                                    if (android.graphics.Paint::class.java.isAssignableFrom(field.type)) {
+                                        runCatching {
+                                            field.isAccessible = true
+                                            val p = field.get(view) as? android.graphics.Paint
+                                            if (p != null) {
+                                                val c = p.color
+                                                val r = AndroidColor.red(c)
+                                                val g = AndroidColor.green(c)
+                                                val b = AndroidColor.blue(c)
+                                                if (AndroidColor.alpha(c) > 0 && r >= 210 && g >= 210 && b >= 210 && maxOf(r, g, b) - minOf(r, g, b) <= 12) {
+                                                    p.color = AndroidColor.TRANSPARENT
+                                                    p.alpha = 0
+                                                    view.invalidate()
+                                                    cleared++
+                                                }
                                             }
                                         }
                                     }
                                 }
+                                type = type.superclass
                             }
-                            type = type.superclass
                         }
-                    }
-                    // 收集聊天页底部（y >= 2350）或全屏容器/背景 ImageView 的诊断信息（持久化在 lastChatBottomDiag，不被 events 顶掉）
-                    if ((insideChat || insideFooter || rect.top >= decor.height - 120) &&
-                        rect.bottom >= decor.height - 96 &&
-                        rect.width() >= decor.width * 0.75f) {
-                        val bg = view.background
-                        if (bg != null || view.paddingBottom > 0 || view is android.widget.ImageView || simple.contains("Bg") || insideFooter || rect.top >= decor.height - 100) {
-                            if (bottomHits.size < 12) {
-                                bottomHits.add("$simple@${rect.top}-${rect.bottom}(bg=${bgDesc(bg)} padB=${view.paddingBottom})")
+                        // 记录聊天页根容器及底部视图（用于诊断 bottom 是否停在 2560、是否有 padB=48/marB=48 或特殊背景）
+                        if (view.width >= decor.width * 0.75f &&
+                            (bottom >= decor.height - 96 || simple == "TestTimeForChatting" || simple == "SwipeBackLayout" || simple == "ChattingUILayout" || insideFooter || view is android.widget.ImageView)) {
+                            val bg = view.background
+                            if (chatHits.size < 14 && (bg != null || padB > 0 || marB > 0 || top >= decor.height - 260 || simple == "TestTimeForChatting" || simple == "ChattingUILayout" || view is android.widget.ImageView)) {
+                                chatHits.add("$simple@$top-$bottom(bg=${bgDesc(bg)} padB=$padB marB=$marB)")
                             }
                         }
                     }
@@ -694,15 +712,16 @@ internal object ThemeSurface {
                 }
             }
             runCatching { walk(decor, 0, false, false) }
-            if (bottomHits.isNotEmpty()) {
-                lastChatBottomDiag = "清=$cleared[${bottomHits.joinToString(";")}]"
+            if (chatHits.isNotEmpty()) {
+                lastChatBottomDiag = "清=$cleared[${chatHits.joinToString(";")}]"
             }
         }
         try {
             sweepBottom()
             decor.post { runCatching { sweepBottom() } }
-            decor.postDelayed({ runCatching { if (chatPageVisible || ThemePages.isChatting(activity)) sweepBottom() } }, 150L)
-            decor.postDelayed({ runCatching { if (chatPageVisible || ThemePages.isChatting(activity)) sweepBottom() } }, 450L)
+            for (delay in longArrayOf(120L, 320L, 650L, 1100L)) {
+                decor.postDelayed({ runCatching { sweepBottom() } }, delay)
+            }
         } catch (e: Throwable) {
             WeLogger.w(TAG, "清理 ChatFooter 底部白条异常：${e.message}", e)
         }
