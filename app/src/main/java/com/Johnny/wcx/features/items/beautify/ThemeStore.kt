@@ -510,15 +510,30 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         // Prefer onDraw-after: own color paint has finished; native children
         // have not drawn yet. A declared dispatchDraw-before is also safe.
         val onDraw = findExact("onDraw")
-        val dispatch = if (onDraw == null) findExact("dispatchDraw") else null
+        // The on-device log confirmed TaskBarContainer DOES NOT DECLARE
+        // either onDraw or dispatchDraw. Search upwards for the nearest
+        // implementation. dispatchDraw is invoked after native onDraw but
+        // before native children (title / search / plus) are painted.
+        var dispatchOwner: Class<*>? = headerClass
+        var dispatch: java.lang.reflect.Method? = null
+        while (dispatchOwner != null && dispatch == null) {
+            dispatch = dispatchOwner.declaredMethods.singleOrNull { method ->
+                method.name == "dispatchDraw" &&
+                    method.parameterTypes.contentEquals(
+                        arrayOf(android.graphics.Canvas::class.java)
+                    ) && method.returnType == Void.TYPE
+            }
+            if (dispatch == null) dispatchOwner = dispatchOwner.superclass
+        }
         val target = onDraw ?: dispatch ?: run {
-            scrollingTitleHookStatus = "无可安全拦截的本类绘制方法，跳过"
+            scrollingTitleHookStatus = "找不到继承的绘制方法，跳过"
             return
         }
         runCatching {
             target.isAccessible = true
             if (onDraw != null) {
                 target.hookAfter {
+                    if (thisObject.javaClass !== headerClass) return@hookAfter
                     val header = thisObject as? View ?: return@hookAfter
                     val canvas = args.getOrNull(0) as? android.graphics.Canvas ?: return@hookAfter
                     if (PageWallpaperUnderlay.drawScrollingHeaderUnderChildren(header, canvas))
@@ -526,6 +541,10 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
                 }
             } else {
                 target.hookBefore {
+                    // The fallback can be android.view.ViewGroup.dispatchDraw
+                    // and is shared by many views. A single Class identity
+                    // comparison returns immediately for EVERY other view.
+                    if (thisObject.javaClass !== headerClass) return@hookBefore
                     val header = thisObject as? View ?: return@hookBefore
                     val canvas = args.getOrNull(0) as? android.graphics.Canvas ?: return@hookBefore
                     if (PageWallpaperUnderlay.drawScrollingHeaderUnderChildren(header, canvas))
@@ -533,7 +552,10 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
                 }
             }
             scrollingTitleHooked = true
-            scrollingTitleHookStatus = "已挂 ${headerClass.simpleName}.${target.name}"
+            scrollingTitleHookStatus =
+                "已挂 ${target.declaringClass.simpleName}.${target.name}" +
+                if (target.declaringClass.name.startsWith("android."))
+                    "（系统继承方法，实例限定）" else "（微信继承方法）"
         }.onFailure { scrollingTitleHookStatus = "挂载失败：${it.javaClass.simpleName}" }
     }
 
