@@ -97,6 +97,16 @@ internal object PageWallpaperUnderlay {
         var muteHintNearby = "未记录"
         var muteHintProbes = 0
         var muteHintLastProbeAt = 0L
+        // One-shot cold-start guard for a stale native StoryMuteView overlay.
+        // It is a sibling of the pager under FirstScreenFrameLayout, not
+        // part of Me's list; it should not occlude the bottom tab at rest.
+        var storyMuteView: WeakReference<View>? = null
+        var storyMuteOriginalVisibility = View.VISIBLE
+        var storyMuteSuppressed = false
+        var storyMuteGuardArmed = true
+        var storyMuteSuppressionCount = 0
+        var storyMuteNativeReleaseCount = 0
+        var storyMuteListY = Int.MIN_VALUE
         // Actual draw hook for the scrolling TaskBarContainer, distinct
         // from the fixed ActionBarContainer and mini-program gesture layer.
         var scrollingTitleDraws = 0
@@ -436,6 +446,7 @@ internal object PageWallpaperUnderlay {
         // frame after a ListView rebind. The old 140/500ms checks could expose
         // its native white selector briefly when WeChat recycled the first row.
         if (page == 3) refreshVisibleMeCard(state, decor)
+        updateColdStartStoryMute(state, page)
         // The walk only runs on a dirty pass and skips narrow views, so a
         // white surface nested inside the title bar or the card row can
         // survive every targeted fix while the diagnostics above it read
@@ -724,6 +735,13 @@ internal object PageWallpaperUnderlay {
                 bounds.left < decor.width * 0.48f &&
                 bounds.bottom > decor.height * 0.68f
             if (matchingHint && inLowerLeft) {
+                val owner = view.parent as? View
+                if (owner?.javaClass?.simpleName == "StoryMuteView" &&
+                    (owner.parent as? View)?.javaClass?.simpleName == "FrameLayout" &&
+                    ((owner.parent as? View)?.parent as? View)
+                        ?.javaClass?.simpleName == "FirstScreenFrameLayout") {
+                    state.storyMuteView = WeakReference(owner)
+                }
                 state.muteHintFirstHit = "${view.javaClass.simpleName}" +
                     "@${bounds.left},${bounds.top}-${bounds.right},${bounds.bottom}" +
                     "/alpha=${view.alpha}/translationY=${view.translationY}" +
@@ -747,6 +765,58 @@ internal object PageWallpaperUnderlay {
         }
         runCatching { visit(decor, 0) }
         if (nearby.isNotEmpty()) state.muteHintNearby = nearby.joinToString(";")
+    }
+
+    /**
+     * The cold-launch diagnostic identified a native StoryMuteView at the
+     * lower-left of FirstScreenFrameLayout: it is visible when the theme
+     * first makes the entire window transparent, even though the Me page
+     * has not entered its story pull-down. Hide ONLY this accidental idle
+     * startup overlay, and only until the first native page transition or
+     * a detectable Me-list pull gesture.
+     *
+     * Do not remove/reparent the view or touch its children. Native story
+     * gestures and the same widget after startup remain host-controlled.
+     */
+    private fun updateColdStartStoryMute(state: State, page: Int?) {
+        if (!state.storyMuteGuardArmed) return
+        if (page != 3) {
+            releaseColdStartStoryMute(state)
+            state.storyMuteGuardArmed = false
+            return
+        }
+        val mute = state.storyMuteView?.get() ?: return
+        if (!mute.isAttachedToWindow) return
+        val list = state.cardList?.get()
+        val pos = IntArray(2)
+        list?.getLocationOnScreen(pos)
+        val atRest = list == null ||
+            (list.scrollY >= -12 && list.translationY < 12f &&
+                (state.storyMuteListY == Int.MIN_VALUE ||
+                    kotlin.math.abs(pos[1] - state.storyMuteListY) < 12))
+        if (!atRest) {
+            releaseColdStartStoryMute(state)
+            state.storyMuteGuardArmed = false
+            return
+        }
+        if (state.storyMuteSuppressed) return
+        if (mute.visibility != View.VISIBLE) return
+        if (state.storyMuteListY == Int.MIN_VALUE && list != null)
+            state.storyMuteListY = pos[1]
+        state.storyMuteOriginalVisibility = mute.visibility
+        mute.visibility = View.INVISIBLE // keep all native geometry unchanged
+        state.storyMuteSuppressed = true
+        state.storyMuteSuppressionCount++
+    }
+
+    private fun releaseColdStartStoryMute(state: State) {
+        val mute = state.storyMuteView?.get()
+        // Never override a later native visibility update (GONE/INVISIBLE).
+        if (state.storyMuteSuppressed && mute?.visibility == View.INVISIBLE) {
+            mute.visibility = state.storyMuteOriginalVisibility
+            state.storyMuteNativeReleaseCount++
+        }
+        state.storyMuteSuppressed = false
     }
 
     /**
@@ -1871,6 +1941,7 @@ internal object PageWallpaperUnderlay {
     }
 
     private fun restore(state: State) {
+        releaseColdStartStoryMute(state)
         restoreTaskBarPainters(state)
         restoreActionBarPrimaryBackground(state)
         state.patches.asReversed().forEach { patch ->
@@ -1935,6 +2006,7 @@ internal object PageWallpaperUnderlay {
             "资料卡焦点抑制=${state.cardFocusSuppressed} 返回主页复查=${state.launcherReturnChecks} " +
             "资料卡淡底修复=${state.cardFaintRepairs} 标题区底板修复=${state.titleRegionRepairs} " +
             "首次我页静音提示=探测:${state.muteHintProbes},命中:${state.muteHintFirstHit},邻近:${state.muteHintNearby} " +
+            "静音误显收敛=抑制:${state.storyMuteSuppressionCount},原生恢复:${state.storyMuteNativeReleaseCount},当前隐藏:${state.storyMuteSuppressed} " +
             "滚动标题绘制=覆盖:${state.scrollingTitleDraws},跳过:${state.scrollingTitleSkips} " +
             "顶栏即时恢复=Primary:${state.toolbarInstantPrimaryRepairs},View:${state.toolbarInstantViewRepairs},最后Tab:${state.toolbarLastInstantTab} " +
             "会话滚动标题=${state.conversationHeaderState} 标题锚点命中=${state.conversationTitleAnchors} " +
