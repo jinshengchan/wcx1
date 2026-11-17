@@ -490,11 +490,7 @@ internal object PageWallpaperUnderlay {
             while (parent != null && depth++ < 16) {
                 if (parent is ListView) {
                     val name = parent.javaClass.simpleName
-                    return when (activePage) {
-                        0 -> name == "ConversationListView"
-                        1, 3 -> name == "PullDownListView"
-                        else -> false
-                    }
+                    return name == "ConversationListView" || name == "PullDownListView"
                 }
                 parent = parent.parent as? View
             }
@@ -506,7 +502,11 @@ internal object PageWallpaperUnderlay {
             if (view !== decor) {
                 val bottomTab = ThemeHostAdapter.isBottomTab(view)
                 val toolbar = MainSurfaceBackgrounds.isToolbar(view)
-                val firstScreen = view.javaClass.simpleName == "FirstScreenFrameLayout" &&
+                val simpleName = view.javaClass.simpleName
+                if (simpleName == "StoryMuteView") {
+                    state.storyMuteView = WeakReference(view)
+                }
+                val firstScreen = simpleName == "FirstScreenFrameLayout" &&
                     view.width >= decor.width * 0.90f
                 if (firstScreen) {
                     state.firstScreen = WeakReference(view)
@@ -549,6 +549,7 @@ internal object PageWallpaperUnderlay {
             }
         }
         walk(decor, 0)
+        updateColdStartStoryMute(state, activePage)
     }
 
     /**
@@ -723,7 +724,7 @@ internal object PageWallpaperUnderlay {
     private fun sampleMeMuteHint(state: State, decor: ViewGroup) {
         if (state.muteHintFirstHit != "未捕获" || state.muteHintProbes >= 12) return
         val now = SystemClock.uptimeMillis()
-        if (now - state.muteHintLastProbeAt < 250L) return
+        if (state.muteHintLastProbeAt != 0L && now - state.muteHintLastProbeAt < 200L) return
         state.muteHintLastProbeAt = now
         state.muteHintProbes++
         val nearby = ArrayList<String>(6)
@@ -798,39 +799,47 @@ internal object PageWallpaperUnderlay {
      * gestures and the same widget after startup remain host-controlled.
      */
     private fun updateColdStartStoryMute(state: State, page: Int?) {
-        if (!state.storyMuteGuardArmed || page == null) return
+        val mute = state.storyMuteView?.get() ?: return
+        if (!mute.isAttachedToWindow) return
         if (page != 3) {
-            // First startup can briefly land on tab 0 before restoring
-            // the previously selected Me tab. Keep the one-shot guard
-            // armed until it has actually captured and suppressed the hint.
-            if (state.storyMuteSuppressed) {
-                releaseColdStartStoryMute(state)
-                state.storyMuteGuardArmed = false
+            // While not on Me tab, never restore StoryMuteView to VISIBLE;
+            // if it is accidentally visible, keep it INVISIBLE.
+            if (mute.visibility == View.VISIBLE) {
+                state.storyMuteOriginalVisibility = View.VISIBLE
+                mute.visibility = View.INVISIBLE
+                state.storyMuteSuppressed = true
+                state.storyMuteSuppressionCount++
             }
             return
         }
-        val mute = state.storyMuteView?.get() ?: return
-        if (!mute.isAttachedToWindow) return
+        val decor = state.decor.get() ?: return
         val list = state.cardList?.get()
+        val row = state.cardRow?.get()
         val pos = IntArray(2)
-        list?.getLocationOnScreen(pos)
-        val atRest = list == null ||
-            (list.scrollY >= -12 && list.translationY < 12f &&
-                (state.storyMuteListY == Int.MIN_VALUE ||
-                    kotlin.math.abs(pos[1] - state.storyMuteListY) < 12))
-        if (!atRest) {
+        // Measure actual pull-down distance of the Me profile card or list
+        val target = row ?: list
+        target?.getLocationOnScreen(pos)
+        if (state.storyMuteListY == Int.MIN_VALUE && target != null && target.isShown) {
+            state.storyMuteListY = pos[1]
+        }
+        val pullThreshold = (decor.height * 0.08f).toInt().coerceAtLeast(160)
+        val pulledDown = target != null && (
+            target.translationY > pullThreshold ||
+            (list != null && list.scrollY < -pullThreshold) ||
+            (state.storyMuteListY != Int.MIN_VALUE && (pos[1] - state.storyMuteListY) > pullThreshold)
+        )
+        if (pulledDown) {
+            // User is actively pulling down the Me header (e.g. for Video Status): allow native hint
             releaseColdStartStoryMute(state)
-            state.storyMuteGuardArmed = false
             return
         }
-        if (state.storyMuteSuppressed) return
-        if (mute.visibility != View.VISIBLE) return
-        if (state.storyMuteListY == Int.MIN_VALUE && list != null)
-            state.storyMuteListY = pos[1]
-        state.storyMuteOriginalVisibility = mute.visibility
-        mute.visibility = View.INVISIBLE // keep all native geometry unchanged
-        state.storyMuteSuppressed = true
-        state.storyMuteSuppressionCount++
+        // At rest on Me tab: re-enforce INVISIBLE whenever host sets StoryMuteView to VISIBLE
+        if (mute.visibility == View.VISIBLE) {
+            state.storyMuteOriginalVisibility = View.VISIBLE
+            mute.visibility = View.INVISIBLE
+            state.storyMuteSuppressed = true
+            state.storyMuteSuppressionCount++
+        }
     }
 
     private fun releaseColdStartStoryMute(state: State) {
@@ -990,7 +999,7 @@ internal object PageWallpaperUnderlay {
     }
 
     private fun refreshConversationHeaders(state: State, decor: ViewGroup, pager: ViewGroup, page: Int?) {
-        if (page != 0) return
+        if (page != 0 && page != 1) return
         val now = SystemClock.uptimeMillis()
         if (!state.dirty && now - state.lastConversationHeaderScanAt < 250L) return
         state.lastConversationHeaderScanAt = now
@@ -1088,16 +1097,6 @@ internal object PageWallpaperUnderlay {
      * Never hide TaskBarContainer or the mini-program RecyclerView.
      */
     private fun updateTaskBarPainters(state: State, decor: ViewGroup, page: Int?) {
-        if (page != 0) {
-            restoreTaskBarPainters(state)
-            state.taskBarState = "非首页"
-            return
-        }
-        // Cold-start capture showed four native taskbar painters hidden while
-        // WindowWallpaper.drawCount was still ZERO. Do not change host child
-        // visibility/alpha until the initial wallpaper frame actually paints:
-        // the native first-layout animation (including Me's mute-play hint)
-        // must get one untouched pass before theme-specific suppression.
         if (state.wallpaper.drawCount == 0) {
             state.taskBarFirstFrameDeferrals++
             state.taskBarState = "首帧前保留原生画笔"
@@ -1105,7 +1104,7 @@ internal object PageWallpaperUnderlay {
         }
         val now = SystemClock.uptimeMillis()
         if (now - state.lastTaskBarScanAt >= 180L &&
-            (state.taskBarHeader?.get() == null || state.dirty || state.taskBarPainters.isEmpty())) {
+            (state.taskBarHeader?.get() == null || state.dirty || state.taskBarPainters.isEmpty() || state.lockedPaints.isEmpty())) {
             state.lastTaskBarScanAt = now
             var visited = 0
             fun scan(view: View, depth: Int) {
@@ -1127,6 +1126,13 @@ internal object PageWallpaperUnderlay {
                 }
             }
             scan(decor, 0)
+        }
+        if (page != 0) {
+            // Keep taskbar painters and TaskBarBottomView.e muted across tab switches
+            // so horizontal ViewPager swipes between Tab 0 and Tab 1 never expose #FFEDEDED.
+            muteTaskBarPainters(state)
+            state.taskBarState = "非首页（保持静默）"
+            return
         }
         val header = state.taskBarHeader?.get()
         val visible = Rect()
