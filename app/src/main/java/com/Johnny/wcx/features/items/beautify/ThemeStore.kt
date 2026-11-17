@@ -247,7 +247,16 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
             }.getOrNull() ?: (thisObject as? Activity) ?: return@hookAfter
             if (!ThemePages.isLauncher(activity)) return@hookAfter
             ThemeSurface.applyNow(activity)
-            activity.window?.decorView?.post { ThemeSurface.applyNow(activity) }
+            // Avoid a second unconditional full theme re-apply during cold
+            // launch. The original post was a fallback for layouts that were
+            // not ready; preserve it only when the first attach actually
+            // failed. Repeated successful writes can race native Me pull-down
+            // overlays during its first layout.
+            activity.window?.decorView?.post {
+                if (wallpaperSwitchOn() && !ThemeSurface.isAttached(activity)) {
+                    ThemeSurface.applyNow(activity)
+                }
+            }
             val tabsAdapter = runCatching {
                 thisObject.reflekt().firstField { name = "mTabsAdapter" }.get()
             }.getOrNull() ?: ThemeHostAdapter.liveTabAdapter(activity.window?.decorView as? android.view.ViewGroup)
@@ -345,6 +354,9 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     @Volatile private var homeBarSetterHits = 0
     @Volatile private var homeBarSetterLastColor: Int? = null
     @Volatile private var homeBarSetterHooked = false
+    @Volatile private var scrollingTitleHooked = false
+    @Volatile private var scrollingTitleHookStatus = "未检查"
+    @Volatile private var scrollingTitleHookHits = 0
 
     /**
      * Read and override the host's OWN ActionBarColor accessor, not a guessed
@@ -470,6 +482,61 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         }
     }
 
+    /**
+     * The scrolling header is an actual ConversationListView header (native
+     * TaskBarContainer). Its white fill may be painted directly by the host,
+     * not through HomeUI.t or View.background. Hook only methods DECLARED
+     * on that exact class; never hook framework ViewGroup globally.
+     *
+     * Painting after its onDraw, or before dispatchDraw, replaces the white
+     * native body but leaves the original title/search/plus children on top.
+     * No new View, changes to children, translations, or touch listeners.
+     */
+    private fun hookScrollingTitleDraw() {
+        if (scrollingTitleHooked) return
+        val headerClass = runCatching {
+            ClassLoaders.HOST.loadClass("com.tencent.mm.plugin.taskbar.ui.TaskBarContainer")
+        }.getOrNull() ?: run {
+            scrollingTitleHookStatus = "TaskBarContainer 类未找到"
+            return
+        }
+        fun findExact(name: String) = headerClass.declaredMethods.singleOrNull { method ->
+            method.name == name &&
+                method.parameterTypes.size == 1 &&
+                method.parameterTypes[0] == android.graphics.Canvas::class.java &&
+                method.returnType == Void.TYPE &&
+                !java.lang.reflect.Modifier.isStatic(method.modifiers)
+        }
+        // Prefer onDraw-after: own color paint has finished; native children
+        // have not drawn yet. A declared dispatchDraw-before is also safe.
+        val onDraw = findExact("onDraw")
+        val dispatch = if (onDraw == null) findExact("dispatchDraw") else null
+        val target = onDraw ?: dispatch ?: run {
+            scrollingTitleHookStatus = "无可安全拦截的本类绘制方法，跳过"
+            return
+        }
+        runCatching {
+            target.isAccessible = true
+            if (onDraw != null) {
+                target.hookAfter {
+                    val header = thisObject as? View ?: return@hookAfter
+                    val canvas = args.getOrNull(0) as? android.graphics.Canvas ?: return@hookAfter
+                    if (PageWallpaperUnderlay.drawScrollingHeaderUnderChildren(header, canvas))
+                        scrollingTitleHookHits++
+                }
+            } else {
+                target.hookBefore {
+                    val header = thisObject as? View ?: return@hookBefore
+                    val canvas = args.getOrNull(0) as? android.graphics.Canvas ?: return@hookBefore
+                    if (PageWallpaperUnderlay.drawScrollingHeaderUnderChildren(header, canvas))
+                        scrollingTitleHookHits++
+                }
+            }
+            scrollingTitleHooked = true
+            scrollingTitleHookStatus = "已挂 ${headerClass.simpleName}.${target.name}"
+        }.onFailure { scrollingTitleHookStatus = "挂载失败：${it.javaClass.simpleName}" }
+    }
+
     /** 已挂过切页监听的 adapter，避免每次进主页重复 hook。 */
     private val hookedTabsAdapters: MutableSet<Any> =
         java.util.Collections.newSetFromMap(java.util.WeakHashMap<Any, Boolean>())
@@ -569,6 +636,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         hookLiveTabAdapters()
         hookNativeActionBarColor()
         hookHomeActionBarColorWriter()
+        hookScrollingTitleDraw()
         hookChattingPage()
         hookChattingFragment()
         ThemeSurface.registerCallbacks(true)
@@ -1154,6 +1222,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
                 "拦截:$homeBarSetterHits 次 原值:" +
                 (homeBarSetterLastColor?.let { "#${Integer.toHexString(it).padStart(8, '0')}" } ?: "未命中")
         )
+        appendLine("会话滚动标题画布 = $scrollingTitleHookStatus 绘制:${scrollingTitleHookHits} 次")
 
         // 分页是否生效，就看这两行：页码读不到 / 切页 hook 没挂上，都会「4 页全是主页那张」
         appendLine("doOnCreate hook = ${if (doOnCreateHooked) "已注册" else "未注册（功能没开过）"}")
