@@ -315,6 +315,7 @@ internal object ThemeSurface {
                 // 撤掉主界面壁纸层（双保险之一；另一层是容器自身的挡色背景）
                 runCatching { TabWallpaperRenderer.clear(activity); restoreWindow(activity) }
             }
+            runCatching { applyTransparentNavBar(activity) }
             return
         }
 
@@ -577,12 +578,52 @@ internal object ThemeSurface {
      */
     private fun applyTransparentNavBar(activity: Activity) {
         val w = activity.window ?: return
-        try {
+        fun clearNav(win: android.view.Window) {
             @Suppress("DEPRECATION")
-            w.navigationBarColor = AndroidColor.TRANSPARENT
+            win.navigationBarColor = AndroidColor.TRANSPARENT
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                w.isNavigationBarContrastEnforced = false
+                win.isNavigationBarContrastEnforced = false
             }
+            val decor = win.decorView as? ViewGroup ?: return
+            // Clear PhoneWindow's navigationBarBackground view if present
+            decor.findViewById<View>(android.R.id.navigationBarBackground)?.let { navBg ->
+                navBg.background = null
+                navBg.alpha = 0f
+            }
+            // Clear any bottom-inset filler bar (height <= 96px sitting at the very bottom of the screen)
+            // whose background is solid #F7F7F7 / #EDEDED neutral gray.
+            if (decor.height > 0) {
+                val rect = android.graphics.Rect()
+                var visited = 0
+                fun walkBottom(view: View, depth: Int) {
+                    if (depth > 18 || visited++ >= 600 || view.visibility != View.VISIBLE) return
+                    if (view.getGlobalVisibleRect(rect) &&
+                        rect.bottom >= decor.height - 4 &&
+                        rect.top >= decor.height - 96 &&
+                        rect.width() >= decor.width * 0.85f) {
+                        val bg = view.background as? android.graphics.drawable.ColorDrawable
+                        if (bg != null && AndroidColor.alpha(bg.color) == 255) {
+                            val r = AndroidColor.red(bg.color)
+                            val g = AndroidColor.green(bg.color)
+                            val b = AndroidColor.blue(bg.color)
+                            if (r >= 220 && g >= 220 && b >= 220 && maxOf(r, g, b) - minOf(r, g, b) <= 10) {
+                                view.setBackgroundColor(AndroidColor.TRANSPARENT)
+                            }
+                        }
+                    }
+                    if (view is ViewGroup && (!view.getGlobalVisibleRect(rect) || rect.bottom >= decor.height - 96)) {
+                        for (i in 0 until view.childCount) {
+                            walkBottom(view.getChildAt(i) ?: continue, depth + 1)
+                        }
+                    }
+                }
+                runCatching { walkBottom(decor, 0) }
+            }
+        }
+        try {
+            clearNav(w)
+            w.decorView?.post { runCatching { clearNav(w) } }
+            w.decorView?.postDelayed({ runCatching { if (chatPageVisible || ThemePages.isChatting(activity)) clearNav(w) } }, 120L)
         } catch (e: Throwable) {
             WeLogger.w(TAG, "聊天页导航栏透明化异常：${e.message}", e)
         }
