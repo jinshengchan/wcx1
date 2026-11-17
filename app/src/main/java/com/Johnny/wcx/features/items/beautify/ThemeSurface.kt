@@ -315,7 +315,7 @@ internal object ThemeSurface {
                 // 撤掉主界面壁纸层（双保险之一；另一层是容器自身的挡色背景）
                 runCatching { TabWallpaperRenderer.clear(activity); restoreWindow(activity) }
             }
-            runCatching { applyTransparentNavBar(activity) }
+            runCatching { clearChatFooterBottomInset(activity, hit?.container) }
             return
         }
 
@@ -570,62 +570,56 @@ internal object ThemeSurface {
     }
 
     /**
-     * 聊天页底部 48px 白条（#F7F7F7）的修复：
-     * 进聊天页时 restoreWindow() 会把 navigationBarColor 还回微信原生 #F7F7F7；
-     * 而聊天页（Fragment 路径）与主界面共用 LauncherUI 窗口，底部导航栏区域就露出灰条。
-     * 只清导航栏、不动状态栏：聊天页标题栏保持微信原生；也不改 restoreWindow 本身，
-     * 回主界面时它还要负责恢复。
+     * 清理聊天页底部输入框（ChatFooter）最底端那条 48px 的 #F7F7F7 垫片/背景条，
+     * 不再无效修改 window.navigationBarColor，直接定位聊天页底部的浅灰背景 View / Drawable。
      */
-    private fun applyTransparentNavBar(activity: Activity) {
-        val w = activity.window ?: return
-        fun clearNav(win: android.view.Window) {
-            @Suppress("DEPRECATION")
-            win.navigationBarColor = AndroidColor.TRANSPARENT
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                win.isNavigationBarContrastEnforced = false
+    private fun clearChatFooterBottomInset(activity: Activity, rootHint: View? = null) {
+        val decor = activity.window?.decorView as? ViewGroup ?: return
+        fun sweepBottom() {
+            if (decor.height <= 0) return
+            val rect = android.graphics.Rect()
+            var visited = 0
+            fun isLightGray(color: Int): Boolean {
+                if (AndroidColor.alpha(color) == 0) return false
+                val r = AndroidColor.red(color)
+                val g = AndroidColor.green(color)
+                val b = AndroidColor.blue(color)
+                return r >= 220 && g >= 220 && b >= 220 && maxOf(r, g, b) - minOf(r, g, b) <= 10
             }
-            val decor = win.decorView as? ViewGroup ?: return
-            // Clear PhoneWindow's navigationBarBackground view if present
-            decor.findViewById<View>(android.R.id.navigationBarBackground)?.let { navBg ->
-                navBg.background = null
-                navBg.alpha = 0f
-            }
-            // Clear any bottom-inset filler bar (height <= 96px sitting at the very bottom of the screen)
-            // whose background is solid #F7F7F7 / #EDEDED neutral gray.
-            if (decor.height > 0) {
-                val rect = android.graphics.Rect()
-                var visited = 0
-                fun walkBottom(view: View, depth: Int) {
-                    if (depth > 18 || visited++ >= 600 || view.visibility != View.VISIBLE) return
-                    if (view.getGlobalVisibleRect(rect) &&
-                        rect.bottom >= decor.height - 4 &&
-                        rect.top >= decor.height - 96 &&
-                        rect.width() >= decor.width * 0.85f) {
-                        val bg = view.background as? android.graphics.drawable.ColorDrawable
-                        if (bg != null && AndroidColor.alpha(bg.color) == 255) {
-                            val r = AndroidColor.red(bg.color)
-                            val g = AndroidColor.green(bg.color)
-                            val b = AndroidColor.blue(bg.color)
-                            if (r >= 220 && g >= 220 && b >= 220 && maxOf(r, g, b) - minOf(r, g, b) <= 10) {
+            fun walk(view: View, depth: Int, inFooter: Boolean) {
+                if (depth > 20 || visited++ >= 800 || view.visibility != View.VISIBLE) return
+                val cls = view.javaClass.name
+                val insideFooter = inFooter || cls.contains("ChatFooter") || cls.contains("ChattingFooter")
+                if (view.getGlobalVisibleRect(rect)) {
+                    // 命中贴在屏幕最底端（y = 2560..2608）的窄条垫片，或 ChatFooter 底部背景容器
+                    val isBottomStrip = rect.bottom >= decor.height - 4 &&
+                        rect.top >= decor.height - 110 &&
+                        rect.width() >= decor.width * 0.80f
+                    if (isBottomStrip || (insideFooter && rect.bottom >= decor.height - 4 && view !is android.widget.EditText)) {
+                        val bg = view.background
+                        val current = bg?.current
+                        if (current is android.graphics.drawable.ColorDrawable && isLightGray(current.color)) {
+                            // 若是输入框本身（白色圆角框 y=2417..2534）则跳过，只清贴底的 #F7F7F7 容器/垫片
+                            if (rect.top >= decor.height - 100 || view is ViewGroup) {
                                 view.setBackgroundColor(AndroidColor.TRANSPARENT)
                             }
                         }
                     }
-                    if (view is ViewGroup && (!view.getGlobalVisibleRect(rect) || rect.bottom >= decor.height - 96)) {
-                        for (i in 0 until view.childCount) {
-                            walkBottom(view.getChildAt(i) ?: continue, depth + 1)
-                        }
+                }
+                if (view is ViewGroup) {
+                    for (i in 0 until view.childCount) {
+                        walk(view.getChildAt(i) ?: continue, depth + 1, insideFooter)
                     }
                 }
-                runCatching { walkBottom(decor, 0) }
             }
+            runCatching { walk(rootHint ?: decor, 0, false) }
         }
         try {
-            clearNav(w)
-            w.decorView?.post { runCatching { clearNav(w) } }
-            w.decorView?.postDelayed({ runCatching { if (chatPageVisible || ThemePages.isChatting(activity)) clearNav(w) } }, 120L)
+            sweepBottom()
+            decor.post { runCatching { sweepBottom() } }
+            decor.postDelayed({ runCatching { if (chatPageVisible || ThemePages.isChatting(activity)) sweepBottom() } }, 120L)
         } catch (e: Throwable) {
-            WeLogger.w(TAG, "聊天页导航栏透明化异常：${e.message}", e)
+            WeLogger.w(TAG, "清理 ChatFooter 底部白条异常：${e.message}", e)
         }
     }
 
@@ -934,7 +928,11 @@ internal object ThemeSurface {
         anchorLeaveSince = 0L
         if (entering) runCatching {
             liveActivities().forEach { act ->
-                if (ThemePages.isLauncher(act)) { TabWallpaperRenderer.clear(act); restoreWindow(act); applyTransparentNavBar(act) }
+                if (ThemePages.isLauncher(act)) {
+                    TabWallpaperRenderer.clear(act)
+                    restoreWindow(act)
+                    clearChatFooterBottomInset(act, fragmentView)
+                }
             }
         }
     }
@@ -1028,10 +1026,7 @@ internal object ThemeSurface {
         java.util.WeakHashMap<Activity, android.graphics.drawable.Drawable?>()
 
     private fun applyChattingWallpaper(activity: Activity) {
-        // 独立 ChattingUI Activity 路径：它的窗口从未被 applyImmersive 碰过，
-        // navigationBarColor 一直是微信原生 #F7F7F7，同样置透明。
-        // Fragment 路径已在 onChattingFragmentShown 里处理，这里是第二条路的兜底。
-        applyTransparentNavBar(activity)
+        clearChatFooterBottomInset(activity)
         val src = ThemeMaterials.wallpaperSourceFor(activity, ThemeStore.activeThemeIdOrEmpty())
         if (src == null) {
             restoreWindowBackground(activity)
