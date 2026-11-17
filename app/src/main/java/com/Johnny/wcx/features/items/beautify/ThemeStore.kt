@@ -687,6 +687,9 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         hookScrolledOk = false
         actionBarColorGetterHooked = false
         homeBarSetterHooked = false
+        scrollingTitleHooked = false
+        scrollingTitleHookStatus = "已停用"
+        scrollingTitleHookHits = 0
         homeBarSetterStatus = "已停用"
         homeBarSetterHits = 0
         homeBarSetterLastColor = null
