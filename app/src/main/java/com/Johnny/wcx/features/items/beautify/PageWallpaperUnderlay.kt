@@ -781,8 +781,13 @@ internal object PageWallpaperUnderlay {
     private fun updateColdStartStoryMute(state: State, page: Int?) {
         if (!state.storyMuteGuardArmed) return
         if (page != 3) {
-            releaseColdStartStoryMute(state)
-            state.storyMuteGuardArmed = false
+            // First startup can briefly land on tab 0 before restoring
+            // the previously selected Me tab. Keep the one-shot guard
+            // armed until it has actually captured and suppressed the hint.
+            if (state.storyMuteSuppressed) {
+                releaseColdStartStoryMute(state)
+                state.storyMuteGuardArmed = false
+            }
             return
         }
         val mute = state.storyMuteView?.get() ?: return
