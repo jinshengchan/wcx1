@@ -110,6 +110,7 @@ internal object PageWallpaperUnderlay {
         var taskBarHiddenCount = 0
         var taskBarPainterSamples = "无"
         var taskBarFullyExpandedAt = 0L
+        var taskBarFirstFrameDeferrals = 0
         // Backed-up ActionBar primary background (mBackground), restored
         // when wallpaper mode ends so the native title bar comes back.
         var toolbarPrimaryBackup: Drawable? = null
@@ -915,6 +916,16 @@ internal object PageWallpaperUnderlay {
         if (page != 0) {
             restoreTaskBarPainters(state)
             state.taskBarState = "非首页"
+            return
+        }
+        // Cold-start capture showed four native taskbar painters hidden while
+        // WindowWallpaper.drawCount was still ZERO. Do not change host child
+        // visibility/alpha until the initial wallpaper frame actually paints:
+        // the native first-layout animation (including Me's mute-play hint)
+        // must get one untouched pass before theme-specific suppression.
+        if (state.wallpaper.drawCount == 0) {
+            state.taskBarFirstFrameDeferrals++
+            state.taskBarState = "首帧前保留原生画笔"
             return
         }
         val now = SystemClock.uptimeMillis()
@@ -1930,7 +1941,7 @@ internal object PageWallpaperUnderlay {
             "标题定点修复=${state.conversationTitleRepairs} 标题Header修复=${state.conversationHeaderRepairs} " +
             "滚动标题窄条命中=${state.conversationStripChecks} 修复前绘制=${state.conversationStripIdleDraws} " +
             "窄条闲置抑制=${state.conversationStripSuppressions} " +
-            "小程序展开=${state.taskBarState} 渐变透明度=${state.taskBarGradientAlpha} 已藏画笔=${state.taskBarHiddenCount} 画笔实况=${state.taskBarPainterSamples} " +
+            "小程序展开=${state.taskBarState} 首帧画笔延后=${state.taskBarFirstFrameDeferrals} 渐变透明度=${state.taskBarGradientAlpha} 已藏画笔=${state.taskBarHiddenCount} 画笔实况=${state.taskBarPainterSamples} " +
             "最近恢复原因=${restoreReasons[decor] ?: "无"} " +
             "行底色=${state.patches.count { !it.structural }} " +
             "保留行背景=${state.retainedRows.joinToString(",").ifEmpty { "无" }} " +
