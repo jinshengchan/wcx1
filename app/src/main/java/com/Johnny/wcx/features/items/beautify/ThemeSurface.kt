@@ -189,7 +189,17 @@ internal object ThemeSurface {
     private var lastChatHit: String? = null
 
     @Volatile
+    private var lastChatBottomDiag: String = "未观测"
+
+    @Volatile
     private var lastChatCheckAt = 0L
+
+    private class LockedChatBottomDrawable : android.graphics.drawable.ColorDrawable(AndroidColor.TRANSPARENT) {
+        override fun setColor(color: Int) {
+            // Block host from recoloring the bottom 48px inset back to #F7F7F7
+            super.setColor(AndroidColor.TRANSPARENT)
+        }
+    }
 
     private class MainWatcher(activity: Activity, decor: ViewGroup) {
         val activity = WeakReference(activity)
@@ -281,7 +291,7 @@ internal object ThemeSurface {
         }
         val main = if (onMainPage) "主页面=✓" else "主页面=✗"
         val out = if (chatPageVisible) "聊天页中：$byFragment，$byView" else "不是聊天页（$byFragment，$byView）"
-        return "$out [$main ${ChatPageGuard.mainPageInfo}]"
+        return "$out [$main ${ChatPageGuard.mainPageInfo}] 聊天底栏=$lastChatBottomDiag"
     }
 
     /**
@@ -327,6 +337,7 @@ internal object ThemeSurface {
         //          注意：必须排除刚触发 onChattingFragmentShown 的前 1200ms 转场动画期（此时聊天页刚滑入、
         //          底部 4 个 Tab 尚未隐藏，不能在同一秒把刚进入的聊天页当成残留清掉）。
         if (onMainPage && fragmentChatActive && now - fragmentChatEnteredAt >= 1200L) {
+            ChatPageGuard.restoreAll()
             fragmentChatActive = false
             viewChatActive = false
             anchorLeaveSince = 0
@@ -580,7 +591,6 @@ internal object ThemeSurface {
     private fun clearChatFooterBottomInset(activity: Activity, rootHint: View? = null) {
         val w = activity.window ?: return
         val decor = w.decorView as? ViewGroup ?: return
-        var loggedDiag = false
         fun sweepBottom() {
             if (decor.height <= 0) return
             @Suppress("DEPRECATION")
@@ -596,9 +606,10 @@ internal object ThemeSurface {
             val rect = android.graphics.Rect()
             var visited = 0
             var cleared = 0
-            val bottomHits = ArrayList<String>(8)
+            val bottomHits = ArrayList<String>(12)
             fun bgDesc(bg: android.graphics.drawable.Drawable?): String {
                 if (bg == null) return "null"
+                if (bg is LockedChatBottomDrawable) return "LockedTrans"
                 val cur = bg.current
                 return if (cur is android.graphics.drawable.ColorDrawable) {
                     String.format("Color(#%08X)", cur.color)
@@ -609,29 +620,16 @@ internal object ThemeSurface {
             fun isInputBox(view: View, r: android.graphics.Rect): Boolean {
                 if (view is android.widget.EditText) return true
                 val s = view.javaClass.simpleName
-                if (s.contains("EditText") || s.contains("MMEditText") || s.contains(" dh")) return true
-                // 白色圆角输入框宽度小于屏幕宽度的 72%，且不贴最底边 2608
+                if (s.contains("EditText") || s.contains("MMEditText")) return true
                 return r.width() in 100..(decor.width * 0.72f).toInt() && r.bottom < decor.height - 20
             }
             fun walk(view: View, depth: Int, inChat: Boolean, inFooter: Boolean) {
-                if (depth > 24 || visited++ >= 1400 || view.visibility != View.VISIBLE) return
+                if (depth > 26 || visited++ >= 1600 || view.visibility != View.VISIBLE) return
                 val cls = view.javaClass.name
                 val simple = view.javaClass.simpleName
                 val insideChat = inChat || simple == "TestTimeForChatting" || simple == "ChattingUILayout" || cls.contains(".chatting.")
                 val insideFooter = inFooter || cls.contains("ChatFooter") || simple.contains("ChatFooter")
                 if (view.getGlobalVisibleRect(rect)) {
-                    // 记录所有覆盖底部 y = 2550..2608 且宽度 >= 75% 的视图，用于一眼看穿谁在最底下
-                    if (!loggedDiag && rect.bottom >= decor.height - 58 && rect.width() >= decor.width * 0.75f) {
-                        val bg = view.background
-                        if (bg != null || insideFooter || simple.contains("Bg") || view is android.widget.ImageView || rect.top >= decor.height - 260) {
-                            if (bottomHits.size < 8) {
-                                bottomHits.add("$simple@${rect.top}-${rect.bottom}(bg=${bgDesc(bg)} padB=${view.paddingBottom})")
-                            }
-                        }
-                    }
-                    // 清理条件：
-                    // 1. 屏幕最底端 48px 窄条（rect.top >= decor.height - 100 && rect.bottom >= decor.height - 4 && width >= 75%）
-                    // 2. 或 ChatFooter 内部高度覆盖到底端（rect.bottom >= decor.height - 4 && rect.top >= decor.height - 260）的容器背景（排除输入框和按钮图标）
                     val isBottomInsetStrip = rect.bottom >= decor.height - 4 &&
                         rect.top >= decor.height - 100 &&
                         rect.width() >= decor.width * 0.75f
@@ -643,15 +641,15 @@ internal object ThemeSurface {
                         !simple.contains("WeImageView")
                     if (isBottomInsetStrip || isFooterShell) {
                         val bg = view.background
-                        if (bg != null) {
-                            val cur = bg.current
-                            val alreadyTransparent = cur is android.graphics.drawable.ColorDrawable && AndroidColor.alpha(cur.color) == 0
-                            if (!alreadyTransparent) {
-                                view.setBackgroundColor(AndroidColor.TRANSPARENT)
-                                cleared++
-                            }
+                        if (bg != null && bg !is LockedChatBottomDrawable) {
+                            val left = view.paddingLeft
+                            val top = view.paddingTop
+                            val right = view.paddingRight
+                            val bottom = view.paddingBottom
+                            view.background = LockedChatBottomDrawable()
+                            view.setPadding(left, top, right, bottom)
+                            cleared++
                         }
-                        // 同时检查该底部视图是否有自绘的 #F7F7F7 / #EDEDED Paint 字段
                         var type: Class<*>? = view.javaClass
                         while (type != null && !type.name.startsWith("android.")) {
                             for (field in type.declaredFields) {
@@ -677,6 +675,17 @@ internal object ThemeSurface {
                             type = type.superclass
                         }
                     }
+                    // 收集聊天页底部（y >= 2350）或全屏容器/背景 ImageView 的诊断信息（持久化在 lastChatBottomDiag，不被 events 顶掉）
+                    if ((insideChat || insideFooter || rect.top >= decor.height - 120) &&
+                        rect.bottom >= decor.height - 96 &&
+                        rect.width() >= decor.width * 0.75f) {
+                        val bg = view.background
+                        if (bg != null || view.paddingBottom > 0 || view is android.widget.ImageView || simple.contains("Bg") || insideFooter || rect.top >= decor.height - 100) {
+                            if (bottomHits.size < 12) {
+                                bottomHits.add("$simple@${rect.top}-${rect.bottom}(bg=${bgDesc(bg)} padB=${view.paddingBottom})")
+                            }
+                        }
+                    }
                 }
                 if (view is ViewGroup) {
                     for (i in 0 until view.childCount) {
@@ -685,16 +694,15 @@ internal object ThemeSurface {
                 }
             }
             runCatching { walk(decor, 0, false, false) }
-            if (!loggedDiag && bottomHits.isNotEmpty()) {
-                loggedDiag = true
-                noteEvent("聊天底栏[清=$cleared]: ${bottomHits.joinToString(";")}")
+            if (bottomHits.isNotEmpty()) {
+                lastChatBottomDiag = "清=$cleared[${bottomHits.joinToString(";")}]"
             }
         }
         try {
             sweepBottom()
             decor.post { runCatching { sweepBottom() } }
             decor.postDelayed({ runCatching { if (chatPageVisible || ThemePages.isChatting(activity)) sweepBottom() } }, 150L)
-            decor.postDelayed({ runCatching { if (chatPageVisible || ThemePages.isChatting(activity)) sweepBottom() } }, 400L)
+            decor.postDelayed({ runCatching { if (chatPageVisible || ThemePages.isChatting(activity)) sweepBottom() } }, 450L)
         } catch (e: Throwable) {
             WeLogger.w(TAG, "清理 ChatFooter 底部白条异常：${e.message}", e)
         }

@@ -531,8 +531,14 @@ internal object PageWallpaperUnderlay {
                 val nativeRow = view is ViewGroup && inNativeList(view) &&
                     view.width >= decor.width * 0.45f &&
                     visibleRect.height() in 32..(decor.height / 3)
+                val bottomStrip = visibleRect.bottom >= decor.height - 60 &&
+                    visibleRect.top >= decor.height - 260 &&
+                    view.width >= decor.width * 0.75f
+                if (bottomStrip && view !is android.widget.TextView && view !is ImageView) {
+                    lockTaskBarBottomPaint(state, view)
+                }
                 val candidate = view.width >= decor.width * 0.75f ||
-                    bottomTab || firstScreen || homeShelf || nativeRow || toolbar
+                    bottomTab || firstScreen || homeShelf || nativeRow || toolbar || bottomStrip
                 if (candidate) {
                     val structural = view in structuralTargets || bottomTab || firstScreen || homeShelf || toolbar
                     val background = view.background
@@ -2172,7 +2178,40 @@ internal object PageWallpaperUnderlay {
             " 资料卡子树=${subtreeDump(state.cardRow?.get(), state)}" +
             " 遮挡排查=${coveringDumps(decor, state)}" +
             " 页区未处理底板=${unresolvedSurfaceSamples(decor, state)}" +
-            " 页区绘制层=${visibleRegionLayers(decor, state)}"
+            " 页区绘制层=${visibleRegionLayers(decor, state)}" +
+            " 底部条排查=${bottomStripLiveState(decor)}"
+    }
+
+    /** 专门排查屏幕最底部（y >= decor.height - 120 或 paddingBottom > 0）的所有视图、背景、画笔与边距。 */
+    private fun bottomStripLiveState(decor: ViewGroup): String {
+        if (decor.height <= 0) return "未布局"
+        val hits = ArrayList<String>(12)
+        val rect = Rect()
+        var visited = 0
+        fun walk(view: View, depth: Int) {
+            if (depth > 24 || visited++ >= 2200 || hits.size >= 12) return
+            val lp = view.layoutParams as? ViewGroup.MarginLayoutParams
+            val bMargin = lp?.bottomMargin ?: 0
+            val pBottom = view.paddingBottom
+            val shown = view.isShown && view.getGlobalVisibleRect(rect)
+            val atBottomStrip = shown && rect.bottom >= decor.height - 30 && rect.top >= decor.height - 180 && rect.width() >= decor.width * 0.50f
+            val stopsShortAtBottom = shown && rect.bottom in (decor.height - 96)..(decor.height - 8) && rect.width() >= decor.width * 0.70f
+            val isDecorChild = view.parent === decor && view !== decor.getChildAt(0)
+            if (atBottomStrip || stopsShortAtBottom || isDecorChild || (shown && (pBottom in 16..96 || bMargin in 16..96) && rect.bottom >= decor.height - 96)) {
+                val bg = view.background
+                val parentName = (view.parent as? View)?.javaClass?.simpleName ?: "root"
+                val pos = if (shown) "@${rect.top}-${rect.bottom}" else "@(${view.top}-${view.bottom}/vis=${view.visibility})"
+                hits.add("${view.javaClass.simpleName}$pos(父=$parentName bg=${bg?.javaClass?.simpleName ?: "null"}${bg?.let { retainedDetail(it) } ?: ""} padB=$pBottom marB=$bMargin)")
+            }
+            if (view is ViewGroup) {
+                for (i in 0 until view.childCount) {
+                    walk(view.getChildAt(i) ?: continue, depth + 1)
+                    if (hits.size >= 12) break
+                }
+            }
+        }
+        runCatching { walk(decor, 0) }
+        return hits.joinToString(";").ifEmpty { "无" }
     }
 
     private class WindowWallpaper(var bitmap: Bitmap, var shouldDraw: () -> Boolean) : Drawable() {
