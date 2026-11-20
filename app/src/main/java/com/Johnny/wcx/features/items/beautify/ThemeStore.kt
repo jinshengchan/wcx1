@@ -358,6 +358,19 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     @Volatile private var scrollingTitleHookStatus = "未检查"
     @Volatile private var scrollingTitleHookHits = 0
 
+    private fun canExposeWallpaperInToolbar(launcher: Activity): Boolean {
+        val rule = ThemeRuntime.current(launcher)?.profile?.background("chrome", "toolbarBackground")
+        return rule == null || rule === BackgroundRule.Native || rule === BackgroundRule.Inherit
+    }
+
+    private fun isNativeToolbarFill(color: Int): Boolean {
+        if (android.graphics.Color.alpha(color) != 255 || color == 0xFFF2F2F2.toInt()) return false
+        val red = android.graphics.Color.red(color)
+        val green = android.graphics.Color.green(color)
+        val blue = android.graphics.Color.blue(color)
+        return red >= 190 && maxOf(red, green, blue) - minOf(red, green, blue) <= 12
+    }
+
     /**
      * Read and override the host's OWN ActionBarColor accessor, not a guessed
      * action-bar child background. This is a narrow, optional hook: if 8.0.80
@@ -387,23 +400,20 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
             actionBarColorHookStatus = "未找到原生 getActionBarColor（可能已混淆）"
             return
         }
-        runCatching {
-            getter.isAccessible = true
-            getter.hookAfter {
-                val launcher = thisObject as? Activity ?: return@hookAfter
-                if (!ThemePages.isLauncher(launcher)) return@hookAfter
-                val original = result as? Int ?: return@hookAfter
-                actionBarColorOriginal = original
-                if (wallpaperSwitchOn() && usePageBackground() && ThemeSurface.onMainPage) {
-                    result = android.graphics.Color.TRANSPARENT
-                    actionBarColorHookHits++
-                }
+        getter.isAccessible = true
+        getter.hookAfter {
+            val launcher = thisObject as? Activity ?: return@hookAfter
+            if (!ThemePages.isLauncher(launcher)) return@hookAfter
+            val original = result as? Int ?: return@hookAfter
+            actionBarColorOriginal = original
+            if (isNativeToolbarFill(original) && ThemeSurface.activeFullscreenLauncher() === launcher &&
+                canExposeWallpaperInToolbar(launcher)) {
+                result = android.graphics.Color.TRANSPARENT
+                actionBarColorHookHits++
             }
-            actionBarColorGetterHooked = true
-            actionBarColorHookStatus = "已挂 ${getter.declaringClass.simpleName}.${getter.name}"
-        }.onFailure {
-            actionBarColorHookStatus = "挂载失败：${it.javaClass.simpleName}"
         }
+        actionBarColorGetterHooked = true
+        actionBarColorHookStatus = "已挂 ${getter.declaringClass.simpleName}.${getter.name}"
     }
 
     /**
@@ -441,45 +451,40 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
             return
         }
         val method = safe.single()
-        runCatching {
-            method.isAccessible = true
-            method.hookBefore {
-                if (!wallpaperSwitchOn() || !usePageBackground() || !ThemeSurface.onMainPage)
-                    return@hookBefore
-                // A previous incident made tabs unresponsive by adding a
-                // native action-bar child. Keep this fix strictly LauncherUI
-                // and full-window wallpaper only.
-                val launcher = ThemeSurface.liveActivities().firstOrNull {
-                    ThemePages.isLauncher(it) && PageWallpaperUnderlay.isAttached(it)
-                } ?: return@hookBefore
-                val toolbarRule = ThemeRuntime.current(launcher)?.profile
-                    ?.background("chrome", "toolbarBackground") ?: BackgroundRule.Inherit
-                if (toolbarRule !== BackgroundRule.Native &&
-                    toolbarRule !== BackgroundRule.Inherit) return@hookBefore
-                val old = args.getOrNull(0) as? Int ?: return@hookBefore
-                val spread = maxOf(
-                    android.graphics.Color.red(old),
-                    android.graphics.Color.green(old),
-                    android.graphics.Color.blue(old)
-                ) - minOf(
-                    android.graphics.Color.red(old),
-                    android.graphics.Color.green(old),
-                    android.graphics.Color.blue(old)
-                )
-                // Do not override dark mode, accented themes or non-white
-                // transition states. Only the opaque neutral-white title fill.
-                if (android.graphics.Color.alpha(old) != 255 ||
-                    spread > 12 || android.graphics.Color.red(old) < 190)
-                    return@hookBefore
-                homeBarSetterLastColor = old
-                args[0] = android.graphics.Color.TRANSPARENT
-                homeBarSetterHits++
-            }
-            homeBarSetterHooked = true
-            homeBarSetterStatus = "已挂 ${method.declaringClass.simpleName}.${method.name}"
-        }.onFailure {
-            homeBarSetterStatus = "挂载失败：${it.javaClass.simpleName}"
+        val ownerClass = method.declaringClass
+        val launcherClass = runCatching {
+            ClassLoaders.HOST.loadClass("com.tencent.mm.ui.LauncherUI")
+        }.getOrNull()
+        val launcherFields = ownerClass.declaredFields.filter { field ->
+            Activity::class.java.isAssignableFrom(field.type) &&
+                !java.lang.reflect.Modifier.isStatic(field.modifiers)
         }
+        val homeFields = launcherClass?.declaredFields.orEmpty().filter { field ->
+            ownerClass.isAssignableFrom(field.type) && !java.lang.reflect.Modifier.isStatic(field.modifiers)
+        }
+        if (launcherFields.isEmpty() && homeFields.isEmpty()) {
+            homeBarSetterStatus = "HomeUI 与 LauncherUI 的实例归属未确认"
+            return
+        }
+        method.isAccessible = true
+        method.hookBefore {
+            val launcher = ThemeSurface.activeFullscreenLauncher() ?: return@hookBefore
+            val home = thisObject ?: return@hookBefore
+            val belongsToLauncher = launcherFields.any { field ->
+                runCatching { field.isAccessible = true; field.get(home) === launcher }.getOrDefault(false)
+            } || homeFields.any { field ->
+                runCatching { field.isAccessible = true; field.get(launcher) === home }.getOrDefault(false)
+            }
+            if (!belongsToLauncher) return@hookBefore
+            if (!canExposeWallpaperInToolbar(launcher)) return@hookBefore
+            val old = args.getOrNull(0) as? Int ?: return@hookBefore
+            if (!isNativeToolbarFill(old)) return@hookBefore
+            homeBarSetterLastColor = old
+            args[0] = android.graphics.Color.TRANSPARENT
+            homeBarSetterHits++
+        }
+        homeBarSetterHooked = true
+        homeBarSetterStatus = "已挂 ${method.declaringClass.simpleName}.${method.name}"
     }
 
     /**

@@ -138,6 +138,7 @@ internal object ThemeSurface {
      */
     @Volatile
     private var resumedRef: java.lang.ref.WeakReference<Activity>? = null
+    private var observedActivityLifecycle = false
 
     // ══════════════════════════════════════════════════════════
     // 聊天页守卫（纯 View 特征识别，见 [ChatPageGuard]）
@@ -189,17 +190,7 @@ internal object ThemeSurface {
     private var lastChatHit: String? = null
 
     @Volatile
-    private var lastChatBottomDiag: String = "未观测"
-
-    @Volatile
     private var lastChatCheckAt = 0L
-
-    private class LockedChatBottomDrawable : android.graphics.drawable.ColorDrawable(AndroidColor.TRANSPARENT) {
-        override fun setColor(color: Int) {
-            // Block host from recoloring the bottom 48px inset back to #F7F7F7
-            super.setColor(AndroidColor.TRANSPARENT)
-        }
-    }
 
     private class MainWatcher(activity: Activity, decor: ViewGroup) {
         val activity = WeakReference(activity)
@@ -291,7 +282,7 @@ internal object ThemeSurface {
         }
         val main = if (onMainPage) "主页面=✓" else "主页面=✗"
         val out = if (chatPageVisible) "聊天页中：$byFragment，$byView" else "不是聊天页（$byFragment，$byView）"
-        return "$out [$main ${ChatPageGuard.mainPageInfo}] 聊天底栏=$lastChatBottomDiag"
+        return "$out [$main ${ChatPageGuard.mainPageInfo}] 聊天底栏=${ChatFooterWallpaper.diagnosis}"
     }
 
     /**
@@ -322,13 +313,17 @@ internal object ThemeSurface {
             val entered = !viewChatActive
             viewChatActive = true
             // 每次命中都确保容器不透明（微信可能自己把背景改回透明）
-            hit?.let { runCatching { ChatPageGuard.ensureOpaque(it.container) } }
+            hit?.let {
+                if (!ChatFooterWallpaper.ownsBackground(it.container)) {
+                    runCatching { ChatPageGuard.ensureOpaque(it.container) }
+                }
+            }
             if (entered) {
                 noteEvent("识别到聊天页 → 撤壁纸 + 容器兜底不透明")
                 // 撤掉主界面壁纸层（双保险之一；另一层是容器自身的挡色背景）
                 runCatching { TabWallpaperRenderer.clear(activity); restoreWindow(activity) }
             }
-            runCatching { clearChatFooterBottomInset(activity, hit?.container) }
+            runCatching { ChatFooterWallpaper.apply(activity) }
             return
         }
 
@@ -337,6 +332,7 @@ internal object ThemeSurface {
         //          注意：必须排除刚触发 onChattingFragmentShown 的前 1200ms 转场动画期（此时聊天页刚滑入、
         //          底部 4 个 Tab 尚未隐藏，不能在同一秒把刚进入的聊天页当成残留清掉）。
         if (onMainPage && fragmentChatActive && now - fragmentChatEnteredAt >= 1200L) {
+            ChatFooterWallpaper.restore(activity)
             ChatPageGuard.restoreAll()
             fragmentChatActive = false
             viewChatActive = false
@@ -368,6 +364,10 @@ internal object ThemeSurface {
         }
 
         if (!onMainPage || !ThemeStore.wallpaperSwitchOn()) return
+        if (!chatPageVisible) {
+            val footerWasActive = ChatFooterWallpaper.restore(activity)
+            if (wasVisible || footerWasActive) ChatPageGuard.restoreAll()
+        }
         val attached = isAttached(activity)
         val profile = ThemeRuntime.current(activity)?.profile
         val pageRule = profile?.background(listOf("chats", "contacts", "discover", "me").getOrElse(currentTabIndex(activity)) { "chats" })
@@ -393,11 +393,25 @@ internal object ThemeSurface {
         return cur === activity
     }
 
+    internal fun ownsForegroundThemeWindow(activity: Activity): Boolean {
+        val resumed = resumedRef?.get()
+        if (resumed != null) return resumed === activity
+        // The feature may be enabled after the current Activity has already resumed.
+        return !observedActivityLifecycle && activity.window?.decorView?.hasWindowFocus() == true
+    }
+
     /** 当前前台 Activity 的类名（诊断用）。 */
     fun foregroundName(): String = resumedRef?.get()?.javaClass?.simpleName ?: "null"
 
     /** 挂载状态只从真实图层读取，撤销后不保留另一份布尔标记。 */
     fun isAttached(activity: Activity): Boolean = TabWallpaperRenderer.isMasked(activity)
+
+    internal fun activeFullscreenLauncher(): Activity? {
+        if (!onMainPage || chatPageVisible || !ThemeStore.wallpaperSwitchOn() ||
+            !ThemeStore.usePageBackground()) return null
+        val launcher = confirmedMainRef?.get() ?: return null
+        return launcher.takeIf { ownsForegroundThemeWindow(it) && PageWallpaperUnderlay.isAttached(it) }
+    }
 
     var lastWallpaperDrawDecision = "尚未判定"
         private set
@@ -459,6 +473,7 @@ internal object ThemeSurface {
         override fun onActivityStarted(activity: Activity) {}
 
         override fun onActivityResumed(activity: Activity) {
+            observedActivityLifecycle = true
             resumedRef = java.lang.ref.WeakReference(activity)
             noteEvent("前台 → ${activity.javaClass.simpleName}")
             // 总开关关掉时一个字节都不动，避免「关了主题还在改窗口 / 还在挂背景」
@@ -482,7 +497,9 @@ internal object ThemeSurface {
         }
 
         override fun onActivityPaused(activity: Activity) {
+            observedActivityLifecycle = true
             if (resumedRef?.get() === activity) resumedRef = null
+            ChatFooterWallpaper.restore(activity)
             // 主界面 pause **不撤壁纸**：切后台再切回来会白闪一帧（clear → 回来重挂），
             // 而用户在这期间根本看不到主界面，撤掉毫无收益。
             // 真正需要撤壁纸的场景只有「另一个 Activity 到前台」，由 onActivityResumed 里的
@@ -497,6 +514,7 @@ internal object ThemeSurface {
         override fun onActivityStopped(activity: Activity) {}
         override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
         override fun onActivityDestroyed(activity: Activity) {
+            ChatFooterWallpaper.restore(activity)
             if (ThemePages.isLauncher(activity)) {
                 TabWallpaperRenderer.clear(activity)
                 (activity.window?.decorView as? ViewGroup)?.let(::removeMainWatcher)
@@ -506,7 +524,12 @@ internal object ThemeSurface {
     }
 
     fun registerCallbacks(register: Boolean) {
-        if (!register) { lastChatHit = null; confirmedMainRef = null }
+        if (!register) {
+            lastChatHit = null
+            confirmedMainRef = null
+            resumedRef = null
+            observedActivityLifecycle = false
+        }
         if (!register) mainWatchers.keys.toList().forEach(::removeMainWatcher)
         try {
             val app = hostApp ?: return
@@ -581,154 +604,6 @@ internal object ThemeSurface {
             }
         } catch (e: Throwable) {
             WeLogger.w(TAG, "restoreWindow 异常：${e.message}", e)
-        }
-    }
-
-    /**
-     * 清理聊天页底部输入框（ChatFooter）最底端那条 48px 的 #F7F7F7 垫片/背景条，
-     * 并输出底部 y=2400..2608 的真实视图与背景诊断到 noteEvent，彻底锁定是谁画了 #F7F7F7。
-     */
-    private fun clearChatFooterBottomInset(activity: Activity, rootHint: View? = null) {
-        val w = activity.window ?: return
-        val decor = w.decorView as? ViewGroup ?: return
-        fun sweepBottom() {
-            if (decor.height <= 0) return
-            @Suppress("DEPRECATION")
-            w.navigationBarColor = AndroidColor.TRANSPARENT
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                w.isNavigationBarContrastEnforced = false
-            }
-            decor.findViewById<View>(android.R.id.navigationBarBackground)?.let { navBg ->
-                navBg.background = null
-                navBg.alpha = 0f
-                navBg.visibility = View.INVISIBLE
-            }
-            val loc = IntArray(2)
-            val rootLoc = IntArray(2)
-            decor.getLocationOnScreen(rootLoc)
-            var visited = 0
-            var cleared = 0
-            val chatHits = ArrayList<String>(14)
-            fun bgDesc(bg: android.graphics.drawable.Drawable?): String {
-                if (bg == null) return "null"
-                if (bg is LockedChatBottomDrawable) return "LockedTrans"
-                val cur = bg.current
-                return if (cur is android.graphics.drawable.ColorDrawable) {
-                    String.format("Color(#%08X)", cur.color)
-                } else {
-                    cur.javaClass.simpleName
-                }
-            }
-            fun isInputBox(view: View, top: Int, bottom: Int): Boolean {
-                if (view is android.widget.EditText) return true
-                val s = view.javaClass.simpleName
-                if (s.contains("EditText") || s.contains("MMEditText")) return true
-                return view.width in 100..(decor.width * 0.72f).toInt() && bottom < decor.height - 20
-            }
-            fun walk(view: View, depth: Int, inChat: Boolean, inFooter: Boolean) {
-                if (depth > 28 || visited++ >= 2000 || view.visibility != View.VISIBLE) return
-                val cls = view.javaClass.name
-                val simple = view.javaClass.simpleName
-                // 直接跳过主界面 ViewPager 与底部 Tab 栏，专注入聊天页子树（TestTimeForChatting / ChattingUILayout）
-                if (simple.contains("ViewPager") || simple.contains("LauncherUIBottomTabView") || simple == "MainUIView") {
-                    return
-                }
-                val insideChat = inChat ||
-                    simple == "TestTimeForChatting" ||
-                    simple == "SwipeBackLayout" ||
-                    simple == "ChattingUILayout" ||
-                    cls.contains(".chatting.")
-                val insideFooter = inFooter || cls.contains("ChatFooter") || simple.contains("ChatFooter")
-                if (view.width > 0 && view.height > 0) {
-                    view.getLocationOnScreen(loc)
-                    val top = loc[1] - rootLoc[1]
-                    val bottom = top + view.height
-                    val lp = view.layoutParams as? ViewGroup.MarginLayoutParams
-                    val marB = lp?.bottomMargin ?: 0
-                    val padB = view.paddingBottom
-
-                    if (insideChat || insideFooter) {
-                        // 1. 屏幕最底端 48px 垫片（top >= decor.height - 100 && bottom >= decor.height - 4 && width >= 75%）
-                        val isBottomInsetStrip = bottom >= decor.height - 4 &&
-                            top >= decor.height - 100 &&
-                            view.width >= decor.width * 0.75f
-                        // 2. 聊天页全屏根容器（SwipeBackLayout@0-2608 #FFFFFFFF、ChattingUILayout@0-2608 #FFEDEDED + padB=48 等）
-                        val isChatRootContainer = view is ViewGroup &&
-                            bottom >= decor.height - 4 &&
-                            view.width >= decor.width * 0.75f &&
-                            (simple == "ChattingUILayout" || simple == "SwipeBackLayout" || simple == "FrostedContentView" || top == 0)
-                        // 3. ChatFooter 或聊天底部容器（top >= decor.height - 260 && bottom >= decor.height - 4）
-                        val isFooterShell = (insideFooter || top >= decor.height - 260 || isChatRootContainer) &&
-                            bottom >= decor.height - 4 &&
-                            view.width >= decor.width * 0.75f &&
-                            !isInputBox(view, top, bottom) &&
-                            view !is android.widget.ImageView &&
-                            !simple.contains("WeImageView")
-                        if (isBottomInsetStrip || isFooterShell) {
-                            val bg = view.background
-                            if (bg != null && bg !is LockedChatBottomDrawable) {
-                                val pL = view.paddingLeft
-                                val pT = view.paddingTop
-                                val pR = view.paddingRight
-                                val pB = view.paddingBottom
-                                view.background = LockedChatBottomDrawable()
-                                view.setPadding(pL, pT, pR, pB)
-                                cleared++
-                            }
-                            var type: Class<*>? = view.javaClass
-                            while (type != null && !type.name.startsWith("android.")) {
-                                for (field in type.declaredFields) {
-                                    if (android.graphics.Paint::class.java.isAssignableFrom(field.type)) {
-                                        runCatching {
-                                            field.isAccessible = true
-                                            val p = field.get(view) as? android.graphics.Paint
-                                            if (p != null) {
-                                                val c = p.color
-                                                val r = AndroidColor.red(c)
-                                                val g = AndroidColor.green(c)
-                                                val b = AndroidColor.blue(c)
-                                                if (AndroidColor.alpha(c) > 0 && r >= 210 && g >= 210 && b >= 210 && maxOf(r, g, b) - minOf(r, g, b) <= 12) {
-                                                    p.color = AndroidColor.TRANSPARENT
-                                                    p.alpha = 0
-                                                    view.invalidate()
-                                                    cleared++
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                type = type.superclass
-                            }
-                        }
-                        // 记录聊天页根容器及底部视图（用于诊断 bottom 是否停在 2560、是否有 padB=48/marB=48 或特殊背景）
-                        if (view.width >= decor.width * 0.75f &&
-                            (bottom >= decor.height - 96 || simple == "TestTimeForChatting" || simple == "SwipeBackLayout" || simple == "ChattingUILayout" || insideFooter || view is android.widget.ImageView)) {
-                            val bg = view.background
-                            if (chatHits.size < 14 && (bg != null || padB > 0 || marB > 0 || top >= decor.height - 260 || simple == "TestTimeForChatting" || simple == "ChattingUILayout" || view is android.widget.ImageView)) {
-                                chatHits.add("$simple@$top-$bottom(bg=${bgDesc(bg)} padB=$padB marB=$marB)")
-                            }
-                        }
-                    }
-                }
-                if (view is ViewGroup) {
-                    for (i in 0 until view.childCount) {
-                        walk(view.getChildAt(i) ?: continue, depth + 1, insideChat, insideFooter)
-                    }
-                }
-            }
-            runCatching { walk(decor, 0, false, false) }
-            if (chatHits.isNotEmpty()) {
-                lastChatBottomDiag = "清=$cleared[${chatHits.joinToString(";")}]"
-            }
-        }
-        try {
-            sweepBottom()
-            decor.post { runCatching { sweepBottom() } }
-            for (delay in longArrayOf(120L, 320L, 650L, 1100L)) {
-                decor.postDelayed({ runCatching { sweepBottom() } }, delay)
-            }
-        } catch (e: Throwable) {
-            WeLogger.w(TAG, "清理 ChatFooter 底部白条异常：${e.message}", e)
         }
     }
 
@@ -909,14 +784,17 @@ internal object ThemeSurface {
      * 现在两条信号都接，页码取不到时还有 getCurrentItem()/ViewPager2 兜底。
      */
     fun onTabSelected(activity: Activity, position: Int) {
-        (activity.window?.decorView as? ViewGroup)?.let { ThemeHostAdapter.pageObserved(it, position) }
+        if (position !in 0..3) return
+        val decor = activity.window?.decorView as? ViewGroup
+        decor?.let { ThemeHostAdapter.pageObserved(it, position) }
         runCatching { checkChatPage(activity) }
-        if (position == TabWallpaperRenderer.lastTab && isAttached(activity)) return
         lastTabIndex = position
-        runCatching { updateTabWallpaper(activity, position) }
-            .onFailure { WeLogger.w(TAG, "切 Tab 换背景（onPageSelected）失败：${it.message}") }
+        if (position != TabWallpaperRenderer.lastTab || !isAttached(activity)) {
+            runCatching { updateTabWallpaper(activity, position) }
+                .onFailure { WeLogger.w(TAG, "切 Tab 换背景（onPageSelected）失败：${it.message}") }
+        }
         // 切页落定后再脏一次：切页瞬间那次 walk 可能赶在新页行绑定完之前，漏掉的行会一直灰到下次滚动。
-        (activity.window?.decorView as? ViewGroup)?.let { PageWallpaperUnderlay.markDirtyAfterSettle(it) }
+        decor?.let { PageWallpaperUnderlay.markDirtyAfterSettle(it) }
     }
 
     /**
@@ -1032,7 +910,9 @@ internal object ThemeSurface {
         }
         // Prepare the chat's opaque root while the old wallpaper is still drawable.
         // Closing the render gate first can create a blank transition frame.
-        (fragmentView as? ViewGroup)?.let { runCatching { ChatPageGuard.ensureOpaque(it) } }
+        (fragmentView as? ViewGroup)?.let {
+            if (!ChatFooterWallpaper.ownsBackground(it)) runCatching { ChatPageGuard.ensureOpaque(it) }
+        }
         fragmentChatActive = true
         fragmentChatEnteredAt = android.os.SystemClock.uptimeMillis()
         anchorLeaveSince = 0L
@@ -1041,7 +921,9 @@ internal object ThemeSurface {
                 if (ThemePages.isLauncher(act)) {
                     TabWallpaperRenderer.clear(act)
                     restoreWindow(act)
-                    clearChatFooterBottomInset(act, fragmentView)
+                    if (fragmentView?.isAttachedToWindow != true || fragmentView.rootView === act.window?.decorView) {
+                        ChatFooterWallpaper.apply(act)
+                    }
                 }
             }
         }
@@ -1049,6 +931,7 @@ internal object ThemeSurface {
 
     /** 聊天页 Fragment 离开（onPause/onDestroyView）：回主界面时重挂。 */
     fun onChattingFragmentHidden() {
+        ChatFooterWallpaper.restoreLaunchers()
         ChatPageGuard.restoreAll()
         lastChatHit = null
         val wasActive = fragmentChatActive
@@ -1136,7 +1019,7 @@ internal object ThemeSurface {
         java.util.WeakHashMap<Activity, android.graphics.drawable.Drawable?>()
 
     private fun applyChattingWallpaper(activity: Activity) {
-        clearChatFooterBottomInset(activity)
+        ChatFooterWallpaper.apply(activity)
         val src = ThemeMaterials.wallpaperSourceFor(activity, ThemeStore.activeThemeIdOrEmpty())
         if (src == null) {
             restoreWindowBackground(activity)
@@ -1185,6 +1068,7 @@ internal object ThemeSurface {
 
     /** 撤掉所有存活页面的壁纸与窗口还原。 */
     fun removeAllLive() {
+        ChatFooterWallpaper.restoreAll()
         ChatPageGuard.restoreAll()
         lastChatHit = null
         liveActivities().forEach { act ->

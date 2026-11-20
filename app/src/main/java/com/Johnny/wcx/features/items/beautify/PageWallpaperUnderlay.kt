@@ -11,10 +11,7 @@ import android.graphics.Rect
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.DrawableWrapper
-import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.NinePatchDrawable
-import android.graphics.drawable.StateListDrawable
 import android.os.Build
 import android.os.SystemClock
 import android.view.View
@@ -145,6 +142,7 @@ internal object PageWallpaperUnderlay {
         var layout: ViewTreeObserver.OnGlobalLayoutListener? = null
         var scroll: ViewTreeObserver.OnScrollChangedListener? = null
         var attachListener: View.OnAttachStateChangeListener? = null
+        var settleRefresh: Runnable? = null
         var dirty = true
         var visited = 0
         var hostWrites = 0
@@ -160,26 +158,6 @@ internal object PageWallpaperUnderlay {
     private val states = WeakHashMap<ViewGroup, WeakReference<State>>()
     private val restoreReasons = WeakHashMap<ViewGroup, String>()
 
-    private class NinePatchCheck(drawable: NinePatchDrawable, source: Drawable.ConstantState, val neutral: Boolean) {
-        val source = WeakReference(source)
-        val state = drawable.state.copyOf()
-        val level = drawable.level
-        val alpha = drawable.alpha
-        val filter = drawable.colorFilter
-    }
-
-    private val ninePatchChecks = WeakHashMap<NinePatchDrawable, NinePatchCheck>()
-
-    private class GradientCheck(drawable: GradientDrawable, source: Drawable.ConstantState, val neutral: Boolean, val sample: Int) {
-        val source = WeakReference(source)
-        val state = drawable.state.copyOf()
-        val level = drawable.level
-        val alpha = drawable.alpha
-        val filter = drawable.colorFilter
-    }
-
-    private val gradientChecks = WeakHashMap<GradientDrawable, GradientCheck>()
-
     fun apply(activity: Activity, bitmap: Bitmap, shouldDraw: () -> Boolean): String {
         return apply(activity, bitmap, 1f, shouldDraw)
     }
@@ -190,8 +168,7 @@ internal object PageWallpaperUnderlay {
         val content = decor.findViewById<ViewGroup>(android.R.id.content) ?: return "content 不可用"
         val pager = findPager(content) ?: return "主界面分页容器未就绪"
         if (decor.width <= 0 || decor.height <= 0) return "主窗口尚未布局"
-        ninePatchChecks.clear()
-        gradientChecks.clear()
+        WallpaperDrawables.resetProbes()
         try {
             var state = states[decor]?.get()
             if (state == null || state.pager.get() !== pager) {
@@ -277,6 +254,8 @@ internal object PageWallpaperUnderlay {
     }
 
     private fun removeListeners(state: State) {
+        state.settleRefresh?.let { state.decor.get()?.removeCallbacks(it) }
+        state.settleRefresh = null
         state.observer?.get()?.takeIf { it.isAlive }?.let { observer ->
             state.preDraw?.let(observer::removeOnPreDrawListener)
             state.layout?.let(observer::removeOnGlobalLayoutListener)
@@ -430,7 +409,7 @@ internal object PageWallpaperUnderlay {
                 val key = view.javaClass.simpleName
                 state.hostWritesByClass[key] = (state.hostWritesByClass[key] ?: 0) + 1
                 val structural = patch.structural
-                if (structural || isNeutralSurface(view.background)) makeTransparent(state, view, structural)
+                if (structural || WallpaperDrawables.isNeutralSurface(view.background)) makeTransparent(state, view, structural)
                 else state.patches.remove(patch)
             }
         }
@@ -542,10 +521,10 @@ internal object PageWallpaperUnderlay {
                 if (candidate) {
                     val structural = view in structuralTargets || bottomTab || firstScreen || homeShelf || toolbar
                     val background = view.background
-                    if (structural || isNeutralSurface(background)) {
+                    if (structural || WallpaperDrawables.isNeutralSurface(background)) {
                         makeTransparent(state, view, structural)
                     } else if (background != null && background !is SurfaceBackground && state.retainedRows.size < 6) {
-                        state.retainedRows.add("${view.javaClass.simpleName}/${background.javaClass.simpleName}${retainedDetail(background)}")
+                        state.retainedRows.add("${view.javaClass.simpleName}/${background.javaClass.simpleName}${WallpaperDrawables.retainedDetail(background)}")
                     }
                 }
             }
@@ -622,7 +601,7 @@ internal object PageWallpaperUnderlay {
             }
             if (view !is android.widget.TextView &&
                 bg != null && bg !is SurfaceBackground &&
-                (whiteSelector(bg) || isNeutralSurface(bg))) {
+                (WallpaperDrawables.whiteSelector(bg) || WallpaperDrawables.isNeutralSurface(bg))) {
                 makeTransparent(state, view, false)
                 if (view.background is SurfaceBackground) {
                     state.cardImmediateRepairs++
@@ -653,7 +632,7 @@ internal object PageWallpaperUnderlay {
 
         fun patchMeCard(row: View, depth: Int) {
             if (depth > 4 || !eligible(row)) return
-            if (whiteSelector(row.background)) {
+            if (WallpaperDrawables.whiteSelector(row.background)) {
                 makeTransparent(state, row, false)
                 state.rowRepairs++
                 state.rowRepairsCard++
@@ -668,7 +647,7 @@ internal object PageWallpaperUnderlay {
             if (depth > MAX_DEPTH || visited++ >= 850 ||
                 view.visibility != View.VISIBLE || !view.getGlobalVisibleRect(rect)) return
             val inWecom = wecom || view.javaClass.name == "com.tencent.mm.ui.contact.t3"
-            if (page == 1 && inWecom && eligible(view) && whiteSelector(view.background)) {
+            if (page == 1 && inWecom && eligible(view) && WallpaperDrawables.whiteSelector(view.background)) {
                 makeTransparent(state, view, false)
                 state.rowRepairs++
                 state.rowRepairsContacts++
@@ -697,10 +676,10 @@ internal object PageWallpaperUnderlay {
                         else -> "补丁=未装"
                     }
                     state.cardDiag = "第0项=$firstType 行=${row.javaClass.simpleName}/" +
-                        "${rowBg?.javaClass?.simpleName ?: "null"}${rowBg?.let { retainedDetail(it) } ?: ""} $patchState"
+                        "${rowBg?.javaClass?.simpleName ?: "null"}${rowBg?.let { WallpaperDrawables.retainedDetail(it) } ?: ""} $patchState"
                     state.cardRow = WeakReference(row)
-                    state.rowBgType = "${rowBg?.javaClass?.simpleName ?: "null"}${rowBg?.let { retainedDetail(it) } ?: ""}"
-                    if (whiteSelector(rowBg)) {
+                    state.rowBgType = "${rowBg?.javaClass?.simpleName ?: "null"}${rowBg?.let { WallpaperDrawables.retainedDetail(it) } ?: ""}"
+                    if (WallpaperDrawables.whiteSelector(rowBg)) {
                         patchMeCard(row, 0)
                     } else if (row is ViewGroup) {
                         // The row root may already be patched (its wrapper
@@ -745,7 +724,7 @@ internal object PageWallpaperUnderlay {
                 path.add(
                     "${current.javaClass.simpleName}" +
                         "/bg=${bg?.javaClass?.simpleName ?: "null"}" +
-                        "${bg?.let { retainedDetail(it) } ?: ""}" +
+                        "${bg?.let { WallpaperDrawables.retainedDetail(it) } ?: ""}" +
                         "/a=${current.alpha}/y=${current.translationY}"
                 )
                 node = current.parent as? View
@@ -780,7 +759,7 @@ internal object PageWallpaperUnderlay {
                 bounds.height() in 55..(decor.height * 0.32f).toInt()) {
                 nearby.add(
                     "${view.javaClass.simpleName}@${bounds.left},${bounds.top}-${bounds.right},${bounds.bottom}" +
-                        "/bg=${bg.javaClass.simpleName}${retainedDetail(bg)}" +
+                        "/bg=${bg.javaClass.simpleName}${WallpaperDrawables.retainedDetail(bg)}" +
                         "/父=${(view.parent as? View)?.javaClass?.simpleName ?: "无"}"
                 )
             }
@@ -1048,7 +1027,7 @@ internal object PageWallpaperUnderlay {
                 val fg = view.foreground
                 samples.add("${view.javaClass.simpleName}@${bounds.top}-${bounds.bottom}/" +
                     "bg=${background?.javaClass?.simpleName ?: "null"}" +
-                    "${background?.let { retainedDetail(it) } ?: ""}/" +
+                    "${background?.let { WallpaperDrawables.retainedDetail(it) } ?: ""}/" +
                     "fg=${fg?.javaClass?.simpleName ?: "null"}")
             }
             if (view is ViewGroup) for (i in 0 until view.childCount) {
@@ -1059,7 +1038,7 @@ internal object PageWallpaperUnderlay {
                 background != null && background !is SurfaceBackground) {
                 val base = background.current
                 val transparent = base is ColorDrawable && Color.alpha(base.color) == 0
-                if (!transparent && isNeutralSurface(background)) {
+                if (!transparent && WallpaperDrawables.isNeutralSurface(background)) {
                     makeTransparent(state, view, false)
                     if (view.background is SurfaceBackground) {
                         repaired++
@@ -1084,16 +1063,6 @@ internal object PageWallpaperUnderlay {
             "画笔替换=${state.taskBarPaintZeroed}(拦截=${state.taskBarPaintBlocked},宿主=${state.taskBarPaintOwners.joinToString(",").ifEmpty { "无" }}) " +
             "根=${headerRoots.joinToString(",")} " +
             "背景=${samples.joinToString(";").ifEmpty { "无" }}"
-    }
-
-    private fun whiteSelector(drawable: Drawable?): Boolean {
-        val color = when (drawable) {
-            is StateListDrawable -> (drawable.current as? ColorDrawable)?.color
-            is ColorDrawable -> drawable.color
-            else -> return false
-        } ?: return false
-        return Color.alpha(color) == 255 &&
-            Color.red(color) >= 248 && Color.green(color) >= 248 && Color.blue(color) >= 248
     }
 
     /**
@@ -1347,7 +1316,7 @@ internal object PageWallpaperUnderlay {
     private fun clearToolbarViewBackground(state: State, view: View): Int {
         var repaired = 0
         val bg = view.background as? ColorDrawable
-        if (bg != null && bg.color != Color.TRANSPARENT && isNeutralColor(bg.color)) {
+        if (bg != null && bg.color != Color.TRANSPARENT && WallpaperDrawables.isNeutralColor(bg.color)) {
             makeTransparent(state, view, true)
             repaired++
         }
@@ -1355,7 +1324,7 @@ internal object PageWallpaperUnderlay {
             val child = view.getChildAt(i) ?: continue
             if (!child.isShown) continue
             val childBg = child.background as? ColorDrawable
-            if (childBg != null && childBg.color != Color.TRANSPARENT && isNeutralColor(childBg.color)) {
+            if (childBg != null && childBg.color != Color.TRANSPARENT && WallpaperDrawables.isNeutralColor(childBg.color)) {
                 makeTransparent(state, child, false)
                 repaired++
             }
@@ -1387,8 +1356,8 @@ internal object PageWallpaperUnderlay {
         // MoreTabUI's personal-info row uses translucent neutral bfj 9-patches
         // underneath its white selector. The generic neutral test deliberately
         // rejects translucent 9-patches, so only suppress those inside THIS card.
-        val faint = card && bg is NinePatchDrawable && isFaintCardNinePatch(bg)
-        if (bg != null && bg !is SurfaceBackground && (isNeutralSurface(bg) || faint)) {
+        val faint = card && bg is NinePatchDrawable && WallpaperDrawables.isFaintCardNinePatch(bg)
+        if (bg != null && bg !is SurfaceBackground && (WallpaperDrawables.isNeutralSurface(bg) || faint)) {
             makeTransparent(state, view, false, faint)
             if (faint) state.cardFaintRepairs++
         }
@@ -1396,31 +1365,6 @@ internal object PageWallpaperUnderlay {
             sweepSubtree(state, view.getChildAt(i) ?: continue, depth + 1, card)
         }
     }
-
-    /** A bounded probe of a CLONED drawable; never samples or mutates the live view. */
-    private fun isFaintCardNinePatch(drawable: NinePatchDrawable): Boolean = runCatching {
-        val source = drawable.constantState ?: return@runCatching false
-        val probe = source.newDrawable().mutate()
-        probe.state = drawable.state
-        probe.level = drawable.level
-        probe.setAlpha(drawable.alpha)
-        val bitmap = Bitmap.createBitmap(12, 12, Bitmap.Config.ARGB_8888)
-        try {
-            probe.setBounds(0, 0, 12, 12)
-            probe.draw(Canvas(bitmap))
-            var nonEmpty = false
-            for (y in 3..8) for (x in 3..8) {
-                val c = bitmap.getPixel(x, y)
-                val alpha = Color.alpha(c)
-                if (alpha > 0) nonEmpty = true
-                if (alpha > 0x33) return@runCatching false
-                val spread = maxOf(Color.red(c), Color.green(c), Color.blue(c)) -
-                    minOf(Color.red(c), Color.green(c), Color.blue(c))
-                if (alpha > 0 && spread > 12) return@runCatching false
-            }
-            nonEmpty
-        } finally { bitmap.recycle() }
-    }.getOrDefault(false)
 
     /**
      * Title bars can have neutral paint on a sibling of ActionBarContainer
@@ -1440,7 +1384,7 @@ internal object PageWallpaperUnderlay {
                 visible.width() >= decor.width * 0.60f && visible.height() > 8 &&
                 visible.height() <= maxOf(target.height() * 2, (decor.height * 0.16f).toInt())) {
                 val bg = view.background
-                if (bg != null && bg !is SurfaceBackground && isNeutralSurface(bg) &&
+                if (bg != null && bg !is SurfaceBackground && WallpaperDrawables.isNeutralSurface(bg) &&
                     !(bg is ColorDrawable && Color.alpha(bg.color) == 0)) {
                     makeTransparent(state, view, false)
                     if (view.background is SurfaceBackground) state.titleRegionRepairs++
@@ -1491,11 +1435,11 @@ internal object PageWallpaperUnderlay {
     fun onRowBound(decor: ViewGroup, list: ViewGroup, row: View) {
         val state = states[decor]?.get() ?: return
         if (!state.wallpaper.shouldDraw() || !decor.isShown || !list.isShown) return
-        if (row !is ImageView && isNeutralSurface(row.background)) makeTransparent(state, row, false)
+        if (row !is ImageView && WallpaperDrawables.isNeutralSurface(row.background)) makeTransparent(state, row, false)
         if (row is ViewGroup) {
             for (i in 0 until row.childCount) {
                 val child = row.getChildAt(i) ?: continue
-                if (child is ViewGroup && isNeutralSurface(child.background)) {
+                if (child is ViewGroup && WallpaperDrawables.isNeutralSurface(child.background)) {
                     makeTransparent(state, child, false)
                 }
             }
@@ -1509,7 +1453,22 @@ internal object PageWallpaperUnderlay {
 
     /** 切页后补一次重扫：切页瞬间那次 walk 可能赶在新页行绑定完之前；等动画落定后再脏一次，下次 pre-draw 即重走。 */
     fun markDirtyAfterSettle(decor: ViewGroup, delayMs: Long = 300L) {
-        decor.postDelayed({ states[decor]?.get()?.let { it.dirty = true } }, delayMs)
+        val state = states[decor]?.get() ?: return
+        if (delayMs == 0L) {
+            state.dirty = true
+            return
+        }
+        state.settleRefresh?.let(decor::removeCallbacks)
+        val refresh = Runnable {
+            state.settleRefresh = null
+            val windowRoot = state.decor.get() ?: return@Runnable
+            if (states[windowRoot]?.get() !== state || !windowRoot.isAttachedToWindow ||
+                !state.wallpaper.shouldDraw()) return@Runnable
+            state.dirty = true
+            windowRoot.postInvalidateOnAnimation()
+        }
+        state.settleRefresh = refresh
+        decor.postDelayed(refresh, delayMs)
     }
 
     @Suppress("DEPRECATION")
@@ -1615,46 +1574,6 @@ internal object PageWallpaperUnderlay {
         }
     }
 
-    /** 单色是否中性：全透明；或近灰（RGB 三通道极差 ≤ 10）且全不透明或半透明（alpha ≤ 0x33）。半透明遮罩色偏极小，放掉只让底图亮一点，不改色相。 */
-    private fun isNeutralColor(color: Int): Boolean {
-        val spread = maxOf(Color.red(color), Color.green(color), Color.blue(color)) -
-            minOf(Color.red(color), Color.green(color), Color.blue(color))
-        return Color.alpha(color) == 0 || (spread <= 10 &&
-            (Color.alpha(color) == 255 || Color.alpha(color) <= 0x33))
-    }
-
-    /** 保留原因诊断：纯色给色值+色偏，状态列表给当前态子类，图层列表逐层给类型+色值；进现有诊断的“保留行背景”里，不另起日志。最多展开两层，避免诊断爆炸。 */
-    private fun retainedDetail(drawable: Drawable, depth: Int = 0): String = when (drawable) {
-        is ColorDrawable -> {
-            val color = drawable.color
-            String.format("(#%08X~%d)", color,
-                maxOf(Color.red(color), Color.green(color), Color.blue(color)) -
-                minOf(Color.red(color), Color.green(color), Color.blue(color)))
-        }
-        is StateListDrawable -> {
-            val current = drawable.current
-            "（current=${current?.javaClass?.simpleName ?: "null"}${if (depth < 2 && current != null) retainedDetail(current, depth + 1) else ""}）"
-        }
-        is LayerDrawable -> {
-            if (depth >= 2) "" else {
-                val layers = (0 until drawable.numberOfLayers)
-                    .filter { drawable.getId(it) != android.R.id.mask }
-                val shown = layers.take(4).joinToString(",") { i ->
-                    val layer = drawable.getDrawable(i)
-                    "${layer?.javaClass?.simpleName ?: "null"}${layer?.let { retainedDetail(it, depth + 1) } ?: ""}"
-                }
-                val more = if (layers.size > 4) ",+${layers.size - 4}" else ""
-                "（layers=[$shown$more]）"
-            }
-        }
-        is GradientDrawable -> runCatching {
-            val colors = drawable.colors
-            if (colors != null && colors.isNotEmpty()) "（stops=${colors.size}）"
-            else "（stops=0 采样=${String.format("#%08X", gradientChecks[drawable]?.sample ?: 0)}）"
-        }.getOrDefault("")
-        else -> ""
-    }
-
     /** 弹跳视图背景诊断：找类名以 WeUIBounceView(V2) 结尾的视图，报背景类型+色值；找不到报“无”。只读，不改任何背景。 */
     private fun bounceViewBackgrounds(decor: ViewGroup): String {
         val found = ArrayList<String>()
@@ -1664,7 +1583,7 @@ internal object PageWallpaperUnderlay {
             val name = view.javaClass.name
             if (name.endsWith("WeUIBounceViewV2") || name.endsWith("WeUIBounceView")) {
                 val background = view.background
-                found.add("${view.javaClass.simpleName}/${background?.javaClass?.simpleName ?: "null"}${background?.let { retainedDetail(it) } ?: ""}")
+                found.add("${view.javaClass.simpleName}/${background?.javaClass?.simpleName ?: "null"}${background?.let { WallpaperDrawables.retainedDetail(it) } ?: ""}")
             }
             if (view is ViewGroup) for (i in 0 until view.childCount) {
                 visit(view.getChildAt(i) ?: continue, depth + 1)
@@ -1706,7 +1625,7 @@ internal object PageWallpaperUnderlay {
                         ancestor = ancestor!!.parent as? View
                     }
                 }
-                found.add("${view.javaClass.simpleName}$at/父链=${ancestors.joinToString(">")}/实背景=${background?.javaClass?.simpleName ?: "null"}${background?.let { retainedDetail(it) } ?: ""} $patchState 接管=$owns headerViewsCount=${view.headerViewsCount} firstVisible=${view.firstVisiblePosition}")
+                found.add("${view.javaClass.simpleName}$at/父链=${ancestors.joinToString(">")}/实背景=${background?.javaClass?.simpleName ?: "null"}${background?.let { WallpaperDrawables.retainedDetail(it) } ?: ""} $patchState 接管=$owns headerViewsCount=${view.headerViewsCount} firstVisible=${view.firstVisiblePosition}")
             }
             if (view is ViewGroup) for (i in 0 until view.childCount) {
                 visit(view.getChildAt(i) ?: continue, depth + 1)
@@ -1794,7 +1713,7 @@ internal object PageWallpaperUnderlay {
                     actionBarPrimaryBackgroundSet(view) -> "主底=有"
                     else -> "主底=无"
                 }
-                found = "${view.javaClass.simpleName}/实背景=${background?.javaClass?.simpleName ?: "null"}${background?.let { retainedDetail(it) } ?: ""} $patchState 接管=$owns $primary"
+                found = "${view.javaClass.simpleName}/实背景=${background?.javaClass?.simpleName ?: "null"}${background?.let { WallpaperDrawables.retainedDetail(it) } ?: ""} $patchState 接管=$owns $primary"
                 return
             }
             if (view is ViewGroup) for (i in 0 until view.childCount) {
@@ -1827,7 +1746,7 @@ internal object PageWallpaperUnderlay {
                 " 绘=${bg.drawsBackground()} 抑制闲置=${bg.suppressFaintIdle} 忽略焦点=${bg.ignoreIdleFocus}"
             } else ""
             out.add("${view.javaClass.simpleName}/" +
-                "${bg?.javaClass?.simpleName ?: "null"}${bg?.let { retainedDetail(it) } ?: ""} " +
+                "${bg?.javaClass?.simpleName ?: "null"}${bg?.let { WallpaperDrawables.retainedDetail(it) } ?: ""} " +
                 "补丁=$patchState 按压=${view.isPressed} 聚焦=${view.isFocused}$draws")
             if (view is ViewGroup) for (i in 0 until view.childCount) {
                 visit(view.getChildAt(i) ?: continue, depth + 1)
@@ -1851,13 +1770,13 @@ internal object PageWallpaperUnderlay {
                 val bg = view.background
                 val opaque = when (bg) {
                     null -> false
-                    is ColorDrawable -> Color.alpha(bg.color) != 0 && isNeutralColor(bg.color)
-                    else -> isNeutralSurface(bg)
+                    is ColorDrawable -> Color.alpha(bg.color) != 0 && WallpaperDrawables.isNeutralColor(bg.color)
+                    else -> WallpaperDrawables.isNeutralSurface(bg)
                 }
                 if (opaque && bg !is SurfaceBackground &&
                     state.patches.none { it.view.get() === view && isPatchInstalled(it, view) }) {
                     found.add("${view.javaClass.simpleName}@${hit.top}-${hit.bottom}/" +
-                        "${bg.javaClass.simpleName}${retainedDetail(bg)}")
+                        "${bg.javaClass.simpleName}${WallpaperDrawables.retainedDetail(bg)}")
                 }
             }
             if (view is ViewGroup) for (i in 0 until view.childCount) {
@@ -1907,7 +1826,7 @@ internal object PageWallpaperUnderlay {
                 state.patches.none { it.view.get() === view && isPatchInstalled(it, view) }) {
                 view.background?.let { bg ->
                     samples.add("${view.javaClass.simpleName}@${rect.top}-${rect.bottom}/" +
-                        "${bg.javaClass.simpleName}${retainedDetail(bg)}")
+                        "${bg.javaClass.simpleName}${WallpaperDrawables.retainedDetail(bg)}")
                 }
             }
             if (view is ViewGroup) for (i in 0 until view.childCount) {
@@ -1948,8 +1867,8 @@ internal object PageWallpaperUnderlay {
                 // A view may draw its own white fill or foreground despite transparent background.
                 val background = view.background
                 val foreground = view.foreground
-                val bg = background?.let { "${it.javaClass.simpleName}${retainedDetail(it)}" } ?: "null"
-                val fg = foreground?.let { "${it.javaClass.simpleName}${retainedDetail(it)}" } ?: "null"
+                val bg = background?.let { "${it.javaClass.simpleName}${WallpaperDrawables.retainedDetail(it)}" } ?: "null"
+                val fg = foreground?.let { "${it.javaClass.simpleName}${WallpaperDrawables.retainedDetail(it)}" } ?: "null"
                 val parent = (view.parent as? View)?.javaClass?.simpleName ?: "none"
                 hits.add("${view.javaClass.simpleName}@${rect.top}-${rect.bottom}" +
                     "(bg=$bg fg=$fg patch=$patchFlag parent=$parent)")
@@ -1961,110 +1880,6 @@ internal object PageWallpaperUnderlay {
         }
         runCatching { walk(decor, 0) }
         return hits.joinToString(";").ifEmpty { "无" }
-    }
-
-    private fun isNeutralSurface(drawable: Drawable?, depth: Int = 0): Boolean {
-        if (drawable == null || depth > 4) return false
-        val current = drawable.current
-        if (current !== drawable) return isNeutralSurface(current, depth + 1)
-        return when (drawable) {
-            is ColorDrawable -> isNeutralColor(drawable.color)
-            is DrawableWrapper -> isNeutralSurface(drawable.drawable, depth + 1)
-            is NinePatchDrawable -> isNeutralNinePatch(drawable)
-            is GradientDrawable -> isNeutralGradient(drawable)
-            is LayerDrawable -> {
-                val layers = (0 until drawable.numberOfLayers).filter { drawable.getId(it) != android.R.id.mask }
-                layers.isNotEmpty() && layers.all { isNeutralSurface(drawable.getDrawable(it), depth + 1) }
-            }
-            else -> false
-        }
-    }
-
-    /**
-     * 渐变是否中性：有色档时按各 stop 的近灰规则判；无色档时（setColor 纯色填充等，
-     * getColors() 为 null/空）渲到小图上按像素判，与九宫格探针同款规则（只采中心，
-     * 全透明跳过，半透明即非中性，RGB 极差 ≤ 10 才算中性）。探针结果按源+状态缓存，
-     * 避免每次绘制都重渲；采样中心像素记下来供诊断用。
-     */
-    private fun isNeutralGradient(drawable: GradientDrawable): Boolean {
-        val colors = runCatching { drawable.colors }.getOrNull()
-        if (colors != null && colors.isNotEmpty()) return colors.all { isNeutralColor(it) }
-        val source = drawable.constantState ?: return false
-        gradientChecks[drawable]?.let { check ->
-            if (check.source.get() === source && check.state.contentEquals(drawable.state) &&
-                check.level == drawable.level && check.alpha == drawable.alpha && check.filter === drawable.colorFilter) {
-                return check.neutral
-            }
-        }
-        var sample = 0
-        val neutral = runCatching {
-            val probe = source.newDrawable().mutate() as? GradientDrawable ?: return@runCatching false
-            probe.state = drawable.state
-            probe.level = drawable.level
-            probe.setAlpha(drawable.alpha)
-            probe.setColorFilter(drawable.colorFilter)
-            val bitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
-            try {
-                probe.setBounds(0, 0, bitmap.width, bitmap.height)
-                probe.draw(Canvas(bitmap))
-                sample = bitmap.getPixel(8, 8)
-                var darkest = 255
-                var lightest = 0
-                val inset = 4
-                for (y in inset until bitmap.height - inset) for (x in inset until bitmap.width - inset) {
-                    val color = bitmap.getPixel(x, y)
-                    if (Color.alpha(color) == 0) continue
-                    if (Color.alpha(color) != 255) return@runCatching false
-                    darkest = minOf(darkest, Color.red(color), Color.green(color), Color.blue(color))
-                    lightest = maxOf(lightest, Color.red(color), Color.green(color), Color.blue(color))
-                    if (lightest - darkest > 10) return@runCatching false
-                }
-                true
-            } finally { bitmap.recycle() }
-        }.getOrDefault(false)
-        gradientChecks[drawable] = GradientCheck(drawable, source, neutral, sample)
-        return neutral
-    }
-
-    /**
-     * Inspect a copy so probing never changes the host's bounds, callback or drawable state.
-     * 只采中心填充区：九宫格边缘常带 1px 分割线/阴影/半透明描边，全图采样会把整张底色
-     * 误判为非中性；真正盖住底图的是中间填充，边缘色偏不影响透底。
-     */
-    private fun isNeutralNinePatch(drawable: NinePatchDrawable): Boolean {
-        val source = drawable.constantState ?: return false
-        ninePatchChecks[drawable]?.let { check ->
-            if (check.source.get() === source && check.state.contentEquals(drawable.state) &&
-                check.level == drawable.level && check.alpha == drawable.alpha && check.filter === drawable.colorFilter) {
-                return check.neutral
-            }
-        }
-        val neutral = runCatching {
-            val probe = source.newDrawable().mutate()
-            probe.state = drawable.state
-            probe.level = drawable.level
-            probe.setAlpha(drawable.alpha)
-            probe.setColorFilter(drawable.colorFilter)
-            val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
-            try {
-                probe.setBounds(0, 0, bitmap.width, bitmap.height)
-                probe.draw(Canvas(bitmap))
-                var darkest = 255
-                var lightest = 0
-                val inset = 4
-                for (y in inset until bitmap.height - inset) for (x in inset until bitmap.width - inset) {
-                    val color = bitmap.getPixel(x, y)
-                    if (Color.alpha(color) == 0) continue
-                    if (Color.alpha(color) != 255) return@runCatching false
-                    darkest = minOf(darkest, Color.red(color), Color.green(color), Color.blue(color))
-                    lightest = maxOf(lightest, Color.red(color), Color.green(color), Color.blue(color))
-                    if (lightest - darkest > 10) return@runCatching false
-                }
-                true
-            } finally { bitmap.recycle() }
-        }.getOrDefault(false)
-        ninePatchChecks[drawable] = NinePatchCheck(drawable, source, neutral)
-        return neutral
     }
 
     /** Suppress only idle neutral fill; the platform wrapper forwards padding, states and ripple callbacks. */
@@ -2084,7 +1899,7 @@ internal object PageWallpaperUnderlay {
             state.any {
                 it == android.R.attr.state_pressed ||
                     (it == android.R.attr.state_focused && !ignoreIdleFocus)
-            } || (!isNeutralSurface(drawable) && !suppressFaintIdle)
+            } || (!WallpaperDrawables.isNeutralSurface(drawable) && !suppressFaintIdle)
     }
 
     // View.setBackgroundColor may recolor our ColorDrawable in place without changing identity.
@@ -2202,7 +2017,7 @@ internal object PageWallpaperUnderlay {
                 val bg = view.background
                 val parentName = (view.parent as? View)?.javaClass?.simpleName ?: "root"
                 val pos = if (shown) "@${rect.top}-${rect.bottom}" else "@(${view.top}-${view.bottom}/vis=${view.visibility})"
-                hits.add("${view.javaClass.simpleName}$pos(父=$parentName bg=${bg?.javaClass?.simpleName ?: "null"}${bg?.let { retainedDetail(it) } ?: ""} padB=$pBottom marB=$bMargin)")
+                hits.add("${view.javaClass.simpleName}$pos(父=$parentName bg=${bg?.javaClass?.simpleName ?: "null"}${bg?.let { WallpaperDrawables.retainedDetail(it) } ?: ""} padB=$pBottom marB=$bMargin)")
             }
             if (view is ViewGroup) {
                 for (i in 0 until view.childCount) {
