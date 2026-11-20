@@ -296,7 +296,9 @@ internal object ThemeSurface {
     /** 跑一次聊天页检测；状态切换时做对应动作。 */
     fun checkChatPage(activity: Activity, force: Boolean = false) {
         val now = android.os.SystemClock.uptimeMillis()
-        if (!force && now - lastChatCheckAt < 400L) return
+        val promoteFallback = ownsForegroundThemeWindow(activity) && ThemeStore.usePageBackground() &&
+            TabWallpaperRenderer.canPromoteFallback(activity)
+        if (!force && !promoteFallback && now - lastChatCheckAt < 400L) return
         lastChatCheckAt = now
 
         val hit = ChatPageGuard.detect(activity)
@@ -374,10 +376,11 @@ internal object ThemeSurface {
         val hasWallpaper = ThemeStore.mainWallpaperEnabled() && (attached ||
             pageRule is BackgroundRule.Image || pageRule is BackgroundRule.Solid || pageRule === BackgroundRule.Transparent ||
             (profile == null && fileForTab(ThemeMaterials.tabWallpaperFiles(ThemeStore.activeThemeIdOrEmpty()), currentTabIndex(activity)) != null))
-        val needsWallpaper = hasWallpaper && !attached
+        val needsWallpaper = hasWallpaper && (!attached || promoteFallback)
         val needsText = ThemeStore.mainTextColorEnabled() && !MainPageAppearance.isApplied(activity) &&
             (ThemeStore.mainTitleColor() != null || MainPageAppearance.hasProfileColors(profile) || MainTabAssets.configured(profile) || MainSurfaceBackgrounds.configured(profile) || (hasWallpaper && ThemeStore.usePageBackground()))
-        if (onMainPage && (wasVisible || ((needsWallpaper || needsText) && activity.window?.decorView?.hasWindowFocus() == true))) {
+        if (onMainPage && (wasVisible || (needsWallpaper && promoteFallback) ||
+            ((needsWallpaper || needsText) && activity.window?.decorView?.hasWindowFocus() == true))) {
             noteEvent("主页面图层缺失或离开聊天页 → 重挂壁纸")
             runCatching { applyTabWallpapers(activity) }
         }
@@ -475,6 +478,9 @@ internal object ThemeSurface {
         override fun onActivityResumed(activity: Activity) {
             observedActivityLifecycle = true
             resumedRef = java.lang.ref.WeakReference(activity)
+        }
+
+        override fun onActivityPostResumed(activity: Activity) {
             noteEvent("前台 → ${activity.javaClass.simpleName}")
             // 总开关关掉时一个字节都不动，避免「关了主题还在改窗口 / 还在挂背景」
             if (!ThemeStore.wallpaperSwitchOn()) return

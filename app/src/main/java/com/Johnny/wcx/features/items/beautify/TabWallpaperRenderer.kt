@@ -149,7 +149,10 @@ internal object TabWallpaperRenderer {
         MainPageAppearance.apply(activity, null, textColorEnabled, titleColor, profile, shouldDraw)
 
         val effectiveAlpha = (alphaPct.coerceIn(MIN_ALPHA_PCT, MAX_ALPHA_PCT) * opacity.coerceIn(0f, 1f)).toInt()
-        val mask = WallpaperMaskDrawable(bmp, shouldDraw)
+        val awaitsUnderlay = underlayFailure == PageWallpaperUnderlay.CONTENT_NOT_READY ||
+            underlayFailure == PageWallpaperUnderlay.PAGER_NOT_READY ||
+            underlayFailure == PageWallpaperUnderlay.DECOR_NOT_LAID_OUT
+        val mask = WallpaperMaskDrawable(bmp, shouldDraw, awaitsUnderlay)
         mask.setAlpha(effectiveAlpha * 255 / 100)
         if (!savedForeground.containsKey(decor)) savedForeground[decor] = decor.foreground
         runCatching { decor.foreground = mask }
@@ -235,6 +238,12 @@ internal object TabWallpaperRenderer {
         runCatching { decor.invalidate() }
     }
 
+    fun canPromoteFallback(activity: Activity): Boolean {
+        val decor = activity.window?.decorView as? ViewGroup ?: return false
+        val fallback = masks[decor] ?: return false
+        return fallback.awaitsUnderlay && PageWallpaperUnderlay.canMount(activity)
+    }
+
     fun isMasked(activity: Activity): Boolean =
         PageWallpaperUnderlay.isAttached(activity) ||
             runCatching {
@@ -310,7 +319,8 @@ internal object TabWallpaperRenderer {
      */
     private class WallpaperMaskDrawable(
         private val bitmap: Bitmap,
-        private val shouldDraw: () -> Boolean
+        private val shouldDraw: () -> Boolean,
+        val awaitsUnderlay: Boolean
     ) : Drawable() {
 
         private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)

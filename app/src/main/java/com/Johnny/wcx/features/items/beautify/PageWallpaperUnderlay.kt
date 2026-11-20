@@ -29,6 +29,9 @@ internal object PageWallpaperUnderlay {
     private const val TAG = "PageWallpaperUnderlay"
     private const val MAX_NODES = 1800
     private const val MAX_DEPTH = 20
+    const val CONTENT_NOT_READY = "content 不可用"
+    const val PAGER_NOT_READY = "主界面分页容器未就绪"
+    const val DECOR_NOT_LAID_OUT = "主窗口尚未布局"
 
     private class Patch(
         val view: WeakReference<View>,
@@ -165,9 +168,9 @@ internal object PageWallpaperUnderlay {
     fun apply(activity: Activity, bitmap: Bitmap, opacity: Float, shouldDraw: () -> Boolean): String {
         val window = activity.window ?: return "window 不可用"
         val decor = window.decorView as? ViewGroup ?: return "decorView 不可用"
-        val content = decor.findViewById<ViewGroup>(android.R.id.content) ?: return "content 不可用"
-        val pager = findPager(content) ?: return "主界面分页容器未就绪"
-        if (decor.width <= 0 || decor.height <= 0) return "主窗口尚未布局"
+        val content = decor.findViewById<ViewGroup>(android.R.id.content) ?: return CONTENT_NOT_READY
+        val pager = findPager(content) ?: return PAGER_NOT_READY
+        if (decor.width <= 0 || decor.height <= 0) return DECOR_NOT_LAID_OUT
         WallpaperDrawables.resetProbes()
         try {
             var state = states[decor]?.get()
@@ -1950,6 +1953,13 @@ internal object PageWallpaperUnderlay {
         val decor = activity.window?.decorView as? ViewGroup ?: return null
         val original = states[decor]?.get()?.originalBackdrop ?: decor.background
         return (original?.current as? ColorDrawable)?.takeIf { it.alpha == 255 }?.color
+    }
+
+    fun canMount(activity: Activity): Boolean {
+        val decor = activity.window?.decorView as? ViewGroup ?: return false
+        if (decor.width <= 0 || decor.height <= 0) return false
+        val content = decor.findViewById<ViewGroup>(android.R.id.content) ?: return false
+        return findPager(content) != null
     }
 
     fun isAttached(activity: Activity): Boolean {

@@ -8,7 +8,9 @@ import android.graphics.drawable.Drawable
 import android.os.Build
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.view.Window
+import android.view.WindowInsets
 import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 
@@ -28,7 +30,7 @@ internal object ChatFooterWallpaper {
 
     fun ownsBackground(view: View): Boolean = view.background is LockedBottomDrawable
 
-    private class NavigationViewPatch(val background: Drawable?, val alpha: Float, val visibility: Int)
+    private class NavigationViewPatch(val alpha: Float, val visibility: Int)
 
     private class Session(window: Window, decor: ViewGroup) {
         val window = WeakReference(window)
@@ -37,10 +39,30 @@ internal object ChatFooterWallpaper {
         val paints = WeakHashMap<Paint, Int>()
         private val navigationViews = WeakHashMap<View, NavigationViewPatch>()
         var pending: Runnable? = null
+        var navigationPreDraw: ViewTreeObserver.OnPreDrawListener? = null
+        var navigationAttach: View.OnAttachStateChangeListener? = null
+        private var navigationObserver: WeakReference<ViewTreeObserver>? = null
         @Suppress("DEPRECATION")
         private var navigationColor = window.navigationBarColor
+        @Suppress("DEPRECATION")
+        private var navigationDivider = window.navigationBarDividerColor
         private var navigationContrast = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
             window.isNavigationBarContrastEnforced
+
+        fun observeNavigation(root: View) {
+            if (!root.isAttachedToWindow) return
+            val observer = root.viewTreeObserver
+            if (navigationObserver?.get() === observer) return
+            stopObservingNavigation()
+            navigationPreDraw?.let(observer::addOnPreDrawListener)
+            navigationObserver = WeakReference(observer)
+        }
+
+        fun stopObservingNavigation() {
+            val observer = navigationObserver?.get()
+            if (observer?.isAlive == true) navigationPreDraw?.let(observer::removeOnPreDrawListener)
+            navigationObserver = null
+        }
 
         @Suppress("DEPRECATION")
         fun clearNavigation(window: Window, decor: ViewGroup) {
@@ -48,19 +70,25 @@ internal object ChatFooterWallpaper {
                 navigationColor = window.navigationBarColor
                 window.navigationBarColor = AndroidColor.TRANSPARENT
             }
+            if (window.navigationBarDividerColor != AndroidColor.TRANSPARENT) {
+                navigationDivider = window.navigationBarDividerColor
+                window.navigationBarDividerColor = AndroidColor.TRANSPARENT
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && window.isNavigationBarContrastEnforced) {
                 navigationContrast = true
                 window.isNavigationBarContrastEnforced = false
             }
-            val view = decor.findViewById<View>(android.R.id.navigationBarBackground) ?: return
+            // This framework color view is a direct DecorView child. Keep its Drawable
+            // installed because Android can recolor its divider layers in place.
+            val view = (0 until decor.childCount).firstNotNullOfOrNull { index ->
+                decor.getChildAt(index)?.takeIf { it.id == android.R.id.navigationBarBackground }
+            } ?: return
             val previous = navigationViews[view]
-            if (previous == null || view.background != null || view.alpha != 0f || view.visibility != View.INVISIBLE) {
+            if (previous == null || view.alpha != 0f || view.visibility != View.INVISIBLE) {
                 navigationViews[view] = NavigationViewPatch(
-                    view.background ?: previous?.background,
                     if (previous != null && view.alpha == 0f) previous.alpha else view.alpha,
                     if (previous != null && view.visibility == View.INVISIBLE) previous.visibility else view.visibility
                 )
-                PageWallpaperUnderlay.setBackgroundPreservingPadding(view, null)
                 view.alpha = 0f
                 view.visibility = View.INVISIBLE
             }
@@ -70,6 +98,10 @@ internal object ChatFooterWallpaper {
         fun restore() {
             pending?.let { decor.get()?.removeCallbacks(it) }
             pending = null
+            stopObservingNavigation()
+            navigationPreDraw = null
+            navigationAttach?.let { decor.get()?.removeOnAttachStateChangeListener(it) }
+            navigationAttach = null
             backgrounds.forEach { (view, original) ->
                 if (view.background is LockedBottomDrawable) {
                     PageWallpaperUnderlay.setBackgroundPreservingPadding(view, original)
@@ -79,12 +111,14 @@ internal object ChatFooterWallpaper {
                 if (paint.color == AndroidColor.TRANSPARENT) paint.color = original
             }
             navigationViews.forEach { (view, original) ->
-                if (view.background == null) PageWallpaperUnderlay.setBackgroundPreservingPadding(view, original.background)
                 if (view.alpha == 0f) view.alpha = original.alpha
                 if (view.visibility == View.INVISIBLE) view.visibility = original.visibility
             }
             window.get()?.let { window ->
                 if (window.navigationBarColor == AndroidColor.TRANSPARENT) window.navigationBarColor = navigationColor
+                if (window.navigationBarDividerColor == AndroidColor.TRANSPARENT) {
+                    window.navigationBarDividerColor = navigationDivider
+                }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !window.isNavigationBarContrastEnforced) {
                     window.isNavigationBarContrastEnforced = navigationContrast
                 }
@@ -99,6 +133,7 @@ internal object ChatFooterWallpaper {
         val decor = window.decorView as? ViewGroup ?: return
         val existing = sessions[activity]
         if (existing?.decor?.get() === decor && existing.window.get() === window) {
+            existing.observeNavigation(decor)
             sweep(existing, window, decor)
             return
         }
@@ -107,8 +142,27 @@ internal object ChatFooterWallpaper {
         sessions[activity] = session
         sweep(session, window, decor)
 
-        // The native footer can be laid out after the entry callback. Queue once per chat.
         val activityRef = WeakReference(activity)
+        val navigation = ViewTreeObserver.OnPreDrawListener {
+            val owner = activityRef.get()
+            val root = session.decor.get()
+            val liveWindow = session.window.get()
+            if (owner != null && root != null && liveWindow != null && sessions[owner] === session &&
+                ThemeStore.wallpaperSwitchOn() && ThemeSurface.ownsForegroundThemeWindow(owner)) {
+                session.clearNavigation(liveWindow, root)
+            }
+            true
+        }
+        session.navigationPreDraw = navigation
+        val attach = object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(view: View) = session.observeNavigation(view)
+            override fun onViewDetachedFromWindow(view: View) = session.stopObservingNavigation()
+        }
+        session.navigationAttach = attach
+        decor.addOnAttachStateChangeListener(attach)
+        session.observeNavigation(decor)
+
+        // The native footer can be laid out after the entry callback. Queue once per chat.
         val retry = Runnable {
             val owner = activityRef.get() ?: return@Runnable
             if (sessions[owner] !== session || !ThemeStore.wallpaperSwitchOn() ||
@@ -142,6 +196,12 @@ internal object ChatFooterWallpaper {
         val loc = IntArray(2)
         val rootLoc = IntArray(2)
         decor.getLocationOnScreen(rootLoc)
+        @Suppress("DEPRECATION")
+        val navigationInset = decor.rootWindowInsets?.let { insets ->
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) insets.getInsets(WindowInsets.Type.navigationBars()).bottom
+            else insets.stableInsetBottom
+        }?.coerceIn(0, decor.height) ?: 0
+        val contentBottom = decor.height - navigationInset
         var visited = 0
         var cleared = 0
         val chatHits = ArrayList<String>(14)
@@ -185,9 +245,15 @@ internal object ChatFooterWallpaper {
 
                 if (insideChat || insideFooter) {
                     // 1. 屏幕最底端 48px 垫片（top >= decor.height - 100 && bottom >= decor.height - 4 && width >= 75%）
-                    val isBottomInsetStrip = bottom >= decor.height - 4 &&
-                        top >= decor.height - 100 &&
-                        view.width >= decor.width * 0.75f
+                    val atWindowEdge = bottom >= decor.height - 4 && top >= decor.height - 100
+                    val atContentEdge = navigationInset > 0 &&
+                        bottom in (contentBottom - 4)..(contentBottom + 4) && top >= contentBottom - 100 &&
+                        (view !is ViewGroup || view.childCount == 0) &&
+                        !view.isClickable && !view.isLongClickable && !view.isFocusable &&
+                        WallpaperDrawables.isNeutralSurface(view.background)
+                    val isBottomInsetStrip = (atWindowEdge || atContentEdge) &&
+                        view.width >= decor.width * 0.75f && !isInputBox(view, bottom) &&
+                        view !is android.widget.ImageView
                     // 2. 聊天页全屏根容器（SwipeBackLayout@0-2608 #FFFFFFFF、ChattingUILayout@0-2608 #FFEDEDED + padB=48 等）
                     val isChatRootContainer = view is ViewGroup &&
                         bottom >= decor.height - 4 &&
@@ -251,7 +317,7 @@ internal object ChatFooterWallpaper {
         }
         runCatching { walk(decor, 0, false, false) }
         if (chatHits.isNotEmpty()) {
-            diagnosis = "清=$cleared[${chatHits.joinToString(";")}]"
+            diagnosis = "导航栏 inset=$navigationInset 清=$cleared[${chatHits.joinToString(";")}]"
         }
     }
 }
