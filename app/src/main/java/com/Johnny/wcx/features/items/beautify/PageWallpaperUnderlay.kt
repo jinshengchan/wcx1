@@ -77,7 +77,7 @@ internal object PageWallpaperUnderlay {
         var cardFocusSuppressed = 0
         var lastCardResolveAt = 0L
         var launcherReturnChecks = 0
-        var launcherReturnScheduled = false
+        var launcherReturnCheck: Runnable? = null
         var lastCardCheckAt = 0L
         var lastSweepAt = 0L
         var titleRegionRepairs = 0
@@ -208,23 +208,23 @@ internal object PageWallpaperUnderlay {
             state.wallpaper.invalidateSelf()
             state.dirty = true
             refresh(state)
-            // A freshly reattached LauncherUI can finish binding Me's first
-            // Preference row AFTER apply(). Do a few bounded one-shot checks
-            // instead of waiting for another tab switch or list scroll.
+            // LauncherUI can bind native surfaces after apply() on cold entry
+            // or when the same window returns from the background.
             val installed = state
-            if (!installed.launcherReturnScheduled) {
-                installed.launcherReturnScheduled = true
-                for (delay in longArrayOf(80L, 250L, 600L)) {
-                    decor.postDelayed({
-                        if (states[decor]?.get() === installed &&
-                            decor.isShown && installed.wallpaper.shouldDraw()) {
-                            installed.launcherReturnChecks++
-                            installed.dirty = true
-                            installed.lastCardResolveAt = 0L
-                            refresh(installed)
-                        }
-                    }, delay)
+            if (installed.launcherReturnCheck == null && ThemeSurface.ownsForegroundThemeWindow(activity)) {
+                val activityRef = WeakReference(activity)
+                val recheck = Runnable {
+                    val owner = activityRef.get() ?: return@Runnable
+                    if (states[decor]?.get() !== installed || !decor.isShown ||
+                        !ThemeSurface.ownsForegroundThemeWindow(owner) || !installed.wallpaper.shouldDraw()) return@Runnable
+                    installed.launcherReturnChecks++
+                    installed.dirty = true
+                    installed.lastCardResolveAt = 0L
+                    refresh(installed)
+                    decor.postInvalidateOnAnimation()
                 }
+                installed.launcherReturnCheck = recheck
+                for (delay in longArrayOf(80L, 250L, 600L)) decor.postDelayed(recheck, delay)
             }
         } catch (e: Throwable) {
             clear(activity)
@@ -257,6 +257,7 @@ internal object PageWallpaperUnderlay {
     }
 
     private fun removeListeners(state: State) {
+        cancelLauncherReturnChecks(state)
         state.settleRefresh?.let { state.decor.get()?.removeCallbacks(it) }
         state.settleRefresh = null
         state.observer?.get()?.takeIf { it.isAlive }?.let { observer ->
@@ -268,6 +269,16 @@ internal object PageWallpaperUnderlay {
         state.preDraw = null
         state.layout = null
         state.scroll = null
+    }
+
+    fun onLauncherPaused(activity: Activity) {
+        val decor = activity.window?.decorView as? ViewGroup ?: return
+        states[decor]?.get()?.let(::cancelLauncherReturnChecks)
+    }
+
+    private fun cancelLauncherReturnChecks(state: State) {
+        state.launcherReturnCheck?.let { state.decor.get()?.removeCallbacks(it) }
+        state.launcherReturnCheck = null
     }
 
     /**

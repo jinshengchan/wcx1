@@ -512,9 +512,10 @@ internal object ThemeSurface {
             // 而用户在这期间根本看不到主界面，撤掉毫无收益。
             // 真正需要撤壁纸的场景只有「另一个 Activity 到前台」，由 onActivityResumed 里的
             // hideLauncherWallpapers() 负责；聊天页是 LauncherUI 内的 Fragment，由锚点负责。
-            // 这里只重置页码（LauncherUI 退后台后可能被重建，残留页码会挂错图）。
+            // 重置页码并取消本轮复查，返回前台时在新的绑定周期重新安排。
             runCatching {
                 if (!ThemePages.isLauncher(activity)) return@runCatching
+                PageWallpaperUnderlay.onLauncherPaused(activity)
                 resetTabIndex()
             }.onFailure { WeLogger.d(TAG, "onActivityPaused 处理失败：${it.message}") }
         }
