@@ -355,6 +355,8 @@ internal object ThemeSurface {
         if (fragmentChatActive) {
             if (!onMainPage) {
                 anchorLeaveSince = 0L   // 不在主页面：不论识别结果如何，一律不当「已离开」
+                // Activity 暂停时已还原底栏。Fragment 可先于输入框和列表恢复。
+                runCatching { ChatFooterWallpaper.apply(activity) }
             } else if (anchorLeaveSince == 0L) {
                 anchorLeaveSince = now
             } else if (now - anchorLeaveSince >= ANCHOR_LEAVE_CONFIRM_MS) {

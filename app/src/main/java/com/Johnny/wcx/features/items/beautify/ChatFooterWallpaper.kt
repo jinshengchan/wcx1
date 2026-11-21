@@ -11,6 +11,7 @@ import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.view.Window
 import android.view.WindowInsets
+import android.widget.ImageView
 import java.lang.ref.WeakReference
 import java.util.WeakHashMap
 
@@ -42,6 +43,7 @@ internal object ChatFooterWallpaper {
         var navigationPreDraw: ViewTreeObserver.OnPreDrawListener? = null
         var navigationAttach: View.OnAttachStateChangeListener? = null
         private var navigationObserver: WeakReference<ViewTreeObserver>? = null
+        private var unclippedChatLayout: WeakReference<ViewGroup>? = null
         @Suppress("DEPRECATION")
         private var navigationColor = window.navigationBarColor
         @Suppress("DEPRECATION")
@@ -62,6 +64,19 @@ internal object ChatFooterWallpaper {
             val observer = navigationObserver?.get()
             if (observer?.isAlive == true) navigationPreDraw?.let(observer::removeOnPreDrawListener)
             navigationObserver = null
+        }
+
+        fun updateBottomClip(layout: ViewGroup?): Boolean {
+            val previous = unclippedChatLayout?.get()
+            if (previous !== layout) {
+                previous?.clipToPadding = true
+                unclippedChatLayout = null
+            }
+            if (layout?.clipToPadding == true) {
+                layout.clipToPadding = false
+                unclippedChatLayout = WeakReference(layout)
+            }
+            return unclippedChatLayout?.get() != null
         }
 
         @Suppress("DEPRECATION")
@@ -96,6 +111,7 @@ internal object ChatFooterWallpaper {
 
         @Suppress("DEPRECATION")
         fun restore() {
+            updateBottomClip(null)
             pending?.let { decor.get()?.removeCallbacks(it) }
             pending = null
             stopObservingNavigation()
@@ -196,14 +212,18 @@ internal object ChatFooterWallpaper {
         val loc = IntArray(2)
         val rootLoc = IntArray(2)
         decor.getLocationOnScreen(rootLoc)
+        val insets = decor.rootWindowInsets
         @Suppress("DEPRECATION")
-        val navigationInset = decor.rootWindowInsets?.let { insets ->
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) insets.getInsets(WindowInsets.Type.navigationBars()).bottom
-            else insets.stableInsetBottom
+        val navigationInset = insets?.let {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) it.getInsets(WindowInsets.Type.navigationBars()).bottom
+            else it.stableInsetBottom
         }?.coerceIn(0, decor.height) ?: 0
+        val imeVisible = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && insets?.isVisible(WindowInsets.Type.ime()) == true
         val contentBottom = decor.height - navigationInset
         var visited = 0
         var cleared = 0
+        var chatLayout: ViewGroup? = null
+        var nativeImage: String? = null
         val chatHits = ArrayList<String>(14)
         fun bgDesc(bg: android.graphics.drawable.Drawable?): String {
             if (bg == null) return "null"
@@ -244,6 +264,17 @@ internal object ChatFooterWallpaper {
                 val padB = view.paddingBottom
 
                 if (insideChat || insideFooter) {
+                    // 截图中的白条与原生聊天根布局的底部 padding 重合。只放行这个区域的绘制，保留 padding 供输入区避让。
+                    if (simple == "ChattingUILayout" && view is ViewGroup && top == 0 && bottom == decor.height &&
+                        loc[0] == rootLoc[0] && view.width == decor.width && navigationInset > 0 && padB == navigationInset &&
+                        view.paddingLeft == 0 && view.paddingTop == 0 && view.paddingRight == 0 && !imeVisible
+                    ) {
+                        chatLayout = view
+                    }
+                    if (simple == "ChattingImageBGView") {
+                        val drawable = (view as? ImageView)?.drawable
+                        nativeImage = "$top-$bottom/${drawable?.javaClass?.simpleName ?: "无 ImageView drawable"}"
+                    }
                     // 1. 屏幕最底端 48px 垫片（top >= decor.height - 100 && bottom >= decor.height - 4 && width >= 75%）
                     val atWindowEdge = bottom >= decor.height - 4 && top >= decor.height - 100
                     val atContentEdge = navigationInset > 0 &&
@@ -304,7 +335,10 @@ internal object ChatFooterWallpaper {
                         (bottom >= decor.height - 96 || simple == "TestTimeForChatting" || simple == "SwipeBackLayout" || simple == "ChattingUILayout" || insideFooter || view is android.widget.ImageView)) {
                         val bg = view.background
                         if (chatHits.size < 14 && (bg != null || padB > 0 || marB > 0 || top >= decor.height - 260 || simple == "TestTimeForChatting" || simple == "ChattingUILayout" || view is android.widget.ImageView)) {
-                            chatHits.add("$simple@$top-$bottom(bg=${bgDesc(bg)} padB=$padB marB=$marB)")
+                            val clip = if (simple == "ChattingUILayout" && view is ViewGroup) {
+                                " clip=${view.clipToPadding} width=${view.width} padLTR=${view.paddingLeft},${view.paddingTop},${view.paddingRight}"
+                            } else ""
+                            chatHits.add("$simple@$top-$bottom(bg=${bgDesc(bg)} padB=$padB marB=$marB$clip)")
                         }
                     }
                 }
@@ -316,8 +350,11 @@ internal object ChatFooterWallpaper {
             }
         }
         runCatching { walk(decor, 0, false, false) }
+        val unclipped = session.updateBottomClip(chatLayout.takeIf { nativeImage != null })
         if (chatHits.isNotEmpty()) {
-            diagnosis = "导航栏 inset=$navigationInset 清=$cleared[${chatHits.joinToString(";")}]"
+            diagnosis = "导航栏 inset=$navigationInset windowFlags=0x${window.attributes.flags.toUInt().toString(16)} " +
+                "底部裁剪解除=$unclipped 键盘=$imeVisible " +
+                "原生底图=${nativeImage ?: "未观测"} 清=$cleared[${chatHits.joinToString(";")}]"
         }
     }
 }
