@@ -1300,6 +1300,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         }
 
         appendLine("当前前台 Activity = ${runCatching { ThemeSurface.foregroundName() }.getOrDefault("?")}")
+        appendLine("主界面回前台补查 = ${ThemeSurface.lastLauncherResumeCheck}")
         appendLine("聊天页识别 = ${runCatching { ThemeSurface.chatPageStatus() }.getOrDefault("?")}")
         appendLine("最近事件（时间线，从旧到新）：")
         runCatching { ThemeSurface.recentEvents() }.getOrDefault(emptyList()).forEach { appendLine("  $it") }

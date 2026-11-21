@@ -3,6 +3,7 @@ package com.Johnny.wcx.features.items.beautify
 import android.app.Activity
 import android.graphics.Color as AndroidColor
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.os.Build
@@ -44,6 +45,7 @@ internal object ChatFooterWallpaper {
         var navigationAttach: View.OnAttachStateChangeListener? = null
         private var navigationObserver: WeakReference<ViewTreeObserver>? = null
         private var unclippedChatLayout: WeakReference<ViewGroup>? = null
+        private var installedClipBounds: Rect? = null
         @Suppress("DEPRECATION")
         private var navigationColor = window.navigationBarColor
         @Suppress("DEPRECATION")
@@ -68,15 +70,22 @@ internal object ChatFooterWallpaper {
 
         fun updateBottomClip(layout: ViewGroup?): Boolean {
             val previous = unclippedChatLayout?.get()
-            if (previous !== layout) {
-                previous?.clipToPadding = true
+            if (previous != null && (previous !== layout || previous.clipToPadding || previous.clipBounds != installedClipBounds)) {
+                if (previous.clipBounds == installedClipBounds) previous.clipBounds = null
+                previous.clipToPadding = true
                 unclippedChatLayout = null
             }
-            if (layout?.clipToPadding == true) {
+            if (layout == null) return false
+            if (unclippedChatLayout?.get() !== layout) {
+                if (!layout.clipToPadding || layout.clipBounds != null) return false
                 layout.clipToPadding = false
                 unclippedChatLayout = WeakReference(layout)
             }
-            return unclippedChatLayout?.get() != null
+            // Keep the status-bar and side clips when releasing the bottom padding clip.
+            val bounds = Rect(layout.paddingLeft, layout.paddingTop, layout.width - layout.paddingRight, layout.height)
+            if (layout.clipBounds != bounds) layout.clipBounds = bounds
+            installedClipBounds = bounds
+            return true
         }
 
         @Suppress("DEPRECATION")
@@ -267,7 +276,7 @@ internal object ChatFooterWallpaper {
                     // 截图中的白条与原生聊天根布局的底部 padding 重合。只放行这个区域的绘制，保留 padding 供输入区避让。
                     if (simple == "ChattingUILayout" && view is ViewGroup && top == 0 && bottom == decor.height &&
                         loc[0] == rootLoc[0] && view.width == decor.width && navigationInset > 0 && padB == navigationInset &&
-                        view.paddingLeft == 0 && view.paddingTop == 0 && view.paddingRight == 0 && !imeVisible
+                        !imeVisible
                     ) {
                         chatLayout = view
                     }
@@ -352,8 +361,10 @@ internal object ChatFooterWallpaper {
         runCatching { walk(decor, 0, false, false) }
         val unclipped = session.updateBottomClip(chatLayout.takeIf { nativeImage != null })
         if (chatHits.isNotEmpty()) {
+            val navView = decor.findViewById<View>(android.R.id.navigationBarBackground)
+            val navDetails = navView?.let { "vis=${it.visibility}/alpha=${it.alpha}/bg=${bgDesc(it.background)}" } ?: "无"
             diagnosis = "导航栏 inset=$navigationInset windowFlags=0x${window.attributes.flags.toUInt().toString(16)} " +
-                "底部裁剪解除=$unclipped 键盘=$imeVisible " +
+                "框架底栏=$navDetails 底部裁剪解除=$unclipped 裁剪框=${chatLayout?.clipBounds} 键盘=$imeVisible " +
                 "原生底图=${nativeImage ?: "未观测"} 清=$cleared[${chatHits.joinToString(";")}]"
         }
     }

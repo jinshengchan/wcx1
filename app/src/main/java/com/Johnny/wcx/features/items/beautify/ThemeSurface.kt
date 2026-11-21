@@ -199,9 +199,19 @@ internal object ThemeSurface {
         var layout: android.view.ViewTreeObserver.OnGlobalLayoutListener? = null
         var focus: android.view.ViewTreeObserver.OnWindowFocusChangeListener? = null
         var attach: View.OnAttachStateChangeListener? = null
+        var resumeCheck: Runnable? = null
     }
 
     private val mainWatchers = java.util.WeakHashMap<ViewGroup, MainWatcher>()
+
+    @Volatile
+    var lastLauncherResumeCheck = "未触发"
+        private set
+
+    private fun cancelLauncherResumeCheck(watcher: MainWatcher) {
+        watcher.resumeCheck?.let { watcher.decor.get()?.removeCallbacks(it) }
+        watcher.resumeCheck = null
+    }
 
     private fun stopObserving(watcher: MainWatcher) {
         watcher.observer?.get()?.takeIf { it.isAlive }?.let { observer ->
@@ -222,8 +232,12 @@ internal object ThemeSurface {
             if (ThemeStore.wallpaperSwitchOn()) watcher.activity.get()?.let { runCatching { checkChatPage(it) } }
         }
         val focus = android.view.ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
-            if (hasFocus && ThemeStore.wallpaperSwitchOn() && !chatPageVisible) {
-                watcher.activity.get()?.let { applyNow(it) }
+            if (hasFocus && ThemeStore.wallpaperSwitchOn()) {
+                watcher.activity.get()?.let { activity ->
+                    if (!ownsForegroundThemeWindow(activity)) return@let
+                    if (chatPageVisible) runCatching { checkChatPage(activity, force = true) }
+                    else applyNow(activity)
+                }
             }
         }
         watcher.observer = WeakReference(observer)
@@ -238,7 +252,10 @@ internal object ThemeSurface {
             MainWatcher(activity, decor).also { state ->
                 val attach = object : View.OnAttachStateChangeListener {
                     override fun onViewAttachedToWindow(view: View) { observeMain(state) }
-                    override fun onViewDetachedFromWindow(view: View) { stopObserving(state) }
+                    override fun onViewDetachedFromWindow(view: View) {
+                        cancelLauncherResumeCheck(state)
+                        stopObserving(state)
+                    }
                 }
                 state.attach = attach
                 decor.addOnAttachStateChangeListener(attach)
@@ -249,8 +266,31 @@ internal object ThemeSurface {
 
     private fun removeMainWatcher(decor: ViewGroup) {
         val watcher = mainWatchers.remove(decor) ?: return
+        cancelLauncherResumeCheck(watcher)
         stopObserving(watcher)
         watcher.attach?.let(decor::removeOnAttachStateChangeListener)
+    }
+
+    private fun scheduleLauncherResumeCheck(activity: Activity) {
+        val decor = activity.window?.decorView as? ViewGroup ?: return
+        ensureMainWatcher(activity, decor)
+        val watcher = mainWatchers[decor] ?: return
+        cancelLauncherResumeCheck(watcher)
+        lastLauncherResumeCheck = "本轮未补查"
+        // The underlay's own retries cannot run when the chat gate prevented mounting.
+        val check = Runnable {
+            val owner = watcher.activity.get() ?: return@Runnable
+            if (!ownsForegroundThemeWindow(owner) || !ThemeStore.wallpaperSwitchOn()) return@Runnable
+            val attached = isAttached(owner)
+            if (onMainPage && !chatPageVisible && attached && !TabWallpaperRenderer.canPromoteFallback(owner)) return@Runnable
+            runCatching { checkChatPage(owner, force = true) }
+            lastLauncherResumeCheck = "Tab=$lastTabIndex 主页面=$onMainPage 聊天=$chatPageVisible 底图=$attached→${isAttached(owner)}"
+        }
+        watcher.resumeCheck = check
+        decor.postOnAnimation(check)
+        decor.postDelayed(check, 250L)
+        // One pass after the existing 1200 ms guard for a newly shown chat fragment.
+        decor.postDelayed(check, 1250L)
     }
 
     /**
@@ -486,7 +526,10 @@ internal object ThemeSurface {
             noteEvent("前台 → ${activity.javaClass.simpleName}")
             // 总开关关掉时一个字节都不动，避免「关了主题还在改窗口 / 还在挂背景」
             if (!ThemeStore.wallpaperSwitchOn()) return
-            if (ThemePages.isLauncher(activity)) ThemeScheduleController.onLauncherEntry(activity)
+            if (ThemePages.isLauncher(activity)) {
+                scheduleLauncherResumeCheck(activity)
+                ThemeScheduleController.onLauncherEntry(activity)
+            }
             // 非主界面进前台：先把主界面遮罩藏掉（聊天页半透明时会透出后面这张壁纸）
             if (!ThemePages.isLauncher(activity)) hideLauncherWallpapers()
             // 回前台若判定「还在聊天页」（如相册 → 聊天页返回），不挂壁纸，免得闪一帧又浸透。
@@ -515,6 +558,8 @@ internal object ThemeSurface {
             // 重置页码并取消本轮复查，返回前台时在新的绑定周期重新安排。
             runCatching {
                 if (!ThemePages.isLauncher(activity)) return@runCatching
+                (activity.window?.decorView as? ViewGroup)?.let { mainWatchers[it] }
+                    ?.let(::cancelLauncherResumeCheck)
                 PageWallpaperUnderlay.onLauncherPaused(activity)
                 resetTabIndex()
             }.onFailure { WeLogger.d(TAG, "onActivityPaused 处理失败：${it.message}") }
