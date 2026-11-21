@@ -123,7 +123,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
                 ThemeRuntime.invalidate()
                 ThemeOwnedAppearance.invalidate()
                 CustomMessageBubbles.refreshBoundViews()
-                ThemeSurface.applyToAllLive()
+                ThemeSurface.refreshForegroundTheme()
             }.onFailure { WeLogger.w(TAG, "主题已保存，刷新失败：${it.message}") }
         }
     }
@@ -671,7 +671,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         ThemeRuntime.invalidate()
         ThemeOwnedAppearance.invalidate()
         CustomMessageBubbles.refreshBoundViews()
-        ThemeSurface.applyToAllLive()
+        ThemeSurface.refreshForegroundTheme()
         if (activeThemeId.isNotEmpty()) {
             // 进程重启后恢复：壁纸/沉浸式全局重挂（气泡文件已在 moduleAssets 持久存在）
             WeLogger.i(TAG, "已恢复主题：$activeThemeId")
@@ -681,7 +681,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     override fun onDisable() {
         // 只撤效果，**保留主题选择**：关开关不该清掉 activeThemeId，
         // 否则每次关掉再打开都得回主题工坊重新应用一次（实测用户反复测试全被这个清空）。
-        // 重开时 onEnable 里的 applyToAllLive() 会按 activeThemeId 自动恢复。
+        // 重开时 onEnable 里的 refreshForegroundTheme() 会按 activeThemeId 自动恢复。
         runCatching { ThemeSurface.removeAllLive() }
         ThemeSurface.registerCallbacks(false)
         ThemeHostAdapter.resetHooks()
@@ -761,7 +761,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         ThemeRuntime.invalidate()
         ThemeOwnedAppearance.invalidate()
         CustomMessageBubbles.refreshBoundViews()
-        ThemeSurface.applyToAllLive()
+        ThemeSurface.refreshForegroundTheme()
         return true
     }
 
@@ -770,7 +770,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         ThemeOwnedAppearance.invalidate()
         if (!wallpaperSwitchOn() || !isEnabled) return
         CustomMessageBubbles.refreshBoundViews()
-        ThemeSurface.applyToAllLive()
+        ThemeSurface.refreshForegroundTheme()
     }
 
     /** 应用主题（内置或主题包），并同步一次壁纸透明度。 */
@@ -806,7 +806,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
             ThemeRuntime.invalidate()
             ThemeOwnedAppearance.invalidate()
             CustomMessageBubbles.refreshBoundViews()
-            ThemeSurface.applyToAllLive()
+            ThemeSurface.refreshForegroundTheme()
             WeLogger.i(TAG, "已应用主题：${theme.name}")
         } catch (e: Throwable) {
             WeLogger.e(TAG, "applyThemeInternal 异常", e)
@@ -823,7 +823,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
             ThemeRuntime.invalidate()
             ThemeOwnedAppearance.invalidate()
             CustomMessageBubbles.refreshBoundViews()
-            ThemeSurface.applyToAllLive()
+            ThemeSurface.refreshForegroundTheme()
             WeLogger.i(
                 TAG,
                 "已应用主题包：${pack.name}（壁纸=${pack.wallpaper() != null}）"
@@ -945,7 +945,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         if (pageBackgroundEnabled == enabled) return
         pageBackgroundEnabled = enabled
         ThemeSurface.resetFailStreak()
-        ThemeSurface.applyToAllLive()
+        ThemeSurface.refreshForegroundTheme()
     }
 
     private val mainWallpaperKeys = listOf("chats", "contacts", "discover", "me")
@@ -961,7 +961,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         }
         mainWallpaperOn = enabled
         invalidateWallpaperCache()
-        ThemeSurface.applyToAllLive()
+        ThemeSurface.refreshForegroundTheme()
     }
 
     fun mainTextColorEnabled(): Boolean = profileSnapshot()?.mainTextColorEnabled ?: mainTextColorOn
@@ -977,7 +977,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         }
         mainTextColorOn = enabled
         ThemeSurface.resetFailStreak()
-        ThemeSurface.applyToAllLive()
+        ThemeSurface.refreshForegroundTheme()
     }
 
     /** null 表示按背景自动选择清晰的文字颜色。 */
@@ -1004,7 +1004,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
         }
         mainTitleColorHex = color?.let { String.format("#%06X", it and 0xffffff) } ?: ""
         ThemeSurface.resetFailStreak()
-        ThemeSurface.applyToAllLive()
+        ThemeSurface.refreshForegroundTheme()
     }
 
     private fun mainWallpaperOverrideDir(id: String): File {
@@ -1119,7 +1119,7 @@ object ThemeStore : ClickableFeature(), WeChatMessageViewApi.ICreateViewListener
     /** 设置页点「壁纸渲染方式」：立即重写一次前景遮罩。 */
     fun reapplyNow() {
         invalidateWallpaperCache()
-        ThemeSurface.applyToAllLive()
+        ThemeSurface.refreshForegroundTheme()
         WeLogger.i(TAG, "手动重写主题背景：${TabWallpaperRenderer.lastResult}")
     }
 
