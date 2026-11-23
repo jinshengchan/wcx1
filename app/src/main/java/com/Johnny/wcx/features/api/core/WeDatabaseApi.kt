@@ -74,6 +74,44 @@ object WeDatabaseApi : ApiFeature(), IResolveDex {
 
     val isReady: Boolean get() = ::db.isInitialized
 
+    private const val AI_MESSAGE_WINDOW = "talker = ? AND createTime >= ? AND createTime < ?"
+    private const val AI_MESSAGE_COLUMNS = "msgId, msgSvrId, talker, content, type, createTime, isSend"
+    @Volatile private var aiTimeScale: Pair<SQLiteDatabase, Long>? = null
+
+    /** Only trust a database whose userinfo belongs to the current WeChat account. */
+    fun currentAiAccount(): String? = runCatching {
+        val account = WeApi.selfWxId.takeIf { it.isNotBlank() } ?: return null
+        val database = if (isReady) db else return null
+        account.takeIf { ownsAiDatabase(database, it) && db === database && WeApi.selfWxId == it }
+    }.getOrNull()
+
+    private fun ownsAiDatabase(database: SQLiteDatabase, account: String): Boolean =
+        database.rawQuery("SELECT value FROM userinfo WHERE id = 2", null).use { cursor ->
+            cursor != null && cursor.moveToFirst() && cursor.getString(0) == account
+        }
+
+    private inline fun <T> readAiDatabase(expectedAccount: String?, read: (SQLiteDatabase) -> T): T {
+        val account = expectedAccount ?: WeApi.selfWxId
+        check(account.isNotBlank() && isReady && WeApi.selfWxId == account) { "当前微信账号的消息库尚未就绪" }
+        val database = db
+        check(ownsAiDatabase(database, account)) { "当前微信账号的消息库尚未就绪" }
+        return read(database).also {
+            check(db === database && WeApi.selfWxId == account && ownsAiDatabase(database, account)) {
+                "微信账号已切换"
+            }
+        }
+    }
+
+    private fun aiMessageTimeScale(database: SQLiteDatabase): Long {
+        aiTimeScale?.let { if (it.first === database) return it.second }
+        val latest = database.rawQuery("SELECT MAX(createTime) FROM message", null).use { cursor ->
+            if (cursor != null && cursor.moveToFirst()) cursor.getLong(0) else 0L
+        }
+        val scale = if (latest > 10_000_000_000L) 1000L else 1L
+        if (latest > 0L) aiTimeScale = database to scale
+        return scale
+    }
+
     // ==== 供 h.Hchat 脚本子系统兜底使用 ====
     // Hchat 侧在微信 8.0.79 上 resolveDatabaseApi() 解析不到 CoreStorage / SqliteDB wrapper，
     // 导致脚本数据库、消息变更监听整体不可用。这里复用 WCX 侧已验证的解析结果作为兜底。
@@ -429,6 +467,7 @@ object WeDatabaseApi : ApiFeature(), IResolveDex {
         }
 
         db = database
+        aiTimeScale = null
         WeLogger.i(TAG, "数据库服务就绪：${storageObj.javaClass.name} -> ${wrapperObj.javaClass.name}")
     }
 
@@ -653,6 +692,19 @@ object WeDatabaseApi : ApiFeature(), IResolveDex {
         return ""
     }
 
+    /** Read the room data once for all messages in a digest. */
+    fun getGroupMemberDisplayNames(groupId: String, account: String? = null): Map<String, String> {
+        if (!groupId.isGroupChatWxId) return emptyMap()
+        return readAiDatabase(account) { database ->
+            database.rawQuery("SELECT roomdata FROM chatroom WHERE chatroomname = ?", arrayOf(groupId)).use { cursor ->
+                val blob = if (cursor != null && cursor.moveToFirst()) cursor.getBlob(0) else null
+                val members = blob?.let { runCatching { ProtoBuf.decodeFromByteArray<ChatRoomDataProto>(it) }.getOrNull() }
+                    ?.members.orEmpty()
+                members.filter { it.displayName.isNotBlank() }.associate { it.wxId to it.displayName }
+            }
+        }
+    }
+
     /**
      * 获取邀请指定群成员进群的邀请者 wxId
      * 数据来自 chatroom.roomdata protobuf，群主或无邀请者信息时返回空字符串
@@ -710,6 +762,61 @@ object WeDatabaseApi : ApiFeature(), IResolveDex {
                 isSend = row.int("isSend")
             )
         }
+    }
+
+    /** Time arguments are seconds. The interval includes its start and excludes its end. */
+    fun getMessagesBetween(
+        convId: String,
+        fromSec: Long,
+        toSec: Long,
+        limit: Int = 800,
+        typeCodes: Set<Int>? = null,
+        newestFirst: Boolean = false,
+        account: String? = null,
+    ): List<WeMessage> {
+        if (convId.isBlank() || toSec <= fromSec) return emptyList()
+        return readAiDatabase(account) { database ->
+            val order = if (newestFirst) "DESC" else "ASC"
+            val args = aiWindowArgs(database, convId, fromSec, toSec) + limit.coerceIn(1, 200_000)
+            val sql = "SELECT $AI_MESSAGE_COLUMNS FROM message WHERE ${aiWindowFilter(typeCodes)} " +
+                "ORDER BY createTime $order, msgId $order LIMIT ?"
+            database.rawQuery(sql, args).use { cursor ->
+                buildList {
+                    while (cursor != null && cursor.moveToNext()) {
+                        add(WeMessage(
+                            msgId = cursor.getLong(0), msgSvrId = cursor.getLong(1),
+                            talker = cursor.getString(2).orEmpty(), content = cursor.getString(3).orEmpty(),
+                            typeCode = cursor.getInt(4), createTime = cursor.getLong(5), isSend = cursor.getInt(6),
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    fun countMessagesBetween(
+        convId: String,
+        fromSec: Long,
+        toSec: Long,
+        typeCodes: Set<Int>? = null,
+        account: String? = null,
+    ): Int {
+        if (convId.isBlank() || toSec <= fromSec) return 0
+        return readAiDatabase(account) { database ->
+            val args = aiWindowArgs(database, convId, fromSec, toSec)
+            database.rawQuery("SELECT COUNT(*) FROM message WHERE ${aiWindowFilter(typeCodes)}", args).use { cursor ->
+                if (cursor != null && cursor.moveToFirst()) cursor.getInt(0) else 0
+            }
+        }
+    }
+
+    private fun aiWindowFilter(typeCodes: Set<Int>?): String = if (typeCodes.isNullOrEmpty()) AI_MESSAGE_WINDOW
+    else "$AI_MESSAGE_WINDOW AND type IN (${typeCodes.joinToString(",")})"
+
+    private fun aiWindowArgs(database: SQLiteDatabase, convId: String, fromSec: Long, toSec: Long): Array<Any> {
+        val scale = aiMessageTimeScale(database)
+        val maxSeconds = Long.MAX_VALUE / scale
+        return arrayOf(convId, fromSec.coerceIn(0L, maxSeconds) * scale, toSec.coerceIn(0L, maxSeconds) * scale)
     }
 
     /**

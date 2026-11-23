@@ -66,7 +66,7 @@ internal object SmartReplyClient {
             }
             .build()
     }
-    enum class Owner { MANUAL, AUTO, MODELS }
+    enum class Owner { MANUAL, AUTO, MODELS, FRIEND_ARCHIVE, GROUP_DIGEST }
     private val calls = ConcurrentHashMap<Call, Owner>()
 
     fun cancel(owner: Owner) = calls.forEach { (call, caller) -> if (caller == owner) call.cancel() }
@@ -90,8 +90,13 @@ internal object SmartReplyClient {
         return url.newBuilder().encodedPath(base + if (models) "/models" else "/chat/completions").build()
     }
 
-    suspend fun request(request: Request, owner: Owner = Owner.MANUAL): String = suspendCancellableCoroutine { continuation ->
-        val call = http.newCall(request.newBuilder().tag(Attempt::class.java, Attempt()).build())
+    suspend fun request(request: Request, owner: Owner = Owner.MANUAL, readTimeoutMs: Int? = null): String = suspendCancellableCoroutine { continuation ->
+        val client = if (readTimeoutMs == null) http else {
+            val timeout = readTimeoutMs.coerceIn(1000, 180_000).toLong()
+            http.newBuilder().readTimeout(timeout, TimeUnit.MILLISECONDS)
+                .callTimeout(timeout + 20_000L, TimeUnit.MILLISECONDS).build()
+        }
+        val call = client.newCall(request.newBuilder().tag(Attempt::class.java, Attempt()).build())
         calls[call] = owner
         continuation.invokeOnCancellation { call.cancel(); calls.remove(call) }
         call.enqueue(object : Callback {
