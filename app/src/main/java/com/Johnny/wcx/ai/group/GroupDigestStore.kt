@@ -8,7 +8,7 @@ import java.util.UUID
 import kotlin.io.path.div
 import kotlin.io.path.exists
 
-/** One atomic file per group. Scheduling metadata is derived from those files and cached in memory. */
+/** One atomic file per group, with an in-memory index for scheduling and displaying groups. */
 object GroupDigestStore {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -17,27 +17,42 @@ object GroupDigestStore {
     private val groupIdPattern = Regex("[A-Za-z0-9_.@-]+@chatroom")
     private var indexAccount: String? = null
     private val schedules = mutableMapOf<String, GroupDigestSchedule>()
+    private val groups = mutableMapOf<String, GroupDigestSummary>()
 
     fun accountId(): String? = AiProfileStore.accountId()
 
     @Synchronized
     internal fun loadSchedules(account: String): List<GroupDigestSchedule> {
-        if (account != accountId()) return emptyList()
-        if (indexAccount == account) return schedules.values.toList()
+        return if (ensureIndex(account)) schedules.values.toList() else emptyList()
+    }
+
+    @Synchronized
+    internal fun loadGroups(account: String): List<GroupDigestSummary> {
+        return if (ensureIndex(account)) groups.values.sortedBy { it.name } else emptyList()
+    }
+
+    @Synchronized
+    internal fun unreadTotal(account: String): Int =
+        if (ensureIndex(account)) groups.values.sumOf { it.unread } else 0
+
+    private fun ensureIndex(account: String): Boolean {
+        if (account != accountId()) return false
+        if (indexAccount == account) return true
         val files = directory(account).toFile().listFiles().orEmpty()
-        val enabled = files.asSequence()
+        val configs = files.asSequence()
             .filter { it.isFile && it.name.endsWith(".json") }
             .mapNotNull { file ->
                 val groupId = file.name.removeSuffix(".json")
-                if (groupIdPattern.matches(groupId)) readFile(file.toPath(), groupId)?.toSchedule() else null
+                if (groupIdPattern.matches(groupId)) readFile(file.toPath(), groupId) else null
             }
             .sortedBy { it.groupId }
             .toList()
-        if (account != accountId()) return emptyList()
+        if (account != accountId()) return false
         schedules.clear()
-        enabled.associateByTo(schedules) { it.groupId }
+        groups.clear()
+        configs.forEach(::index)
         indexAccount = account
-        return enabled
+        return true
     }
 
     @Synchronized
@@ -45,6 +60,12 @@ object GroupDigestStore {
         val file = configFile(groupId, account) ?: return null
         return readFile(file, groupId)?.takeIf { account == accountId() }
     }
+
+    internal fun markRead(groupId: String, account: String): GroupDigestConfig? =
+        update(groupId, account) { current ->
+            if (current.unread == 0) current
+            else current.copy(digests = current.digests.map { if (it.read) it else it.copy(read = true) })
+        }
 
     /** Adds a group once. An existing group keeps its schedule and history. */
     @Synchronized
@@ -72,7 +93,10 @@ object GroupDigestStore {
     fun deleteConfig(groupId: String, account: String? = accountId()): Boolean {
         val file = configFile(groupId, account) ?: return false
         if (!AiProfileStore.delete(file)) return false
-        if (account == indexAccount) schedules.remove(groupId)
+        if (account == indexAccount) {
+            schedules.remove(groupId)
+            groups.remove(groupId)
+        }
         GroupDigestRunner.cancel(groupId, account)
         GroupDigestScheduler.schedule(groupId, account)
         return true
@@ -87,6 +111,12 @@ object GroupDigestStore {
         val text = AiProfileStore.readText(file) ?: return null
         return runCatching { json.decodeFromString<GroupDigestConfig>(text) }.getOrNull()
             ?.takeIf { it.groupId == groupId }
+    }
+
+    private fun index(config: GroupDigestConfig) {
+        val schedule = config.toSchedule()
+        if (schedule == null) schedules.remove(config.groupId) else schedules[config.groupId] = schedule
+        groups[config.groupId] = config.toSummary()
     }
 
     private fun save(
@@ -113,10 +143,7 @@ object GroupDigestStore {
         ).trimmed(now)
         val text = runCatching { json.encodeToString(next) }.getOrNull() ?: return null
         if (!AiProfileStore.writeAtomic(file, text)) return null
-        if (account == indexAccount) {
-            val schedule = next.toSchedule()
-            if (schedule == null) schedules.remove(next.groupId) else schedules[next.groupId] = schedule
-        }
+        if (account == indexAccount) index(next)
         if (scheduleChanged) {
             if (current != null) GroupDigestRunner.cancelAutomatic(next.groupId, account)
             GroupDigestScheduler.schedule(next.groupId, account)

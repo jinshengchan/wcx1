@@ -15,6 +15,19 @@ internal data class GroupDigestSchedule(
         dueSlotEndOf(anchorAt, intervalMinutes, lastAttemptedSlotEnd, lastSlotEnd, nowMs)
 }
 
+internal data class GroupDigestSummary(
+    val groupId: String,
+    val name: String,
+    val avatarUrl: String,
+    val enabled: Boolean,
+    val intervalMinutes: Int,
+    val anchorAt: Long,
+    val lastStatus: String,
+    val lastError: String,
+    val lastHeadline: String,
+    val unread: Int,
+)
+
 @Serializable
 data class GroupDigestConfig(
     val groupId: String,
@@ -34,6 +47,8 @@ data class GroupDigestConfig(
     internal val revision: String = "",
     internal val recordId: String = "",
 ) {
+    internal val unread: Int get() = digests.count { !it.read }
+
     fun nextRunAt(nowMs: Long): Long = nextRunAtOf(anchorAt, intervalMinutes, nowMs)
 
     /** The stored schedule uses milliseconds. The database window uses [from, to) in seconds. */
@@ -54,7 +69,9 @@ data class GroupDigestConfig(
     }
 
     internal fun withDigest(digest: GroupDigest): GroupDigestConfig = copy(
-        digests = (digests.filterNot { it.id == digest.id } + digest).sortedBy { it.createdAt },
+        digests = (digests.filterNot { it.id == digest.id } +
+            digest.copy(read = digests.firstOrNull { it.id == digest.id }?.read ?: false))
+            .sortedBy { it.createdAt },
         lastSlotEnd = digest.toSec * 1000L,
         lastStatus = GroupDigestStatus.OK,
         lastError = "",
@@ -64,6 +81,11 @@ data class GroupDigestConfig(
     internal fun toSchedule(): GroupDigestSchedule? = if (enabled) GroupDigestSchedule(
         groupId, intervalMinutes, anchorAt, scheduleBinding, lastAttemptedSlotEnd, lastSlotEnd,
     ) else null
+
+    internal fun toSummary() = GroupDigestSummary(
+        groupId, name.ifBlank { groupId }, avatarUrl, enabled, intervalMinutes, anchorAt,
+        lastStatus, lastError, digests.lastOrNull()?.headline.orEmpty(), unread,
+    )
 }
 
 @Serializable
@@ -78,6 +100,8 @@ data class GroupDigest(
     val messageCount: Int = 0,
     val manual: Boolean = false,
     val sampled: Boolean = false,
+    // Old files predate unread indicators. Only newly generated summaries raise an alert.
+    val read: Boolean = true,
 )
 
 object GroupDigestStatus {

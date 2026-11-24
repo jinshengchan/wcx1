@@ -21,11 +21,11 @@ object GroupDigestScheduler {
     private var controller: Job? = null
 
     @Synchronized
-    fun onEnable() {
+    internal fun onEnable(wakeAt: (Long?) -> Unit = {}) {
         if (controller?.isActive == true) return
         controller = scope.launch {
             while (isActive) {
-                val waitMs = checkSchedules(this)
+                val waitMs = checkSchedules(this, wakeAt)
                 withTimeoutOrNull(waitMs) { changed.receive() }
             }
         }
@@ -38,7 +38,11 @@ object GroupDigestScheduler {
     }
 
     fun schedule(groupId: String, account: String? = GroupDigestStore.accountId()) {
-        if (account != null && groupId.isNotBlank()) changed.trySend(Unit)
+        if (account != null && groupId.isNotBlank()) wake()
+    }
+
+    internal fun wake() {
+        changed.trySend(Unit)
     }
 
     fun cancel(groupId: String, account: String? = GroupDigestStore.accountId()) {
@@ -46,14 +50,17 @@ object GroupDigestScheduler {
         schedule(groupId, account)
     }
 
-    private fun checkSchedules(scope: CoroutineScope): Long {
+    private fun checkSchedules(scope: CoroutineScope, wakeAt: (Long?) -> Unit): Long {
         val account = GroupDigestStore.accountId()
         GroupDigestRunner.cancelOtherAccounts(account)
-        if (account == null) return MAX_CHECK_DELAY_MS
+        if (account == null) {
+            wakeAt(null)
+            return MAX_CHECK_DELAY_MS
+        }
 
         val now = System.currentTimeMillis()
         val binding = AiConfig.bindingId(purpose)
-        var nextCheck = MAX_CHECK_DELAY_MS
+        var nextWake: Long? = null
         for (group in GroupDigestStore.loadSchedules(account)) {
             if (binding == null || binding != group.binding) {
                 GroupDigestStore.update(group.groupId, account) { current ->
@@ -76,8 +83,9 @@ object GroupDigestScheduler {
                 GroupDigestRunner.startAutomatic(scope, group.groupId, account)
             }
             val next = nextRunAtOf(group.anchorAt, group.intervalMinutes, now)
-            if (next > now) nextCheck = minOf(nextCheck, next - now)
+            if (next > now) nextWake = minOf(nextWake ?: next, next)
         }
-        return nextCheck
+        wakeAt(nextWake)
+        return minOf(nextWake?.minus(now) ?: MAX_CHECK_DELAY_MS, MAX_CHECK_DELAY_MS)
     }
 }

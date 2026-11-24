@@ -37,6 +37,7 @@ import com.Johnny.wcx.features.core.ApiFeature
 import com.Johnny.wcx.features.core.Feature
 import com.Johnny.wcx.utils.AudioUtils
 import com.Johnny.wcx.utils.HostInfo
+import com.Johnny.wcx.utils.RuntimeConfig
 import com.Johnny.wcx.utils.WeLogger
 import com.Johnny.wcx.utils.collections.emptyHashSet
 import com.Johnny.wcx.utils.fs.KnownPaths
@@ -2121,12 +2122,35 @@ object WeMessageApi : ApiFeature(), IResolveDex {
      * 微信可能把大图存为 bigImgPath / hevcPath / midImgPath 其中之一 (原图/HEVC 场景),
      * 因此逐个尝试并要求文件确实存在且非空。
      */
-    private fun resolveExistingImageFile(row: ImgInfoRow): Path? {
+    private fun resolveExistingImageFile(row: ImgInfoRow, resolve: (String) -> Path? = ::resolveImageFile): Path? {
         return listOfNotNull(row.bigImgPath, row.hevcPath, row.midImgPath)
             .filter { it.isNotEmpty() && !it.startsWith("SERVERID://") }
             .firstNotNullOfOrNull { name ->
-                resolveImageFile(name)?.takeIf { it.isRegularFile() && it.fileSize() > 0 }
+                resolve(name)?.takeIf { it.isRegularFile() && it.fileSize() > 0 }
             }
+    }
+
+    /** Only use the current account's existing cache for an AI reply. */
+    internal fun cachedAiImagePath(msgSvrId: Long, talker: String, account: String): Path? {
+        if (WeDatabaseApi.currentAiAccount() != account) return null
+        val database = WeDatabaseApi.db
+        val accountDir = RuntimeConfig.userDataDir
+        val accountRoot = accountDir.toRealPath()
+        val imageRoot = (accountRoot / "image2").toRealPath().takeIf { it.startsWith(accountRoot) } ?: return null
+        val row = queryImgInfoRow(msgSvrId)?.takeIf { it.talker.isEmpty() || it.talker == talker } ?: return null
+        val path = resolveExistingImageFile(row) { name ->
+            val candidate = when {
+                name.startsWith("/") -> name.asPath
+                name.length >= 4 && '/' !in name && '\\' !in name ->
+                    imageRoot / name.take(2) / name.substring(2, 4) / name
+                else -> null
+            }
+            candidate?.takeIf { it.isRegularFile() }?.toRealPath()?.takeIf { it.startsWith(imageRoot) }
+        }
+        return path?.takeIf {
+            WeDatabaseApi.db === database && WeDatabaseApi.currentAiAccount() == account &&
+                RuntimeConfig.userDataDir == accountDir
+        }
     }
 
     /**

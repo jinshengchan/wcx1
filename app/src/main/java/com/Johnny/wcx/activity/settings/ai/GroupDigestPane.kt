@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
@@ -14,6 +15,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -22,22 +24,28 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.Johnny.wcx.ai.group.GroupDigest
 import com.Johnny.wcx.ai.group.GroupDigestConfig
 import com.Johnny.wcx.ai.group.GroupDigestRunner
 import com.Johnny.wcx.ai.group.GroupDigestScheduler
 import com.Johnny.wcx.ai.group.GroupDigestStore
+import com.Johnny.wcx.ai.group.MAX_INTERVAL_MINUTES
+import com.Johnny.wcx.ai.group.MIN_INTERVAL_MINUTES
 import com.Johnny.wcx.ai.group.PRESET_INTERVALS
 import com.Johnny.wcx.features.ai.AiConfig
 import com.Johnny.wcx.features.ai.AiConfig.Purpose
-import com.Johnny.wcx.features.api.core.WeApi
 import com.Johnny.wcx.features.api.core.WeDatabaseApi
 import com.Johnny.wcx.features.api.core.models.IWeContact
+import com.Johnny.wcx.ui.content.AlertDialogContent
+import com.Johnny.wcx.ui.content.ContactsSelector
+import com.Johnny.wcx.ui.utils.showComposeDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -47,55 +55,137 @@ import kotlinx.coroutines.withContext
 internal fun GroupDigestPane(
     context: Context,
     account: String,
-    group: IWeContact?,
-    select: (IWeContact) -> Unit,
 ) {
+    var groupId by remember(account) { mutableStateOf<String?>(null) }
     var providerRevision by remember { mutableIntStateOf(0) }
+    var listRevision by remember { mutableIntStateOf(0) }
+    var message by remember { mutableStateOf("") }
     AiProviderChoice(Purpose.GROUP_DIGEST, providerRevision) {
         changeAiProvider(context, account, Purpose.GROUP_DIGEST, it) { providerRevision++ }
     }
-    TextButton(onClick = {
-        chooseAiContact(context, "选择群聊", group?.wxId, {
-            if (WeDatabaseApi.currentAiAccount() == account) WeDatabaseApi.getGroups() else emptyList()
-        }) {
-            if (WeApi.selfWxId == account) select(it)
+    val selected = groupId
+    if (selected != null) {
+        TextButton(onClick = { groupId = null }) { Text("返回群组列表") }
+        key(account, selected) {
+            GroupDigestDetail(context, account, selected, providerRevision) { groupId = null }
         }
-    }) {
-        Text(group?.let { "群聊：${it.displayName.ifBlank { it.wxId }}" } ?: "选择群聊")
+        return
     }
-    if (group == null) return
 
-    key(account, group.wxId) {
-        GroupDigestDetail(context, account, group, providerRevision)
+    val groups by loadDigestGroups(account, listRevision)
+    val scope = rememberCoroutineScope()
+    TextButton(onClick = {
+        showAddDigestGroups(context, account) { added, requested ->
+            message = if (added == requested) "已添加 $added 个群聊" else "已添加 $added 个群聊，部分群聊保存失败。"
+            listRevision++
+        }
+    }) { Text("添加群聊") }
+    if (message.isNotBlank()) WorkbenchStatus(message)
+    GroupDigestGroupList(
+        groups, "请先添加群聊。",
+        onRemove = { group ->
+            confirmRemoveGroup(context, group.name) {
+                scope.launch {
+                    val removed = withContext(Dispatchers.IO) { GroupDigestStore.deleteConfig(group.groupId, account) }
+                    message = if (removed) "已移除「${group.name}」" else "无法移除群聊。"
+                    listRevision++
+                }
+            }
+        },
+    ) { groupId = it.groupId }
+}
+
+private fun confirmRemoveGroup(context: Context, name: String, onConfirm: () -> Unit) =
+    confirmAiAction(context, "移除群聊", "移除「$name」会删除其摘要设置和历史。", "移除", onConfirm)
+
+private fun showAddDigestGroups(
+    context: Context,
+    account: String,
+    onAdded: (Int, Int) -> Unit,
+) = showComposeDialog(context) {
+    val groups by produceState<List<IWeContact>?>(null, account) {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                if (GroupDigestStore.accountId() != account) return@runCatching emptyList()
+                val existing = GroupDigestStore.loadGroups(account).mapTo(HashSet()) { it.groupId }
+                WeDatabaseApi.getGroups().filterNot { it.wxId in existing }
+                    .takeIf { GroupDigestStore.accountId() == account }.orEmpty()
+            }.getOrDefault(emptyList())
+        }
+    }
+    val options = groups
+    val scope = rememberCoroutineScope()
+    var saving by remember { mutableStateOf(false) }
+    when {
+        options.isNullOrEmpty() || saving -> AlertDialogContent(
+            title = { Text("添加群聊") },
+            text = {
+                Text(when {
+                    saving -> "正在添加群聊…"
+                    options == null -> "正在读取群聊…"
+                    else -> "没有可添加的群聊。"
+                })
+            },
+            confirmButton = { if (!saving) TextButton(onClick = onDismiss) { Text("关闭") } },
+        )
+        else -> ContactsSelector("添加群聊", options, emptySet(), onDismiss) { ids ->
+            if (ids.isNotEmpty() && !saving) {
+                saving = true
+                scope.launch {
+                    val added = withContext(Dispatchers.IO) {
+                        options.count {
+                            it.wxId in ids && GroupDigestStore.saveConfig(
+                                GroupDigestConfig(
+                                    groupId = it.wxId,
+                                    name = it.displayName,
+                                    avatarUrl = it.avatarUrl,
+                                ),
+                                account,
+                            )
+                        }
+                    }
+                    onAdded(added, ids.size)
+                    onDismiss()
+                }
+            }
+        }
     }
 }
 
 @Composable
-private fun GroupDigestDetail(context: Context, account: String, group: IWeContact, providerRevision: Int) {
-    val id = group.wxId
-    val name = group.displayName.ifBlank { id }
+private fun GroupDigestDetail(
+    context: Context,
+    account: String,
+    id: String,
+    providerRevision: Int,
+    onRemoved: () -> Unit,
+) {
     val scope = rememberCoroutineScope()
-    val defaultConfig = remember { GroupDigestConfig(groupId = id, name = name, avatarUrl = group.avatarUrl) }
-    var saved by remember { mutableStateOf(defaultConfig) }
+    var config by remember { mutableStateOf<GroupDigestConfig?>(null) }
     var loading by remember { mutableStateOf(true) }
     var running by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
     var revision by remember { mutableIntStateOf(0) }
-    val binding = remember(providerRevision) { AiConfig.selection(Purpose.GROUP_DIGEST)?.takeIf { it.account == account }?.id }
-    val authorized = binding != null && saved.scheduleBinding == binding
-
     LaunchedEffect(revision) {
         while (true) {
             val state = withContext(Dispatchers.IO) {
-                GroupDigestStore.readConfig(id, account) to GroupDigestRunner.isRunning(id, account)
+                GroupDigestStore.markRead(id, account) to GroupDigestRunner.isRunning(id, account)
             }
-            saved = state.first ?: defaultConfig
+            config = state.first
             running = state.second
             loading = false
             delay(if (running) 500 else 1500)
         }
     }
+    val saved = config
+    if (saved == null) {
+        WorkbenchStatus(if (loading) "正在读取群聊摘要…" else "群聊已移除或暂时无法读取。")
+        return
+    }
+    val name = saved.name.ifBlank { id }
+    val binding = remember(providerRevision) { AiConfig.selection(Purpose.GROUP_DIGEST)?.takeIf { it.account == account }?.id }
+    val authorized = binding != null && saved.scheduleBinding == binding
 
     fun changeSchedule(enabled: Boolean, intervalMinutes: Int, expected: String? = null) {
         saving = true
@@ -105,12 +195,9 @@ private fun GroupDigestDetail(context: Context, account: String, group: IWeConta
                 when {
                     GroupDigestStore.accountId() != account -> "微信账号已切换，请重新打开工作台。"
                     enabled && (expected == null || expected != currentBinding) -> "模型配置已变化，请重新确认。"
-                    !GroupDigestStore.saveConfig(defaultConfig, account) -> "无法保存群聊设置。"
                     else -> {
                         val config = GroupDigestStore.update(id, account = account) {
                             it.copy(
-                                name = name,
-                                avatarUrl = group.avatarUrl,
                                 enabled = enabled,
                                 intervalMinutes = intervalMinutes,
                                 anchorAt = if (enabled) System.currentTimeMillis() else 0,
@@ -158,13 +245,14 @@ private fun GroupDigestDetail(context: Context, account: String, group: IWeConta
             saving = true
             scope.launch {
                 message = withContext(Dispatchers.IO) {
-                    val current = GroupDigestStore.readConfig(id, account) ?: defaultConfig
+                    val current = GroupDigestStore.readConfig(id, account)
                     when {
                         GroupDigestStore.accountId() != account -> "微信账号已切换，请重新打开工作台。"
                         AiConfig.bindingId(Purpose.GROUP_DIGEST) != expected -> "模型配置已变化，请重新确认。"
-                        current.lastSlotEnd != window.lastSlotEnd || current.intervalMinutes != window.intervalMinutes ->
+                        current == null -> "群聊已移除或暂时无法读取。"
+                        current.recordId != window.recordId ||
+                            current.lastSlotEnd != window.lastSlotEnd || current.intervalMinutes != window.intervalMinutes ->
                             "摘要的消息范围已变化，请重新确认。"
-                        !GroupDigestStore.saveConfig(defaultConfig, account) -> "无法保存群聊设置。"
                         GroupDigestRunner.start(
                             id, manual = true, account = account, expectedBinding = expected, notBeforeSec = fromSec
                         ) -> ""
@@ -177,12 +265,23 @@ private fun GroupDigestDetail(context: Context, account: String, group: IWeConta
         }
     }
 
+    fun removeGroup() {
+        confirmRemoveGroup(context, name) {
+            saving = true
+            scope.launch {
+                val removed = withContext(Dispatchers.IO) { GroupDigestStore.deleteConfig(id, account) }
+                saving = false
+                if (removed) onRemoved() else message = "无法移除群聊。"
+            }
+        }
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
-            if (loading) WorkbenchStatus("正在读取群聊摘要…")
+            Text(name, style = MaterialTheme.typography.titleMedium)
             if (message.isNotBlank()) WorkbenchStatus(message)
             if (!loading) {
                 val idle = !saving && !running
@@ -218,6 +317,7 @@ private fun GroupDigestDetail(context: Context, account: String, group: IWeConta
                         }
                     }
                 }
+                TextButton(enabled = !saving, onClick = ::removeGroup) { Text("移除群聊") }
             }
         }
         if (!loading) {
@@ -226,7 +326,7 @@ private fun GroupDigestDetail(context: Context, account: String, group: IWeConta
                 Text("历史摘要", style = MaterialTheme.typography.titleSmall)
                 if (saved.digests.isEmpty()) WorkbenchStatus("暂无摘要")
             }
-            items(saved.digests.asReversed(), key = { it.id }) { digest -> DigestCard(digest) }
+            items(saved.digests.asReversed(), key = { it.id }) { digest -> DigestCard(digest, collapsible = true) }
         }
     }
 }
@@ -234,6 +334,8 @@ private fun GroupDigestDetail(context: Context, account: String, group: IWeConta
 @Composable
 private fun FrequencyChoice(current: Int, enabled: Boolean, choose: (Int) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
+    var custom by remember { mutableStateOf(false) }
+    var hours by remember { mutableStateOf("") }
     Column {
         TextButton(enabled = enabled, onClick = { expanded = true }) {
             Text("频率：每 ${intervalLabel(current)}")
@@ -244,34 +346,65 @@ private fun FrequencyChoice(current: Int, enabled: Boolean, choose: (Int) -> Uni
                     text = { Text("每 ${intervalLabel(minutes)}") },
                     onClick = {
                         expanded = false
+                        custom = false
                         if (minutes != current) choose(minutes)
                     },
                 )
             }
+            DropdownMenuItem(text = { Text("自定义频率") }, onClick = {
+                expanded = false
+                custom = true
+                hours = (current / 60).toString()
+            })
+        }
+        if (custom) {
+            OutlinedTextField(
+                value = hours,
+                onValueChange = { hours = it.filter(Char::isDigit).take(3) },
+                label = { Text("小时（1～168）") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true,
+                enabled = enabled,
+            )
+            val minutes = hours.toIntOrNull()?.times(60)
+                ?.takeIf { it in MIN_INTERVAL_MINUTES..MAX_INTERVAL_MINUTES }
+            TextButton(enabled = enabled && minutes != null, onClick = {
+                custom = false
+                if (minutes != null && minutes != current) choose(minutes)
+            }) { Text("确认频率") }
         }
     }
 }
 
 @Composable
-private fun DigestCard(digest: GroupDigest) {
-    OutlinedCard(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+internal fun DigestCard(digest: GroupDigest, collapsible: Boolean = false) {
+    var expanded by remember(digest.id) { mutableStateOf(!collapsible) }
+    val content: @Composable () -> Unit = {
+        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(digest.headline, style = MaterialTheme.typography.titleSmall)
+            WorkbenchStatus(timeLabel(digest.createdAt) + if (digest.manual) " · 手动" else "")
             WorkbenchStatus("${timeLabel(digest.fromSec * 1000L)} 至 ${timeLabel(digest.toSec * 1000L)} · ${digest.messageCount} 条")
-            if (digest.points.isNotEmpty()) {
-                Text("要点", style = MaterialTheme.typography.labelLarge)
-                digest.points.forEach { Text("• $it") }
-            }
-            if (digest.todos.isNotEmpty()) {
-                Text("待办", style = MaterialTheme.typography.labelLarge)
-                digest.todos.forEach { Text("• $it") }
+            if (expanded) {
+                if (digest.points.isNotEmpty()) {
+                    Text("要点", style = MaterialTheme.typography.labelLarge)
+                    digest.points.forEach { Text("• $it") }
+                }
+                if (digest.todos.isNotEmpty()) {
+                    Text("待办", style = MaterialTheme.typography.labelLarge)
+                    digest.todos.forEach { Text("• $it") }
+                }
             }
             if (digest.sampled) WorkbenchStatus("消息较多，本条摘要按最近的部分消息生成。")
         }
     }
+    if (collapsible) {
+        OutlinedCard(onClick = { expanded = !expanded }, modifier = Modifier.fillMaxWidth()) { content() }
+    } else {
+        OutlinedCard(Modifier.fillMaxWidth()) { content() }
+    }
 }
 
-private fun intervalLabel(minutes: Int): String = when {
+internal fun intervalLabel(minutes: Int): String = when {
     minutes % 1440 == 0 -> "${minutes / 1440} 天"
     minutes % 60 == 0 -> "${minutes / 60} 小时"
     else -> "$minutes 分钟"

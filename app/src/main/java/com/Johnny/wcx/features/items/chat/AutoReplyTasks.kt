@@ -4,7 +4,10 @@ import kotlinx.coroutines.*
 
 /** Bounded, process-local scheduling. No message text, credentials or network operations here. */
 internal class AutoReplyTasks(private val now: () -> Long = { System.nanoTime() / 1_000_000 }) {
-    class Ticket internal constructor(val talker: String, internal val id: Long) { internal lateinit var job: Job }
+    class Ticket internal constructor(val talker: String, internal val id: Long) {
+        internal lateinit var job: Job
+        internal var legacy = false
+    }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val pending = mutableMapOf<String, Ticket>()
     private val manual = mutableMapOf<String, Int>()
@@ -20,6 +23,14 @@ internal class AutoReplyTasks(private val now: () -> Long = { System.nanoTime() 
         pending.clear()
     }
     @Synchronized fun intervene(talker: String) { pending.remove(talker)?.job?.cancel() }
+    @Synchronized fun markLegacy(ticket: Ticket): Boolean {
+        if (!current(ticket)) return false
+        ticket.legacy = true
+        return true
+    }
+    @Synchronized fun cancelLegacy() {
+        pending.values.filter { it.legacy }.forEach { intervene(it.talker) }
+    }
     @Synchronized fun beginManual(talker: String): () -> Unit {
         intervene(talker)
         manual[talker] = (manual[talker] ?: 0) + 1
@@ -34,6 +45,10 @@ internal class AutoReplyTasks(private val now: () -> Long = { System.nanoTime() 
     }
     @Synchronized fun current(ticket: Ticket): Boolean =
         enabled && pending[ticket.talker] === ticket && ticket.job.isActive && ticket.talker !in manual
+
+    @Synchronized fun enqueueIfCurrent(ticket: Ticket, enqueue: () -> Unit) {
+        if (current(ticket)) enqueue()
+    }
 
     @Synchronized fun cooldown(ticket: Ticket): Long =
         ((lastRequest[ticket.talker]?.plus(15_000) ?: now()) - now()).coerceAtLeast(0)

@@ -22,6 +22,19 @@ object AiFriends {
     fun load(account: String? = AiProfileStore.accountId()): List<AiFriend> =
         AiProfileStore.loadFriends(account).friends
 
+    fun add(friend: AiFriend, account: String): Boolean = AiProfileStore.saveProfile(
+        AiProfile(
+            wxId = friend.wxId,
+            nickname = friend.nickname,
+            remark = friend.remark,
+            pyInitial = friend.pyInitial,
+            quanPin = friend.quanPin,
+            avatarUrl = friend.avatarUrl,
+            createdAt = System.currentTimeMillis(),
+        ),
+        account,
+    )
+
     fun loadOrRefresh(maxAgeMs: Long = MAX_AGE_MS, account: String? = AiProfileStore.accountId()): List<AiFriend> {
         val snapshot = AiProfileStore.loadFriends(account)
         val fresh = snapshot.exportedAt > 0 && System.currentTimeMillis() - snapshot.exportedAt < maxAgeMs

@@ -66,7 +66,7 @@ internal object SmartReplyClient {
             }
             .build()
     }
-    enum class Owner { MANUAL, AUTO, MODELS, FRIEND_ARCHIVE, GROUP_DIGEST }
+    enum class Owner { MANUAL, AUTO, MODELS, FRIEND_ARCHIVE, FRIEND_SUGGEST, FRIEND_AUTO_REPLY, GROUP_DIGEST }
     private val calls = ConcurrentHashMap<Call, Owner>()
 
     fun cancel(owner: Owner) = calls.forEach { (call, caller) -> if (caller == owner) call.cancel() }

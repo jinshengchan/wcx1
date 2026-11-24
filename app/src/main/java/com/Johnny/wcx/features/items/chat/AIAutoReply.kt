@@ -36,11 +36,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.Johnny.wcx.ai.AiProfileStore
+import com.Johnny.wcx.ai.AiSuggestEngine
+import com.Johnny.wcx.ai.MessageRendering
+import com.Johnny.wcx.features.ai.AiConfig
 import com.Johnny.wcx.features.api.core.WeApi
 import com.Johnny.wcx.features.api.core.WeDatabaseApi
 import com.Johnny.wcx.features.api.core.WeDatabaseListenerApi
 import com.Johnny.wcx.features.api.core.WeMessageApi
 import com.Johnny.wcx.features.api.core.models.MessageInfo
+import com.Johnny.wcx.features.core.ApiFeature
 import com.Johnny.wcx.features.core.ClickableFeature
 import com.Johnny.wcx.features.core.Feature
 import com.Johnny.wcx.preferences.WePrefs.Companion.prefOption
@@ -70,6 +75,10 @@ import okhttp3.Request
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.time.LocalDateTime
@@ -85,6 +94,7 @@ import java.util.Collections
 object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
 
     private const val TAG = "AIAutoReply"
+    private const val FRIEND_QUIET_MS = 8_000L
 
     private var contextEnabled by prefOption("ai_reply_context", false)
     private var systemPrompt by prefOption(
@@ -107,6 +117,7 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
     private var allowStrangerPrivateReply by prefOption("ai_reply_allow_stranger", false)
 
     private val tasks = AutoReplyTasks()
+    private val imageChecks = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val requestSlots = Semaphore(2)
     @Volatile private var enabledAt = Long.MAX_VALUE
 
@@ -154,20 +165,27 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
 
     override fun onEnable() {
         enabledAt = System.currentTimeMillis()
+    }
+
+    internal fun cancelPending() {
+        tasks.cancelLegacy()
+        SmartReplyClient.cancel(SmartReplyClient.Owner.AUTO)
+    }
+
+    override fun onDisable() {
+        enabledAt = Long.MAX_VALUE
+        cancelPending()
+    }
+
+    internal fun startListening() {
         tasks.enable()
         WeDatabaseListenerApi.addListener(this)
     }
 
-    internal fun cancelPending() {
-        tasks.disable()
-        SmartReplyClient.cancel(SmartReplyClient.Owner.AUTO)
-        if (configuredEnabled) tasks.enable()
-    }
-
-    override fun onDisable() {
-        tasks.disable()
-        SmartReplyClient.cancel(SmartReplyClient.Owner.AUTO)
+    internal fun stopListening() {
         WeDatabaseListenerApi.removeListener(this)
+        tasks.disable()
+        imageChecks.coroutineContext.cancelChildren()
     }
 
     @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -661,19 +679,50 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
     }
 
     override fun onInsert(table: String, values: ContentValues) {
-        if (table != "message" || !configuredEnabled) return
+        if (table != "message") return
+        val talker = values.getAsString("talker")?.takeIf { it.isNotBlank() } ?: return
+        if (values.getAsInteger("isSend")?.let { it != 0 } == true) {
+            tasks.intervene(talker)
+            AiSuggestOverlay.dismissFor(talker)
+            return
+        }
+        val privateChat = !talker.isGroupChatWxId && !talker.startsWith("gh_")
+        if (!privateChat && !configuredEnabled) return
         val msg = runCatching { MessageInfo.fromContentValues(values) }.getOrNull() ?: return
         if (msg.isSelfSender) {
             tasks.intervene(msg.talker)
+            AiSuggestOverlay.dismissFor(msg.talker)
             return
         }
-        if (msg.type?.isText != true || !fresh(msg)) return
         if (msg.isOfficialAccount) return
-        val cfg = config()
-        if (cfg.key.isBlank() || cfg.model.isBlank() || msg.actualContent.length > 8000) return
+        val image = msg.typeCode == MessageRendering.TYPE_IMAGE
+        val friendText = msg.typeCode == MessageRendering.TYPE_TEXT &&
+            msg.content.trimStart().let { it.isNotEmpty() && !it.startsWith("<") }
+        val eventAccount = if (privateChat) runCatching { WeApi.selfWxId }.getOrNull() else null
+        val freshFriend = privateChat && !eventAccount.isNullOrBlank() && eventAccount != talker &&
+            (image || friendText) && System.currentTimeMillis() / 1000 - MessageRendering.toSeconds(msg.createTime) in -10L..120L
+        val legacy = configuredEnabled && msg.type?.isText == true && fresh(msg)
+        if (image) {
+            if (freshFriend) scheduleFriendImage(msg, eventAccount)
+            return
+        }
+        if (!freshFriend && !legacy) return
         tasks.schedule(msg.talker, msg.id) { ticket ->
             try {
+                val profile = eventAccount?.let { AiProfileStore.readProfile(msg.talker, it) }
+                if (profile?.autoReplyEnabled == true) {
+                    if (!freshFriend) return@schedule
+                    val access = AiSuggestEngine.access(msg.talker, AiConfig.Purpose.FRIEND_AUTO_REPLY, profile)
+                        ?.takeIf { it.binding.account == eventAccount }
+                        ?: return@schedule
+                    replyToFriend(msg, ticket, access)
+                    return@schedule
+                }
+                if (!legacy || !configuredEnabled || !tasks.markLegacy(ticket)) return@schedule
+                val cfg = config()
+                if (cfg.key.isBlank() || cfg.model.isBlank() || msg.actualContent.length > 8000) return@schedule
                 fun permitted(): Boolean = tasks.current(ticket) && cfg == config() &&
+                    (eventAccount.isNullOrBlank() || eventAccount == WeApi.selfWxId) &&
                     allowed(msg, !msg.isInGroupChat && WeDatabaseApi.getFriend(msg.sender) == null)
                 if (!permitted()) return@schedule
                 delay(maxOf(replyDelay.coerceIn(0, 10_000).toLong(), tasks.cooldown(ticket)))
@@ -694,10 +743,11 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
                     if (reply.isBlank() || reply.length > 4000 || !permitted()) return@withPermit
                     // Final checks are adjacent to enqueueing. Do not retry uncertain send results.
                     val stranger = !msg.isInGroupChat && WeDatabaseApi.getFriend(msg.sender) == null
+                    val optedIn = eventAccount?.let { AiProfileStore.readProfile(msg.talker, it)?.autoReplyEnabled }
                     withContext(Dispatchers.Main) {
-                        if (tasks.current(ticket) && cfg == config() && allowed(msg, stranger)) {
-                            val sent = WeMessageApi.sendAiReply(msg.talker, cfg.prefix + reply)
-                            addDebugLog(if (sent) "发送已入队" else "发送结果未确认，不补发")
+                        if (optedIn != true && tasks.current(ticket) && cfg == config() && allowed(msg, stranger) &&
+                            (eventAccount.isNullOrBlank() || eventAccount == WeApi.selfWxId)) {
+                            enqueueReply(msg.talker, cfg.prefix + reply)
                         }
                     }
                 }
@@ -707,6 +757,55 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
                 addDebugLog(SmartReplyClient.errorText(e))
             }
         }
+    }
+
+    private fun scheduleFriendImage(msg: MessageInfo, account: String) {
+        imageChecks.launch {
+            val access = AiSuggestEngine.access(msg.talker, AiConfig.Purpose.FRIEND_AUTO_REPLY)
+                ?.takeIf { it.binding.account == account && it.vision }
+                ?: return@launch
+            tasks.schedule(msg.talker, msg.id) { ticket ->
+                try {
+                    replyToFriend(msg, ticket, access, imageMessageId = msg.id)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    addDebugLog(SmartReplyClient.errorText(e))
+                }
+            }
+        }
+    }
+
+    private suspend fun replyToFriend(
+        msg: MessageInfo, ticket: AutoReplyTasks.Ticket, access: AiSuggestEngine.Access, imageMessageId: Long? = null,
+    ) {
+        delay(FRIEND_QUIET_MS)
+        requestSlots.withPermit {
+            fun current() = tasks.current(ticket)
+            fun permitted() = current() && AiSuggestEngine.isCurrent(access) && isLatest(msg, access.binding.account) && current()
+            if (!permitted()) return@withPermit
+            val proposal = AiSuggestEngine.suggest(access, imageMessageId, canContinue = ::current)
+            proposal.error?.let { addDebugLog(it) }
+            val reply = proposal.replies.firstOrNull() ?: return@withPermit
+            if (permitted()) {
+                tasks.enqueueIfCurrent(ticket) {
+                    if (WeApi.selfWxId == access.binding.account) enqueueReply(msg.talker, reply)
+                }
+            }
+        }
+    }
+
+    private fun isLatest(msg: MessageInfo, account: String): Boolean {
+        val last = WeDatabaseApi.getMessagesBetween(
+            msg.talker, MessageRendering.toSeconds(msg.createTime), System.currentTimeMillis() / 1000 + 11,
+            limit = 1, newestFirst = true, account = account,
+        ).firstOrNull() ?: return false
+        return last.msgId == msg.id && last.isSend == 0
+    }
+
+    private fun enqueueReply(talker: String, text: String) {
+        val sent = WeMessageApi.sendAiReply(talker, text)
+        addDebugLog(if (sent) "发送已入队" else "发送结果未确认，不补发")
     }
 
     private suspend fun callAI(cfg: ApiConfig, text: String, history: List<Pair<String, String>>): String {
@@ -752,4 +851,10 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
             ""
         }
     }
+}
+
+@Feature(name = "好友 AI 回复服务", categories = ["API"], description = "分派好友档案自动回复和原有 AI 自动回复")
+object AiReplyEvents : ApiFeature() {
+    override fun onEnable() = AIAutoReply.startListening()
+    override fun onDisable() = AIAutoReply.stopListening()
 }

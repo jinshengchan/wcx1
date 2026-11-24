@@ -66,6 +66,15 @@ data class AiProfile(
      * **注入时不带它** —— 它是取证记录，不是结论。
      */
     val styleNotes: List<StyleNote> = emptyList(),
+    val goal: ChatGoal? = null,
+    val persona: String = "",
+    val suggestEnabled: Boolean = false,
+    val suggestBinding: String = "",
+    val autoReplyEnabled: Boolean = false,
+    val autoReplyBinding: String = "",
+    val visionEnabled: Boolean = false,
+    val visionBinding: String = "",
+    val autoIncremental: AiAutoIncrementalSchedule? = null,
 ) {
     val isReady: Boolean get() = state == AiProfileState.READY
 
@@ -73,6 +82,16 @@ data class AiProfile(
      * 正在整理或审查，阻止两条写流水线同时修改档案。
      */
     val busy: Boolean get() = state == AiProfileState.INITIALIZING || auditing
+}
+
+@Serializable
+data class ChatGoal(
+    val relation: String = "",
+    val purpose: String = "",
+    val stage: String = "",
+    val taboos: String = "",
+) {
+    val isEmpty: Boolean get() = listOf(relation, purpose, stage, taboos).all { it.isBlank() }
 }
 
 object AiProfileState {
@@ -560,6 +579,7 @@ data class AiProfileSummary(
     val tagCount: Int = 0,
     val memoryCount: Int = 0,
     val lastError: String? = null,
+    val autoIncremental: AiAutoIncrementalSchedule? = null,
 ) {
     val subtitle: String
         get() = when {

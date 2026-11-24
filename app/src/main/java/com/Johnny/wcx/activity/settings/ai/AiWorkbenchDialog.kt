@@ -38,7 +38,6 @@ import java.util.Date
 internal fun AiWorkbenchDialog(context: Context) = showComposeDialog(context) {
     var selectedTab by remember { mutableStateOf(0) }
     var friend by remember { mutableStateOf<IWeContact?>(null) }
-    var group by remember { mutableStateOf<IWeContact?>(null) }
     val originalAccount by produceState<String?>(null) {
         while (value == null) {
             value = withContext(Dispatchers.IO) { AiProfileStore.accountId() }
@@ -65,11 +64,12 @@ internal fun AiWorkbenchDialog(context: Context) = showComposeDialog(context) {
                     SecondaryTabRow(selectedTabIndex = selectedTab) {
                         Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 }, text = { Text("好友档案") })
                         Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 }, text = { Text("群聊摘要") })
+                        Tab(selected = selectedTab == 2, onClick = { selectedTab = 2 }, text = { Text("设置") })
                     }
-                    if (selectedTab == 0) {
-                        FriendArchivePane(context, account, friend) { friend = it }
-                    } else {
-                        GroupDigestPane(context, account, group) { group = it }
+                    when (selectedTab) {
+                        0 -> FriendArchivePane(context, account, friend) { friend = it }
+                        1 -> GroupDigestPane(context, account)
+                        2 -> AiWorkbenchSettings()
                     }
                 }
             }

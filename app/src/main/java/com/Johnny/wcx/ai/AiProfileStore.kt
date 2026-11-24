@@ -175,4 +175,5 @@ private fun AiProfile.toSummary(): AiProfileSummary = AiProfileSummary(
     tagCount = tags.size,
     memoryCount = memories.size,
     lastError = lastError,
+    autoIncremental = autoIncremental,
 )

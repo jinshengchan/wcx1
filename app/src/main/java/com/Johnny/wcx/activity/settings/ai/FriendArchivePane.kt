@@ -37,6 +37,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.Johnny.wcx.ai.AiAuditPlan
+import com.Johnny.wcx.ai.AiAutoIncrementalScheduler
+import com.Johnny.wcx.ai.AiFriend
+import com.Johnny.wcx.ai.AiFriends
 import com.Johnny.wcx.ai.AiMemoryIndex
 import com.Johnny.wcx.ai.AiProfile
 import com.Johnny.wcx.ai.AiProfileAudit
@@ -48,8 +51,6 @@ import com.Johnny.wcx.ai.ProfileChange
 import com.Johnny.wcx.ai.recorded
 import com.Johnny.wcx.features.ai.AiConfig
 import com.Johnny.wcx.features.ai.AiConfig.Purpose
-import com.Johnny.wcx.features.api.core.WeApi
-import com.Johnny.wcx.features.api.core.WeDatabaseApi
 import com.Johnny.wcx.features.api.core.models.IWeContact
 import com.Johnny.wcx.features.api.core.models.WeContact
 import com.Johnny.wcx.ui.content.AlertDialogContent
@@ -66,25 +67,23 @@ internal fun FriendArchivePane(
     context: Context,
     account: String,
     friend: IWeContact?,
-    select: (IWeContact) -> Unit,
+    select: (IWeContact?) -> Unit,
 ) {
     var providerRevision by remember { mutableIntStateOf(0) }
     AiProviderChoice(Purpose.FRIEND_PROFILE, providerRevision) {
-        changeAiProvider(context, account, Purpose.FRIEND_PROFILE, it) { providerRevision++ }
-    }
-    TextButton(onClick = {
-        chooseAiContact(context, "选择好友", friend?.wxId, {
-            if (WeDatabaseApi.currentAiAccount() == account) WeDatabaseApi.getFriends() else emptyList()
-        }) {
-            if (WeApi.selfWxId == account) select(it)
+        changeAiProvider(context, account, Purpose.FRIEND_PROFILE, it) {
+            providerRevision++
+            AiAutoIncrementalScheduler.wake()
         }
-    }) {
-        Text(friend?.let { "好友：${it.displayName.ifBlank { it.wxId }}" } ?: "选择好友")
     }
-    if (friend == null) return
+    if (friend == null) {
+        ManagedFriendArchives(context, account) { select(it) }
+        return
+    }
 
+    TextButton(onClick = { select(null) }) { Text("返回好友档案列表") }
     key(account, friend.wxId) {
-        FriendArchiveDetail(context, account, friend, providerRevision)
+        FriendArchiveDetail(context, account, friend, providerRevision) { select(null) }
     }
 }
 
@@ -94,6 +93,7 @@ private fun FriendArchiveDetail(
     account: String,
     friend: IWeContact,
     providerRevision: Int,
+    onDelete: () -> Unit,
 ) {
     val wxId = friend.wxId
     val name = friend.displayName.ifBlank { wxId }
@@ -106,7 +106,10 @@ private fun FriendArchiveDetail(
     var applying by remember { mutableStateOf(false) }
     var fromYear by remember { mutableStateOf<Int?>(null) }
     var onlyEvents by remember { mutableStateOf(false) }
-    val configured = remember(providerRevision) { AiConfig.selection(Purpose.FRIEND_PROFILE)?.account == account }
+    val selection = remember(providerRevision, revision) {
+        AiConfig.selection(Purpose.FRIEND_PROFILE)?.takeIf { it.account == account }
+    }
+    val configured = selection != null
     LaunchedEffect(revision) {
         while (true) {
             val state = withContext(Dispatchers.IO) {
@@ -142,16 +145,15 @@ private fun FriendArchiveDetail(
     fun startInitialArchive(plan: AiProfileInitializer.Plan, binding: String): Boolean {
         if (AiProfileStore.readProfile(wxId, account) == null) {
             val contact = friend as? WeContact
-            val initial = AiProfile(
+            val initial = AiFriend(
                 wxId = wxId,
                 nickname = friend.nickname,
                 remark = contact?.remarkName.orEmpty(),
                 pyInitial = contact?.initialNickname.orEmpty(),
                 quanPin = contact?.nicknamePinyin.orEmpty(),
                 avatarUrl = friend.avatarUrl,
-                createdAt = System.currentTimeMillis(),
             )
-            if (!AiProfileStore.saveProfile(initial, account) && AiProfileStore.readProfile(wxId, account) == null) {
+            if (!AiFriends.add(initial, account) && AiProfileStore.readProfile(wxId, account) == null) {
                 return false
             }
         }
@@ -179,13 +181,14 @@ private fun FriendArchiveDetail(
         }
     }
 
-    fun editProfile(transform: (AiProfile) -> AiProfile?) {
+    fun editProfile(archiveContent: Boolean = true, transform: (AiProfile) -> AiProfile?) {
+        if (applying) return
         applying = true
         scope.launch {
             var edited = false
             val result = withContext(Dispatchers.IO) {
                 AiProfileStore.patchProfile(wxId, account = account) { before ->
-                    if (before.busy || before.pendingAudit != null || !before.isReady) {
+                    if (archiveContent && (before.busy || before.pendingAudit != null || !before.isReady)) {
                         before
                     } else {
                         val after = transform(before)
@@ -200,6 +203,7 @@ private fun FriendArchiveDetail(
                 }
             }
             message = if (result != null && edited) "档案已保存。" else "档案已变化或保存失败，请重新打开条目。"
+            if (result != null && edited) AiAutoIncrementalScheduler.wake()
             applying = false
             revision++
         }
@@ -228,6 +232,8 @@ private fun FriendArchiveDetail(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
+            Text(name, style = MaterialTheme.typography.titleMedium)
+            saved?.let { WorkbenchStatus("${it.tags.size} 个标签 · ${it.memories.size} 条记忆") }
             if (loading) WorkbenchStatus("正在读取档案…")
             if (running || saved?.busy == true) {
                 WorkbenchStatus(saved?.progress?.ifBlank { "正在处理档案…" } ?: "正在处理档案…")
@@ -257,7 +263,7 @@ private fun FriendArchiveDetail(
                             ) { expected -> startInitialArchive(plan, expected) }
                         },
                         enabled = configured && plan.emptyReason == null && plan.slices.isNotEmpty(),
-                    ) { Text("开始整理") }
+                    ) { Text(if (resume?.incremental == false) "按新范围开始" else "开始整理") }
                 }
             }
         }
@@ -271,6 +277,16 @@ private fun FriendArchiveDetail(
                         "将与好友「$name」在 ${historyRange(resumePlan)} 内尚未处理的私聊记录（$MEDIA_PLACEHOLDERS）和已有标签发送到所选模型。已完成 $done / ${resumePlan.slices.size} 批。",
                     ) { expected -> AiProfileInitializer.start(wxId, resumePlan, done, account = account, expectedBinding = expected) }
                 }) { Text("继续上次整理") }
+                if (!resumePlan.incremental) {
+                    TextButton(enabled = configured, onClick = {
+                        startRequest(
+                            "从头开始整理",
+                            "将与好友「$name」在 ${historyRange(resumePlan)} 的私聊记录（${resumePlan.totalLines} 条文字，$MEDIA_PLACEHOLDERS）从第一批重新发送到所选模型，并使用已保存的标签作为参考。",
+                        ) { expected ->
+                            AiProfileInitializer.start(wxId, resumePlan, account = account, expectedBinding = expected, restart = true)
+                        }
+                    }) { Text("从头开始") }
+                }
             }
         }
         if (saved != null) {
@@ -291,6 +307,31 @@ private fun FriendArchiveDetail(
                         }) { Text(if (resumableAudit) "继续审查" else "审查档案") }
                     }
                 }
+            }
+            friendArchiveSettings(context, account, name, saved, selection, !busy) { change ->
+                editProfile(archiveContent = false, transform = change)
+            }
+            item {
+                TextButton(enabled = !busy, onClick = {
+                    confirmAiAction(
+                        context,
+                        "删除好友档案",
+                        "将删除「$name」的本地标签、记忆和档案设置，并停止此档案的自动功能。此操作无法撤销。",
+                        "删除档案",
+                    ) {
+                        applying = true
+                        scope.launch {
+                            val deleted = withContext(Dispatchers.IO) { AiProfileStore.deleteProfile(wxId, account) }
+                            if (deleted) {
+                                AiAutoIncrementalScheduler.wake()
+                                onDelete()
+                            } else {
+                                message = "档案正在处理或账号已切换，无法删除。"
+                                applying = false
+                            }
+                        }
+                    }
+                }) { Text("删除档案", color = MaterialTheme.colorScheme.error) }
             }
             if (pendingAudit != null) {
                 auditItems(
@@ -313,14 +354,13 @@ private fun FriendArchiveDetail(
                 )
             }
             profileItems(
+                context = context,
                 profile = saved,
                 editable = ready && !busy && pendingAudit == null,
                 onlyEvents = onlyEvents,
                 toggleEvents = { onlyEvents = !onlyEvents },
-            ) { title, current, maxLength, transform ->
-                showArchiveEdit(context, title, current, maxLength) { value ->
-                    editProfile { transform(it, value) }
-                }
+            ) { change ->
+                editProfile(transform = change)
             }
         }
     }
@@ -415,11 +455,12 @@ private fun AiAuditPlan.selectEntries(selection: Set<String>) = copy(
 )
 
 private fun LazyListScope.profileItems(
+    context: Context,
     profile: AiProfile,
     editable: Boolean,
     onlyEvents: Boolean,
     toggleEvents: () -> Unit,
-    edit: (String, String, Int, (AiProfile, String) -> AiProfile?) -> Unit,
+    edit: ((AiProfile) -> AiProfile?) -> Unit,
 ) {
     val shownMemories = if (onlyEvents) profile.memories.filter { it.important } else profile.memories
     val memories = AiMemoryIndex.sorted(shownMemories).asReversed()
@@ -431,10 +472,24 @@ private fun LazyListScope.profileItems(
     if (profile.tags.isEmpty()) item { WorkbenchStatus("暂无标签") }
     items(profile.tags) { tag ->
         Column(Modifier.fillMaxWidth().clickable(enabled = editable, onClickLabel = "编辑标签") {
-            edit("${tag.category} / ${tag.key}", tag.value, AiTools.VALUE_MAX) { latest, value ->
-                latest.takeIf { tag in it.tags }?.copy(tags = latest.tags.map { current ->
-                    if (current == tag) current.copy(value = value) else current
-                })
+            val title = "${tag.category} / ${tag.key}"
+            showArchiveEdit(
+                context,
+                title,
+                tag.value,
+                AiTools.VALUE_MAX,
+                remove = {
+                    confirmAiAction(context, "删除标签", "要从档案中删除标签「$title」吗？", "删除标签") {
+                        edit { latest -> latest.takeIf { tag in it.tags }?.copy(tags = latest.tags - tag) }
+                    }
+                },
+            ) { value ->
+                edit { latest ->
+                    latest.takeIf { tag in it.tags }?.copy(tags = latest.tags.map { current ->
+                        if (current == tag) current.copy(value = value, updatedAt = System.currentTimeMillis() / 1000)
+                        else current
+                    })
+                }
             }
         }.padding(vertical = 4.dp)) {
             Text("${tag.category} · ${tag.key}：${tag.value}")
@@ -454,20 +509,18 @@ private fun LazyListScope.profileItems(
     if (memories.isEmpty()) item { WorkbenchStatus(if (onlyEvents) "暂无关键事件" else "暂无记忆") }
     items(memories) { memory ->
         Column(Modifier.fillMaxWidth().clickable(enabled = editable, onClickLabel = "编辑记忆") {
-            edit(memory.title, memory.detail, AiTools.DETAIL_MAX) { latest, value ->
-                latest.takeIf { memory in it.memories }?.copy(memories = latest.memories.map { current ->
-                    if (current == memory) current.copy(detail = value) else current
-                })
+            showArchiveEdit(context, memory.title, memory.detail, AiTools.DETAIL_MAX) { value ->
+                edit { latest ->
+                    latest.takeIf { memory in it.memories }?.copy(memories = latest.memories.map { current ->
+                        if (current == memory) current.copy(detail = value) else current
+                    })
+                }
             }
         }.padding(vertical = 4.dp)) {
             val important = if (memory.important) " · 关键事件" else ""
             Text("${memory.occurredAt} · ${memory.title}$important")
             WorkbenchStatus(memory.detail)
         }
-    }
-    if (profile.style.summary.isNotBlank()) item {
-        Text("我的表达风格", style = MaterialTheme.typography.titleSmall)
-        Text(profile.style.summary)
     }
     if (profile.changes.isNotEmpty()) {
         item { Text("档案变动", style = MaterialTheme.typography.titleSmall) }
@@ -477,11 +530,13 @@ private fun LazyListScope.profileItems(
     }
 }
 
-private fun showArchiveEdit(
+internal fun showArchiveEdit(
     context: Context,
     title: String,
     current: String,
-    maxLength: Int,
+    maxLength: Int? = null,
+    allowEmpty: Boolean = false,
+    remove: (() -> Unit)? = null,
     save: (String) -> Unit,
 ) = showComposeDialog(context) {
     var value by remember { mutableStateOf(current) }
@@ -492,14 +547,25 @@ private fun showArchiveEdit(
                 value = value,
                 onValueChange = { value = it },
                 label = { Text("内容") },
-                supportingText = { Text("${value.trim().length} / $maxLength") },
+                supportingText = maxLength?.let { { Text("${value.trim().length} / $it") } },
                 modifier = Modifier.fillMaxWidth(),
             )
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = {
+            Row {
+                if (remove != null) {
+                    TextButton(onClick = {
+                        onDismiss()
+                        remove()
+                    }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                }
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+        },
         confirmButton = {
             Button(
-                enabled = value.trim().length in 1..maxLength && value.trim() != current,
+                enabled = (allowEmpty || value.isNotBlank()) && value.trim() != current &&
+                    (maxLength == null || value.trim().length <= maxLength),
                 onClick = {
                     save(value.trim())
                     onDismiss()

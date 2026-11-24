@@ -13,6 +13,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -29,6 +30,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 internal object AiConfig {
     enum class Purpose(val key: String, val owner: SmartReplyClient.Owner) {
         FRIEND_PROFILE("friend_profile", SmartReplyClient.Owner.FRIEND_ARCHIVE),
+        FRIEND_SUGGEST("friend_profile", SmartReplyClient.Owner.FRIEND_SUGGEST),
+        FRIEND_AUTO_REPLY("friend_profile", SmartReplyClient.Owner.FRIEND_AUTO_REPLY),
         GROUP_DIGEST("group_digest", SmartReplyClient.Owner.GROUP_DIGEST),
     }
 
@@ -57,6 +60,7 @@ internal object AiConfig {
         val content: String? = null,
         val toolCalls: List<ToolCall>? = null,
         val toolCallId: String? = null,
+        val imageUrl: String? = null,
     )
 
     data class ChatResult(
@@ -64,6 +68,7 @@ internal object AiConfig {
         val error: String?,
         val toolCalls: List<ToolCall> = emptyList(),
         val finishReason: String? = null,
+        val reasoning: String? = null,
     )
 
     private fun account(): String? = runCatching { WeApi.selfWxId.takeIf { it.isNotBlank() } }.getOrNull()
@@ -81,7 +86,7 @@ internal object AiConfig {
         val key = pref(account, purpose)
         if (WePrefs.getStringOrDef(key, "") == id) return true
         WePrefs.putString(key, id)
-        SmartReplyClient.cancel(purpose.owner)
+        Purpose.entries.filter { it.key == purpose.key }.forEach { SmartReplyClient.cancel(it.owner) }
         return true
     }
 
@@ -108,7 +113,7 @@ internal object AiConfig {
         .digest(fields.joinToString("\u0000").toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
 
-    private fun isCurrent(binding: Binding): Boolean {
+    fun isCurrent(binding: Binding): Boolean {
         val current = capture(binding.purpose) ?: return false
         return current.account == binding.account && current.id == binding.id && current.apiKey == binding.apiKey
     }
@@ -139,7 +144,11 @@ internal object AiConfig {
             return@withContext ChatResult(null, "模型配置或微信账号已变更，请重新启动任务")
         }
         try {
-            val body = requestBody(selected.model, messages, tools, temperature)
+            val replyOptions = when (purpose) {
+                Purpose.FRIEND_SUGGEST, Purpose.FRIEND_AUTO_REPLY -> AiReplySettings.read()
+                else -> null
+            }
+            val body = requestBody(selected.model, messages, tools, temperature, replyOptions)
             val request = Request.Builder().url(selected.endpoint)
                 .header("Authorization", "Bearer ${selected.apiKey}")
                 .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
@@ -154,16 +163,30 @@ internal object AiConfig {
         }
     }
 
-    private fun requestBody(model: String, messages: List<ChatMessage>, tools: JsonArray?, temperature: Double?) = buildJsonObject {
+    private fun requestBody(
+        model: String,
+        messages: List<ChatMessage>,
+        tools: JsonArray?,
+        temperature: Double?,
+        replyOptions: AiReplyOptions?,
+    ) = buildJsonObject {
         put("model", model)
         put("stream", false)
-        temperature?.let { put("temperature", it) }
+        (replyOptions?.temperature ?: temperature)?.let { put("temperature", it) }
+        replyOptions?.maxTokens?.takeIf { it > 0 }?.let { put("max_tokens", it) }
+        val effort = replyOptions?.effort?.takeUnless { it == ReasoningEffort.OFF }
+        if (effort != null) {
+            if (model.substringAfterLast('/').startsWith("deepseek", ignoreCase = true)) {
+                put("thinking", buildJsonObject { put("type", "enabled") })
+            }
+            put("reasoning_effort", effort.id)
+        }
         tools?.takeUnless { it.isEmpty() }?.let { put("tools", it) }
         put("messages", buildJsonArray {
             messages.forEach { message ->
                 add(buildJsonObject {
                     put("role", message.role)
-                    put("content", message.content?.let(::JsonPrimitive) ?: JsonNull)
+                    put("content", message.encodedContent())
                     message.toolCallId?.let { put("tool_call_id", it) }
                     message.toolCalls?.takeUnless { it.isEmpty() }?.let { calls ->
                         put("tool_calls", buildJsonArray {
@@ -184,6 +207,21 @@ internal object AiConfig {
         })
     }
 
+    private fun ChatMessage.encodedContent(): JsonElement {
+        val image = imageUrl?.takeIf { role == "user" && it.startsWith("data:image/jpeg;base64,") }
+            ?: return content?.let(::JsonPrimitive) ?: JsonNull
+        return buildJsonArray {
+            add(buildJsonObject {
+                put("type", "text")
+                put("text", content.orEmpty())
+            })
+            add(buildJsonObject {
+                put("type", "image_url")
+                put("image_url", buildJsonObject { put("url", image) })
+            })
+        }
+    }
+
     private fun parseResponse(raw: String): ChatResult {
         val response = Json.parseToJsonElement(raw) as? JsonObject
         val choice = (response?.get("choices") as? JsonArray)?.firstOrNull() as? JsonObject
@@ -200,7 +238,8 @@ internal object AiConfig {
             ToolCall(id, name, arguments)
         }.orEmpty()
         val error = if (text == null && calls.isEmpty()) "AI 服务返回空消息" else null
-        return ChatResult(text, error, calls, choice.string("finish_reason"))
+        val reasoning = message.string("reasoning_content")?.trim()?.take(2_000)?.ifBlank { null }
+        return ChatResult(text, error, calls, choice.string("finish_reason"), reasoning)
     }
 
     private fun JsonObject.string(key: String): String? = (get(key) as? JsonPrimitive)?.contentOrNull

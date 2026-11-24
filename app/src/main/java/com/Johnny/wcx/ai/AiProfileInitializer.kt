@@ -5,7 +5,7 @@ import com.Johnny.wcx.ai.AiChatHistory.TimeWindow
 import com.Johnny.wcx.features.ai.AiConfig
 import kotlinx.serialization.Serializable
 
-/** Runs explicitly requested archive work over a fixed, account-bound history range. */
+/** Runs archive work over a fixed, account-bound history range. */
 object AiProfileInitializer {
 
     private const val SLICE_MAX = 1_000
@@ -25,6 +25,7 @@ object AiProfileInitializer {
         internal val accountKey: String = "",
         internal val peer: String = "",
         internal val incremental: Boolean = false,
+        internal val automatic: Boolean = false,
     )
 
     @Serializable
@@ -104,16 +105,18 @@ object AiProfileInitializer {
         fromIndex: Int = 0,
         account: String? = AiProfileStore.accountId(),
         expectedBinding: String? = null,
+        restart: Boolean = false,
     ): Boolean {
         if (account == null || plan.accountKey != AiProfileStore.accountKey(account) || plan.peer != wxId ||
-            plan.slices.isEmpty() || plan.emptyReason != null || fromIndex !in 0..plan.slices.size
+            plan.slices.isEmpty() || plan.emptyReason != null || fromIndex !in 0..plan.slices.size ||
+            (restart && (fromIndex != 0 || plan.incremental))
         ) return false
         val canStart: (AiProfile) -> Boolean = { profile ->
-            val resume = profile.checkpoint == plan && profile.progressDone == fromIndex
-            resume || (fromIndex == 0 && !plan.incremental)
+            if (restart) profile.state == AiProfileState.FAILED && profile.checkpoint == plan
+            else (profile.checkpoint == plan && profile.progressDone == fromIndex) || (fromIndex == 0 && !plan.incremental)
         }
         return launch(account, wxId, expectedBinding, canStart) { profile, binding ->
-            val resume = profile.checkpoint == plan && profile.progressDone == fromIndex
+            val resume = !restart && profile.checkpoint == plan && profile.progressDone == fromIndex
             execute(account, wxId, profile, plan, fromIndex, binding, resume)
         }
     }
@@ -122,12 +125,35 @@ object AiProfileInitializer {
         wxId: String,
         account: String? = AiProfileStore.accountId(),
         expectedBinding: String? = null,
+    ): Boolean = account != null && startIncremental(wxId, account, expectedBinding, null)
+
+    internal fun startAutomatic(wxId: String, account: String, schedule: AiAutoIncrementalSchedule): Boolean =
+        schedule.dueAt(System.currentTimeMillis()) != null && startIncremental(wxId, account, schedule.binding, schedule)
+
+    private fun startIncremental(
+        wxId: String,
+        account: String,
+        expectedBinding: String?,
+        schedule: AiAutoIncrementalSchedule?,
     ): Boolean {
-        if (account == null) return false
-        val canStart: (AiProfile) -> Boolean = { it.isReady && it.coveredUntilSec > 0 && it.pendingAudit == null }
+        val canStart: (AiProfile) -> Boolean = {
+            it.isReady && it.coveredUntilSec > 0 && it.pendingAudit == null &&
+                (schedule == null || it.autoIncremental == schedule)
+        }
         return launch(account, wxId, expectedBinding, canStart) { profile, binding ->
+            val attemptAt = System.currentTimeMillis()
+            val reservedSchedule = schedule?.copy(lastAttemptAt = attemptAt)
+            if (schedule != null) {
+                // Claim the slot before requesting anything, including on runs with no new history.
+                val reserved = AiProfileStore.patchProfile(wxId, account) {
+                    if (canStart(it) && schedule.dueAt(attemptAt) != null &&
+                        AiConfig.selection(AiConfig.Purpose.FRIEND_PROFILE)?.id == binding.id
+                    ) it.copy(autoIncremental = reservedSchedule) else it
+                }?.autoIncremental
+                if (reserved != reservedSchedule) return@launch
+            }
             val from = profile.coveredUntilSec
-            val end = System.currentTimeMillis() / 1000
+            val end = attemptAt / 1000
             val window = TimeWindow(from, end)
             val count = count(account, wxId, window, MessageRendering.TEXT_ONLY)
             if (count == 0) {
@@ -137,9 +163,9 @@ object AiProfileInitializer {
             }
             val plan = Plan(
                 null, from, end, count, split(account, wxId, window), emptyList(), from, count,
-                null, AiProfileStore.accountKey(account), wxId, incremental = true,
+                null, AiProfileStore.accountKey(account), wxId, incremental = true, automatic = schedule != null,
             )
-            execute(account, wxId, profile, plan, 0, binding, resume = false)
+            execute(account, wxId, profile, plan, 0, binding, resume = false, reservedSchedule = reservedSchedule)
         }
     }
 
@@ -178,9 +204,20 @@ object AiProfileInitializer {
         fromIndex: Int,
         binding: AiConfig.Binding,
         resume: Boolean,
+        reservedSchedule: AiAutoIncrementalSchedule? = null,
     ) {
-        val mode = if (plan.incremental) "增量" else "全量"
+        val authorizationChanged = "自动整理授权或模型已变化，可以手动继续"
+        fun automaticAllowed(profile: AiProfile): Boolean = reservedSchedule == null ||
+            (profile.autoIncremental == reservedSchedule &&
+                AiConfig.selection(AiConfig.Purpose.FRIEND_PROFILE)?.id == binding.id)
+
+        val mode = when {
+            plan.automatic -> "自动增量"
+            plan.incremental -> "增量"
+            else -> "全量"
+        }
         var profile = AiProfileStore.patchProfile(wxId, account) {
+            if (!automaticAllowed(it)) return@patchProfile it
             it.copy(
                 state = AiProfileState.INITIALIZING,
                 lastError = null,
@@ -193,7 +230,7 @@ object AiProfileInitializer {
                 styleNotes = if (resume) it.styleNotes else emptyList(),
                 styleSampleCount = if (resume) it.styleSampleCount else 0,
             )
-        } ?: return
+        }?.takeIf { it.state == AiProfileState.INITIALIZING && it.checkpoint == plan } ?: return
 
         for (index in fromIndex until plan.slices.size) {
             val slice = plan.slices[index]
@@ -205,6 +242,10 @@ object AiProfileInitializer {
             val samples = lines.count { it.fromMe && it.isText && it.text.length in 3..40 }
             val styleWindow = if (plan.incremental || profile.style.userEdited) null
             else StyleWindow(slice.label, slice.window.fromSec, slice.window.toSec)
+            if (reservedSchedule != null && AiProfileStore.readProfile(wxId, account)?.let(::automaticAllowed) != true) {
+                fail(account, wxId, authorizationChanged)
+                return
+            }
             val staged = if (lines.none { it.isText }) profile else extract(profile, slice, lines, styleWindow, binding)
             if (staged == null) {
                 fail(account, wxId, "模型未返回可保存的分片，检查服务配置后继续")
@@ -212,6 +253,7 @@ object AiProfileInitializer {
             }
             // One atomic commit records both the slice output and the next unread slice.
             profile = AiProfileStore.patchProfile(wxId, account) {
+                if (!automaticAllowed(it)) return@patchProfile interrupted(it, authorizationChanged)
                 it.copy(
                     tags = staged.tags,
                     memories = staged.memories,
@@ -224,6 +266,7 @@ object AiProfileInitializer {
                 fail(account, wxId, "保存分片失败，可以从断点继续")
                 return
             }
+            if (profile.state != AiProfileState.INITIALIZING) return
         }
 
         val style = if (plan.incremental) profile.style else summarizeStyle(profile, binding)
@@ -231,8 +274,14 @@ object AiProfileInitializer {
         val start = if (plan.incremental) base.sourceRange.substringBefore(" ~ ").ifBlank { AiPrompts.dateOf(plan.fromSec) }
         else AiPrompts.dateOf(plan.fromSec)
         val end = AiPrompts.dateOf(plan.toSec - 1)
-        val change = ProfileChange.diffOf(base, profile, if (plan.incremental) "增量整理" else "首次整理", now)
+        val source = when {
+            plan.automatic -> "自动整理"
+            plan.incremental -> "增量整理"
+            else -> "首次整理"
+        }
+        val change = ProfileChange.diffOf(base, profile, source, now)
         if (AiProfileStore.patchProfile(wxId, account) {
+            if (!automaticAllowed(it)) return@patchProfile interrupted(it, authorizationChanged)
             it.copy(
                 state = AiProfileState.READY,
                 initializedAt = now,
