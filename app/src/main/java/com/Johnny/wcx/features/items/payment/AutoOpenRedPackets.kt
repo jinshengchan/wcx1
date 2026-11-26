@@ -122,7 +122,8 @@ object AutoOpenRedPackets : ClickableFeature(), WeDatabaseListenerApi.IInsertLis
         val msgType: Int,
         val channelId: Int,
         val headImg: String = "",
-        val nickName: String = ""
+        val nickName: String = "",
+        val isSelfSender: Boolean = false,
     )
 
     override fun onEnable() {
@@ -236,7 +237,7 @@ object AutoOpenRedPackets : ClickableFeature(), WeDatabaseListenerApi.IInsertLis
             // 写成 "\\$amount" 会被解析成「反斜杠 + amount 变量的值」，
             // 导致 replace 永远匹配不到用户填的占位符（历史 bug：回复内容原样带着 $amount 发出去）。
             val reply = packetAutoReply
-            if (reply.isNotBlank()) {
+            if (reply.isNotBlank() && !info.isSelfSender) {
                 val replyTalker = info.talker
                 val replyChatName = runCatching { WeDatabaseApi.getDisplayName(replyTalker) }.getOrDefault("")
                 val replyText = reply
@@ -372,6 +373,12 @@ object AutoOpenRedPackets : ClickableFeature(), WeDatabaseListenerApi.IInsertLis
             val nickName = extractXmlParam(xmlContent, "sendertitle")
 
             if (sendId.isEmpty()) return
+            if (RedPacketAdvanced.keywordMode != RedPacketAdvanced.KeywordMode.OFF &&
+                RedPacketAdvanced.shouldSkipByKeyword(
+                    extractXmlParam(xmlContent, "wishing"),
+                    extractXmlParam(xmlContent, "title"),
+                )
+            ) return
 
             // ── 去重：同一 sendId 只处理一次 ──────────────────────────────────────
             if (!processedSendIds.add(sendId)) {
@@ -388,7 +395,8 @@ object AutoOpenRedPackets : ClickableFeature(), WeDatabaseListenerApi.IInsertLis
                 msgType = msgType,
                 channelId = channelId,
                 headImg = headImg,
-                nickName = nickName
+                nickName = nickName,
+                isSelfSender = msgInfo.isSelfSender,
             )
 
             // ── 延迟计算：私聊/群聊分离 + 极速模式 + 内置最小延迟保护 ─────────────
@@ -515,6 +523,18 @@ object AutoOpenRedPackets : ClickableFeature(), WeDatabaseListenerApi.IInsertLis
                             },
                             supportingContent = { Text("点击选择联系人") },
                             headlineContent = { Text(if (useWhitelist) "配置白名单" else "配置黑名单") },
+                        )
+                        ListItem(
+                            modifier = Modifier.clickable {
+                                RedPacketAdvanced.showListManagerDialog(context, useWhitelist)
+                            },
+                            headlineContent = { Text("手动管理黑白名单") },
+                            supportingContent = { Text("增删联系人微信 ID 或群 ID") },
+                        )
+                        ListItem(
+                            modifier = Modifier.clickable { RedPacketAdvanced.showKeywordFilterDialog(context) },
+                            headlineContent = { Text("红包关键词过滤") },
+                            supportingContent = { Text("按祝福语或标题筛选，默认关闭") },
                         )
                         ListItem(
                             modifier = Modifier.clickable {

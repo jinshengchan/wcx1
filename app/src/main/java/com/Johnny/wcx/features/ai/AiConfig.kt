@@ -36,7 +36,9 @@ internal object AiConfig {
     fun setMasterEnabled(enabled: Boolean) {
         WePrefs.putBool(MASTER_KEY, enabled)
         if (!enabled) {
-            SmartReplyClient.Owner.entries.filter { it != SmartReplyClient.Owner.MODELS }
+            SmartReplyClient.Owner.entries.filter {
+                it != SmartReplyClient.Owner.MODELS && it != SmartReplyClient.Owner.TRANSLATION
+            }
                 .forEach(SmartReplyClient::cancel)
             AIAutoReply.pauseAssistantReplies()
             AiSuggestOverlay.dismiss()

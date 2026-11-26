@@ -107,7 +107,7 @@ object MonitorGroupMemberOperations : SwitchFeature(), IResolveDex, WeDatabaseLi
             val displayString = if (displayName.isNotEmpty()) "$displayName ($wxId)" else wxId
 
             val href = "weixin://weixinhongbao/wekit/chatroom_userinfo/$wxId"
-            val content = """<_wc_custom_link_ color="#28C445" href="$href">$displayString</_wc_custom_link_> 退出了群组"""
+            val content = """<_wc_custom_link_ color="#28C445" href="$href">${android.text.TextUtils.htmlEncode(displayString)}</_wc_custom_link_> 退出了群组"""
 
             WeMessageApi.createSimpleMsgInfoAndInsert(
                 type = MessageType.SYSTEM.code,
@@ -135,7 +135,7 @@ object MonitorGroupMemberOperations : SwitchFeature(), IResolveDex, WeDatabaseLi
             val newShow = newName.ifEmpty { "(无)" }
 
             val href = "weixin://weixinhongbao/wekit/chatroom_userinfo/$wxId"
-            val content = """<_wc_custom_link_ color="#28C445" href="$href">$displayString</_wc_custom_link_> 修改群昵称：$oldShow → $newShow"""
+            val content = """<_wc_custom_link_ color="#28C445" href="$href">${android.text.TextUtils.htmlEncode(displayString)}</_wc_custom_link_> 修改群昵称：${android.text.TextUtils.htmlEncode(oldShow)} → ${android.text.TextUtils.htmlEncode(newShow)}"""
 
             WeMessageApi.createSimpleMsgInfoAndInsert(
                 type = MessageType.SYSTEM.code,

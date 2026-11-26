@@ -74,13 +74,17 @@ object WeGroupApi : ApiFeature(), IResolveDex {
     }
 
     fun delMembers(groupId: String, memberWxIds: List<String>) {
-        try {
-            val netScene = ctorDelMember.newInstance(groupId, memberWxIds, 0)
-            WeNetSceneApi.sendNetScene(netScene)
-            WeLogger.i(TAG, "delMembers sent: group=$groupId count=${memberWxIds.size}")
-        } catch (e: Exception) {
-            WeLogger.e(TAG, "delMembers failed for $groupId", e)
+        submitMemberRemoval(groupId, memberWxIds)
+    }
+
+    internal fun submitMemberRemoval(groupId: String, memberWxIds: List<String>): Boolean = try {
+        val netScene = ctorDelMember.newInstance(groupId, memberWxIds, 0)
+        WeNetSceneApi.enqueueNetScene(netScene).also { submitted ->
+            if (submitted) WeLogger.i(TAG, "delMembers submitted: count=${memberWxIds.size}")
         }
+    } catch (e: Exception) {
+        WeLogger.e(TAG, "delMembers could not be submitted", e)
+        false
     }
 
     fun inviteMember(groupId: String, memberWxId: String) {

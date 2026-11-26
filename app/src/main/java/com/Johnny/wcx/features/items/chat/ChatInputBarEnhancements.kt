@@ -52,6 +52,9 @@ object ChatInputBarEnhancements : SwitchFeature(), IResolveDex {
 
     fun showMenu(context: Context, chatFooter: ChatFooter) {
         val aiActions = AiAssistantMenus.inputActions(context, chatFooter)
+        val translationActions = if (InputBarTranslate.isEnabled) {
+            InputBarTranslate.getActionItems().filter { it.isSupported(context, chatFooter) }
+        } else emptyList()
         showComposeDialog(context) {
             AlertDialogContent(
                 title = { Text("聊天功能") },
@@ -145,7 +148,7 @@ object ChatInputBarEnhancements : SwitchFeature(), IResolveDex {
                             }
                         }
 
-                        aiActions.forEach { action ->
+                        (aiActions + translationActions).forEach { action ->
                             item(key = action.id) {
                                 ActionItem(icon = action.icon, label = action.label) {
                                     onDismiss()

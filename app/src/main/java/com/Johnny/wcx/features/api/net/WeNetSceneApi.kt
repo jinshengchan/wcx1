@@ -11,11 +11,16 @@ import com.Johnny.wcx.features.core.Feature
 object WeNetSceneApi : ApiFeature(), IResolveDex {
 
     fun sendNetScene(netScene: Any) {
+        enqueueNetScene(netScene)
+    }
+
+    internal fun enqueueNetScene(netScene: Any): Boolean {
         val queue = classMmKernel.clazz.reflekt()
             .firstMethod {
                 returnType = methodAddNetSceneToQueue.method.declaringClass
             }.invokeStatic()!!
-        methodAddNetSceneToQueue.method.invoke(queue, netScene, 0)
+        val result = methodAddNetSceneToQueue.method.invoke(queue, netScene, 0)
+        return result as? Boolean ?: true
     }
 
     val classMmKernel by dexClass {
