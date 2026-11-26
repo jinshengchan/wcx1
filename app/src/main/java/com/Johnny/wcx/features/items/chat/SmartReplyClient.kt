@@ -66,7 +66,7 @@ internal object SmartReplyClient {
             }
             .build()
     }
-    enum class Owner { MANUAL, AUTO, MODELS, FRIEND_ARCHIVE, FRIEND_SUGGEST, FRIEND_AUTO_REPLY, GROUP_DIGEST }
+    enum class Owner { MANUAL, AUTO, MODELS, FRIEND_ARCHIVE, FRIEND_SUGGEST, FRIEND_AUTO_REPLY, GROUP_DIGEST, TOOLS }
     private val calls = ConcurrentHashMap<Call, Owner>()
 
     fun cancel(owner: Owner) = calls.forEach { (call, caller) -> if (caller == owner) call.cancel() }
@@ -98,6 +98,11 @@ internal object SmartReplyClient {
         }
         val call = client.newCall(request.newBuilder().tag(Attempt::class.java, Attempt()).build())
         calls[call] = owner
+        if (owner != Owner.MODELS && !com.Johnny.wcx.features.ai.AiConfig.isMasterEnabled) {
+            calls.remove(call)
+            continuation.resumeWithException(Failure("AI 助手总开关已关闭"))
+            return@suspendCancellableCoroutine
+        }
         continuation.invokeOnCancellation { call.cancel(); calls.remove(call) }
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {

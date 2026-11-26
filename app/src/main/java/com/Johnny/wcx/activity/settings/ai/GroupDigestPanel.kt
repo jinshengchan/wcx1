@@ -64,7 +64,7 @@ internal fun showGroupDigestPanel(context: Context) = showComposeDialog(context)
                 account == null -> WorkbenchStatus("请登录微信后重新打开群聊摘要。")
                 group == null -> {
                     val groups by loadDigestGroups(account)
-                    GroupDigestGroupList(groups, "可在 AI 工作台的「群聊摘要」中添加群聊。") {
+                    GroupDigestGroupList(groups, "可在 AI 助手的「群组」中添加群聊。") {
                         selected = it
                     }
                 }

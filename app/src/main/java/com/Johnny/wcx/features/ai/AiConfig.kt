@@ -3,6 +3,8 @@ package com.Johnny.wcx.features.ai
 import android.os.Looper
 import com.Johnny.wcx.features.api.core.WeApi
 import com.Johnny.wcx.features.api.core.WeDatabaseApi
+import com.Johnny.wcx.features.items.chat.AIAutoReply
+import com.Johnny.wcx.features.items.chat.AiSuggestOverlay
 import com.Johnny.wcx.features.items.chat.ReplyProfiles
 import com.Johnny.wcx.features.items.chat.SmartReplyClient
 import com.Johnny.wcx.preferences.WePrefs
@@ -28,10 +30,29 @@ import okhttp3.RequestBody.Companion.toRequestBody
 
 /** Message types used by the business modules adapted from AARCNoa/zhiyou (GPL-3.0). */
 internal object AiConfig {
+    private const val MASTER_KEY = "ai_workbench_master_enabled"
+    val isMasterEnabled: Boolean get() = WePrefs.getBoolOrDef(MASTER_KEY, false)
+
+    fun setMasterEnabled(enabled: Boolean) {
+        WePrefs.putBool(MASTER_KEY, enabled)
+        if (!enabled) {
+            SmartReplyClient.Owner.entries.filter { it != SmartReplyClient.Owner.MODELS }
+                .forEach(SmartReplyClient::cancel)
+            AIAutoReply.pauseAssistantReplies()
+            AiSuggestOverlay.dismiss()
+            com.Johnny.wcx.ai.group.GroupDigestRunner.pause()
+
+        }
+        com.Johnny.wcx.ai.AiAutoIncrementalScheduler.wake()
+        com.Johnny.wcx.ai.group.GroupDigestScheduler.wake()
+        com.Johnny.wcx.ai.AiDailyReport.wake()
+    }
+
     enum class Purpose(val key: String, val owner: SmartReplyClient.Owner) {
         FRIEND_PROFILE("friend_profile", SmartReplyClient.Owner.FRIEND_ARCHIVE),
         FRIEND_SUGGEST("friend_profile", SmartReplyClient.Owner.FRIEND_SUGGEST),
         FRIEND_AUTO_REPLY("friend_profile", SmartReplyClient.Owner.FRIEND_AUTO_REPLY),
+        TOOLS("tools", SmartReplyClient.Owner.TOOLS),
         GROUP_DIGEST("group_digest", SmartReplyClient.Owner.GROUP_DIGEST),
     }
 
@@ -71,7 +92,7 @@ internal object AiConfig {
         val reasoning: String? = null,
     )
 
-    private fun account(): String? = runCatching { WeApi.selfWxId.takeIf { it.isNotBlank() } }.getOrNull()
+    internal fun account(): String? = runCatching { WeApi.selfWxId.takeIf { it.isNotBlank() } }.getOrNull()
 
     private fun pref(account: String, purpose: Purpose) = "ai_workbench_${purpose.key}_${fingerprint(account)}"
 
@@ -98,7 +119,9 @@ internal object AiConfig {
         Selection(it.id, it.account, it.providerName, it.model, it.endpoint.host)
     }
 
-    fun capture(purpose: Purpose): Binding? = WeDatabaseApi.currentAiAccount()?.let { resolve(purpose, it) }
+    fun capture(purpose: Purpose): Binding? = if (isMasterEnabled) {
+        WeDatabaseApi.currentAiAccount()?.let { resolve(purpose, it) }
+    } else null
 
     private fun resolve(purpose: Purpose, account: String): Binding? {
         val id = WePrefs.getStringOrDef(pref(account, purpose), "")
@@ -138,6 +161,7 @@ internal object AiConfig {
         purpose: Purpose = Purpose.FRIEND_PROFILE,
         binding: Binding? = null,
     ): ChatResult = withContext(Dispatchers.IO) {
+        if (!isMasterEnabled) return@withContext ChatResult(null, "AI 助手总开关已关闭")
         val selected = binding ?: capture(purpose)
             ?: return@withContext ChatResult(null, "请先选择模型，等待当前微信账号的消息库就绪")
         if (selected.purpose != purpose || !isCurrent(selected)) {

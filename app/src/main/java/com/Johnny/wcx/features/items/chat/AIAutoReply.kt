@@ -172,6 +172,11 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
         SmartReplyClient.cancel(SmartReplyClient.Owner.AUTO)
     }
 
+    internal fun pauseAssistantReplies() {
+        tasks.cancelPending()
+        imageChecks.coroutineContext.cancelChildren()
+    }
+
     override fun onDisable() {
         enabledAt = Long.MAX_VALUE
         cancelPending()
@@ -679,7 +684,7 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
     }
 
     override fun onInsert(table: String, values: ContentValues) {
-        if (table != "message") return
+        if (table != "message" || !AiConfig.isMasterEnabled) return
         val talker = values.getAsString("talker")?.takeIf { it.isNotBlank() } ?: return
         if (values.getAsInteger("isSend")?.let { it != 0 } == true) {
             tasks.intervene(talker)
@@ -721,7 +726,7 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
                 if (!legacy || !configuredEnabled || !tasks.markLegacy(ticket)) return@schedule
                 val cfg = config()
                 if (cfg.key.isBlank() || cfg.model.isBlank() || msg.actualContent.length > 8000) return@schedule
-                fun permitted(): Boolean = tasks.current(ticket) && cfg == config() &&
+                fun permitted(): Boolean = AiConfig.isMasterEnabled && tasks.current(ticket) && cfg == config() &&
                     (eventAccount.isNullOrBlank() || eventAccount == WeApi.selfWxId) &&
                     allowed(msg, !msg.isInGroupChat && WeDatabaseApi.getFriend(msg.sender) == null)
                 if (!permitted()) return@schedule
@@ -739,13 +744,14 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
                     if (clean.isBlank()) return@withPermit
                     val history = if (cfg.context) ReplyContext.load(msg.talker, msg.id, msg.createTime, 6) else emptyList()
                     if (!permitted() || !tasks.reserveRequest(ticket)) return@withPermit
+                    com.Johnny.wcx.ai.AiImportantAlerts.record(msg.talker, clean)
                     val reply = callAI(cfg, clean, history)
                     if (reply.isBlank() || reply.length > 4000 || !permitted()) return@withPermit
                     // Final checks are adjacent to enqueueing. Do not retry uncertain send results.
                     val stranger = !msg.isInGroupChat && WeDatabaseApi.getFriend(msg.sender) == null
                     val optedIn = eventAccount?.let { AiProfileStore.readProfile(msg.talker, it)?.autoReplyEnabled }
                     withContext(Dispatchers.Main) {
-                        if (optedIn != true && tasks.current(ticket) && cfg == config() && allowed(msg, stranger) &&
+                        if (AiConfig.isMasterEnabled && optedIn != true && tasks.current(ticket) && cfg == config() && allowed(msg, stranger) &&
                             (eventAccount.isNullOrBlank() || eventAccount == WeApi.selfWxId)) {
                             enqueueReply(msg.talker, cfg.prefix + reply)
                         }
@@ -779,17 +785,18 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
     private suspend fun replyToFriend(
         msg: MessageInfo, ticket: AutoReplyTasks.Ticket, access: AiSuggestEngine.Access, imageMessageId: Long? = null,
     ) {
-        delay(FRIEND_QUIET_MS)
+        delay(maxOf(FRIEND_QUIET_MS, replyDelay.coerceIn(0, 10_000).toLong()))
         requestSlots.withPermit {
             fun current() = tasks.current(ticket)
             fun permitted() = current() && AiSuggestEngine.isCurrent(access) && isLatest(msg, access.binding.account) && current()
             if (!permitted()) return@withPermit
+            if (imageMessageId == null) com.Johnny.wcx.ai.AiImportantAlerts.record(msg.talker, msg.actualContent)
             val proposal = AiSuggestEngine.suggest(access, imageMessageId, canContinue = ::current)
             proposal.error?.let { addDebugLog(it) }
             val reply = proposal.replies.firstOrNull() ?: return@withPermit
             if (permitted()) {
                 tasks.enqueueIfCurrent(ticket) {
-                    if (WeApi.selfWxId == access.binding.account) enqueueReply(msg.talker, reply)
+                    if (AiConfig.isMasterEnabled && WeApi.selfWxId == access.binding.account) enqueueReply(msg.talker, reply)
                 }
             }
         }

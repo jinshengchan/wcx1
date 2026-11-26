@@ -317,6 +317,7 @@ private fun GroupDigestDetail(
                         }
                     }
                 }
+                AiWorkGroupSettings(context, account, saved)
                 TextButton(enabled = !saving, onClick = ::removeGroup) { Text("移除群聊") }
             }
         }

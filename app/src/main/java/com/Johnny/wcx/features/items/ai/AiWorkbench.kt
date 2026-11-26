@@ -6,9 +6,9 @@ import com.Johnny.wcx.features.core.ClickableFeature
 import com.Johnny.wcx.features.core.Feature
 
 @Feature(
-    name = "AI 工作台",
+    name = "AI 助手",
     categories = ["聊天"],
-    description = "按所选会话整理好友档案和群聊摘要，管理模型与定时摘要"
+    description = "聊天 AI 工具、好友档案、群聊摘要与每日总结"
 )
 object AiWorkbench : ClickableFeature() {
     override val noSwitchWidget = true

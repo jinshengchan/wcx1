@@ -29,6 +29,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.Johnny.wcx.features.ai.AiConfig
+import com.Johnny.wcx.preferences.WePrefs
 import com.Johnny.wcx.activity.settings.ai.showGroupDigestPanel
 import com.Johnny.wcx.ai.group.GroupDigestStore
 import com.Johnny.wcx.features.items.beautify.HomeSidePanelFeature
@@ -46,6 +48,11 @@ import kotlin.math.roundToInt
 
 /** Launcher decor overlay, limited to the space immediately beside the search action. */
 internal object GroupDigestEntry : Application.ActivityLifecycleCallbacks {
+    private const val ENTRY_KEY = "ai_workbench_home_group_entry"
+    var entryEnabled: Boolean
+        get() = WePrefs.getBoolOrDef(ENTRY_KEY, true)
+        set(value) { WePrefs.putBool(ENTRY_KEY, value) }
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private var application: Application? = null
     private var host: Activity? = null
@@ -137,7 +144,7 @@ internal object GroupDigestEntry : Application.ActivityLifecycleCallbacks {
     }
 
     private fun isVisible(activity: Activity, decor: FrameLayout): Boolean =
-        activity.hasWindowFocus() &&
+        AiConfig.isMasterEnabled && entryEnabled && activity.hasWindowFocus() &&
             decor.findViewWithTag<View>("home_side_panel_overlay") == null &&
             HomeSidePanelFeature.isHomePageActive(activity)
 

@@ -36,7 +36,13 @@ object AIReplyAssistant : ClickableFeature() {
                 title = { Text("AI 回复助手") },
                 text = {
                     DefaultColumn(scrollable = true) {
-                        Text("两种模式分别开启。长按回复只填入草稿；自动回复会按名单和规则发送。")
+                        Text("长按回复只填入草稿；自动回复会按名单和规则发送。")
+                        if (!com.Johnny.wcx.features.ai.AiConfig.isMasterEnabled) {
+                            Text("AI 助手总开关当前关闭。模型配置可编辑，回复将在总开关开启后生效。")
+                            TextButton(onClick = {
+                                com.Johnny.wcx.activity.settings.ai.AiWorkbenchDialog(context)
+                            }) { Text("打开 AI 助手设置") }
+                        }
                         if (state.damaged) Text("模型配置读取失败，回复请求已暂停。原配置保留，请恢复配置后使用。")
                         ListItem(headlineContent = { Text("长按智能回复") },
                             supportingContent = { Text("选择候选后手动发送，保留已有草稿") },

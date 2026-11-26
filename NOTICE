@@ -6,3 +6,6 @@ Source: https://github.com/AARCNoa/zhiyou/tree/59f9083e86b8baee93e5e0f348d369429
 
 The adapted code is distributed under the GNU General Public License, version 3.
 See LICENSE for the license text.
+
+The AI assistant tool behavior and reminder rules are adapted from Johnny520/wcx v348.
+Source: https://github.com/Johnny520/wcx/tree/v348

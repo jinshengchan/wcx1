@@ -46,6 +46,11 @@ data class GroupDigestConfig(
     internal val lastAttemptedSlotEnd: Long = 0,
     internal val revision: String = "",
     internal val recordId: String = "",
+    val workGroup: Boolean = false,
+    val workGoal: String = "",
+    val workProgress: String = "",
+    val workProgressAt: Long = 0,
+
 ) {
     internal val unread: Int get() = digests.count { !it.read }
 

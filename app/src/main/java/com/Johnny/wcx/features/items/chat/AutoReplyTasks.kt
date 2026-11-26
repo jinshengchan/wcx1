@@ -19,8 +19,12 @@ internal class AutoReplyTasks(private val now: () -> Long = { System.nanoTime() 
     @Synchronized fun enable() { enabled = true }
     @Synchronized fun disable() {
         enabled = false
-        pending.values.forEach { it.job.cancel() }
+        cancelPending()
+    }
+    @Synchronized fun cancelPending() {
+        val jobs = pending.values.map { it.job }
         pending.clear()
+        jobs.forEach { it.cancel() }
     }
     @Synchronized fun intervene(talker: String) { pending.remove(talker)?.job?.cancel() }
     @Synchronized fun markLegacy(ticket: Ticket): Boolean {

@@ -45,6 +45,7 @@ object AiSuggestGesture : ApiFeature() {
             method.hookBefore {
                 val activity = thisObject as? Activity ?: return@hookBefore
                 val event = args.firstOrNull() as? MotionEvent ?: return@hookBefore
+                if (!AiConfig.isMasterEnabled || !AiToolSettings.doubleTapEnabled) return@hookBefore
                 if (activity.isFinishing || activity.isDestroyed) return@hookBefore
                 val watcher = watchers.getOrPut(activity) { TapWatcher(ViewConfiguration.get(activity).scaledTouchSlop) }
                 if (watcher.onTouch(event)) onDoubleTap(activity, event)
@@ -62,6 +63,7 @@ object AiSuggestGesture : ApiFeature() {
     }
 
     private fun onDoubleTap(activity: Activity, event: MotionEvent) {
+        if (!AiConfig.isMasterEnabled || !AiToolSettings.doubleTapEnabled) return
         val footer = visibleFooter(activity) ?: return
         val rect = Rect()
         if (footer.getGlobalVisibleRect(rect) && rect.contains(event.x.toInt(), event.y.toInt())) return
@@ -82,7 +84,7 @@ object AiSuggestGesture : ApiFeature() {
                 Lookup(access?.takeIf { it.binding.account == account },
                     failure ?: "请在好友档案重新确认智能建议的模型")
             } ?: return@launch
-            if (!isActive || seq != sequence || activity.isFinishing || activity.isDestroyed ||
+            if (!isActive || !AiConfig.isMasterEnabled || !AiToolSettings.doubleTapEnabled || seq != sequence || activity.isFinishing || activity.isDestroyed ||
                 visibleFooter(activity) !== footer || conversation(activity, footer) != talker) return@launch
             val access = lookup.access
             if (access == null) {

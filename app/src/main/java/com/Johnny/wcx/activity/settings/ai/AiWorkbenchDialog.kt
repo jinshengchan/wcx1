@@ -2,12 +2,20 @@ package com.Johnny.wcx.activity.settings.ai
 
 import android.content.Context
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.key
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.SecondaryTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -17,6 +25,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.Johnny.wcx.ai.AiProfileInitializer
@@ -31,12 +40,13 @@ import com.Johnny.wcx.ui.utils.showComposeDialog
 import com.Johnny.wcx.utils.android.showToast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.DateFormat
 import java.util.Date
 
 internal fun AiWorkbenchDialog(context: Context) = showComposeDialog(context) {
-    var selectedTab by remember { mutableStateOf(0) }
+    var enabled by remember { mutableStateOf(AiConfig.isMasterEnabled) }
     var friend by remember { mutableStateOf<IWeContact?>(null) }
     val originalAccount by produceState<String?>(null) {
         while (value == null) {
@@ -55,21 +65,44 @@ internal fun AiWorkbenchDialog(context: Context) = showComposeDialog(context) {
     }
 
     AlertDialogContent(
-        title = { Text("AI 工作台") },
+        title = { Text("AI 助手") },
         text = {
             when {
                 accountChanged -> Text("微信账号已切换，请关闭后重新打开工作台。")
-                account == null -> Text("正在检查当前微信账号。若长时间未显示，请进入微信主界面后重新打开。")
-                else -> Column(Modifier.fillMaxWidth()) {
-                    SecondaryTabRow(selectedTabIndex = selectedTab) {
-                        Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 }, text = { Text("好友档案") })
-                        Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 }, text = { Text("群聊摘要") })
-                        Tab(selected = selectedTab == 2, onClick = { selectedTab = 2 }, text = { Text("设置") })
+                else -> {
+                    val pages = if (enabled) listOf("好友", "群组", "总结", "说明", "设置") else listOf("说明", "设置")
+                    val pager = key(enabled) {
+                        rememberPagerState(initialPage = pages.lastIndex) { pages.size }
                     }
-                    when (selectedTab) {
-                        0 -> FriendArchivePane(context, account, friend) { friend = it }
-                        1 -> GroupDigestPane(context, account)
-                        2 -> AiWorkbenchSettings()
+                    val scope = rememberCoroutineScope()
+                    Column(Modifier.fillMaxWidth()) {
+                        Row(Modifier.horizontalScroll(rememberScrollState())) {
+                            pages.forEachIndexed { index, label ->
+                                Tab(
+                                    selected = pager.currentPage == index,
+                                    modifier = Modifier.width(58.dp),
+                                    onClick = { scope.launch { pager.animateScrollToPage(index) } },
+                                    text = { Text(label) },
+                                )
+                            }
+                        }
+                        HorizontalPager(state = pager, verticalAlignment = Alignment.Top) { page ->
+                            when (pages[page]) {
+                                "设置" -> AiAssistantSettings(context, account, enabled) {
+                                    AiConfig.setMasterEnabled(it)
+                                    enabled = it
+                                }
+                                "说明" -> AiAssistantHelp()
+                                else -> if (account == null) {
+                                    Text("请先打开微信主界面，等待当前账号消息库就绪。")
+                                } else when (pages[page]) {
+                                    "好友" -> FriendArchivePane(context, account, friend) { friend = it }
+                                    "群组" -> GroupDigestPane(context, account)
+                                    "总结" -> AiAssistantReports(context, account)
+                                    else -> Unit
+                                }
+                            }
+                        }
                     }
                 }
             }

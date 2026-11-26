@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import com.composables.icons.materialsymbols.MaterialSymbols
 import com.composables.icons.materialsymbols.outlined.Send
 import com.composables.icons.materialsymbols.outlined.Arrow_drop_down
+import com.Johnny.wcx.features.ai.AiConfig
 import com.Johnny.wcx.features.api.core.WeMessageApi
 import com.Johnny.wcx.features.api.core.models.MessageInfo
 import com.Johnny.wcx.features.api.ui.WeChatMessageContextMenuApi
@@ -116,10 +117,10 @@ object SmartLongPressReply : ClickableFeature(),
                 "智能回复",
                 SendIcon,
                 MaterialSymbols.Outlined.Send,
-                isSupported = { msgInfo -> configuredEnabled && msgInfo.type?.isText == true },
+                isSupported = { msgInfo -> AiConfig.isMasterEnabled && configuredEnabled && msgInfo.type?.isText == true },
                 multiSelect = WeChatMessageContextMenuApi.MultiSelectSupport.Unsupported,
             ) { view, chattingContext, msgInfo ->
-                if (configuredEnabled) startSmartReply(view, chattingContext, msgInfo)
+                if (AiConfig.isMasterEnabled && configuredEnabled) startSmartReply(view, chattingContext, msgInfo)
             }
         )
     }
@@ -149,7 +150,7 @@ object SmartLongPressReply : ClickableFeature(),
             var replies by remember { mutableStateOf<List<String>>(emptyList()) }
 
             LaunchedEffect(msgInfo) {
-                if (!configuredEnabled) {
+                if (!AiConfig.isMasterEnabled || !configuredEnabled) {
                     loading = false
                     error = "功能已关闭"
                     return@LaunchedEffect

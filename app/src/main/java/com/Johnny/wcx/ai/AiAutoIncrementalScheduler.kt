@@ -58,13 +58,18 @@ object AiAutoIncrementalScheduler {
         controller = scope.launch {
             var recoveredAccount: String? = null
             while (isActive) {
+                if (!AiConfig.isMasterEnabled) {
+                    wakeAt(null)
+                    withTimeoutOrNull(MAX_CHECK_DELAY_MS) { changed.receive() }
+                    continue
+                }
                 val account = AiProfileStore.accountId()
                 if (account != recoveredAccount) {
                     AiProfileInitializer.recoverInterrupted(account)
                     recoveredAccount = account
                 }
                 val now = System.currentTimeMillis()
-                val nextWake = account?.let { checkSchedules(it, now) }
+                val nextWake = if (AiConfig.isMasterEnabled) account?.let { checkSchedules(it, now) } else null
                 wakeAt(nextWake)
                 val waitMs = minOf(nextWake?.minus(now) ?: MAX_CHECK_DELAY_MS, MAX_CHECK_DELAY_MS)
                 withTimeoutOrNull(waitMs) { changed.receive() }

@@ -810,6 +810,40 @@ object WeDatabaseApi : ApiFeature(), IResolveDex {
         }
     }
 
+    internal fun aiConversationCandidates(account: String, fromSec: Long, unreadOnly: Boolean): List<String> =
+        readAiDatabase(account) { database ->
+            val unread = if (unreadOnly) "AND (unReadCount > 0 OR unReadMuteCount > 0)" else ""
+            val cutoff = fromSec * aiMessageTimeScale(database)
+            database.rawQuery(
+                "SELECT username FROM rconversation WHERE conversationTime >= ? $unread " +
+                    "ORDER BY conversationTime DESC LIMIT 80",
+                arrayOf<Any>(cutoff),
+            ).use { cursor ->
+                buildList {
+                    while (cursor != null && cursor.moveToNext()) cursor.getString(0)?.let(::add)
+                }
+            }
+        }
+
+    internal fun findAiText(account: String, keyword: String, sinceSec: Long): List<WeMessage> =
+        readAiDatabase(account) { database ->
+            database.rawQuery(
+                "SELECT $AI_MESSAGE_COLUMNS FROM message WHERE type = 1 AND createTime >= ? " +
+                    "AND instr(content, ?) > 0 ORDER BY createTime DESC, msgId DESC LIMIT 50",
+                arrayOf<Any>(sinceSec * aiMessageTimeScale(database), keyword),
+            ).use { cursor ->
+                buildList {
+                    while (cursor != null && cursor.moveToNext()) {
+                        add(WeMessage(
+                            msgId = cursor.getLong(0), msgSvrId = cursor.getLong(1),
+                            talker = cursor.getString(2).orEmpty(), content = cursor.getString(3).orEmpty(),
+                            typeCode = cursor.getInt(4), createTime = cursor.getLong(5), isSend = cursor.getInt(6),
+                        ))
+                    }
+                }
+            }
+        }
+
     private fun aiWindowFilter(typeCodes: Set<Int>?): String = if (typeCodes.isNullOrEmpty()) AI_MESSAGE_WINDOW
     else "$AI_MESSAGE_WINDOW AND type IN (${typeCodes.joinToString(",")})"
 

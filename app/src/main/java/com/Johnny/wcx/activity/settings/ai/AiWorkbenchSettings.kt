@@ -4,10 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -42,7 +39,7 @@ internal fun AiWorkbenchSettings() {
     val outputLimit = maxTokens.trim().toIntOrNull()?.takeIf { it in 0..AiReplySettings.MAX_OUTPUT_TOKENS }
     val variability = temperature.trim().toDoubleOrNull()?.takeIf { it in 0.0..2.0 }
 
-    Column(Modifier.heightIn(max = 450.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("双击提示音", modifier = Modifier.weight(1f))
             Switch(checked = enabled, onCheckedChange = {

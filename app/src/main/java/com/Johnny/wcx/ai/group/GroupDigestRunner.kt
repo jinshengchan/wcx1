@@ -51,6 +51,10 @@ object GroupDigestRunner {
         runs.forEach { (key, run) -> if (key.account != account) run.job.cancel() }
     }
 
+    internal fun pause() {
+        runs.values.forEach { it.job.cancel() }
+    }
+
     internal fun hasAutomaticRun(): Boolean = runs.values.any { !it.manual }
 
     internal fun startAutomatic(scope: CoroutineScope, groupId: String, account: String): Boolean =
@@ -77,12 +81,13 @@ object GroupDigestRunner {
     }
 
     private suspend fun run(key: GroupKey, manual: Boolean, expectedBinding: String?, notBeforeSec: Long?) {
-        if (!manual && AiRunState.hasLongTask()) return
+        if (!AiConfig.isMasterEnabled || (!manual && AiRunState.hasLongTask())) return
         val config = GroupDigestStore.readConfig(key.groupId, key.account) ?: return
         val now = System.currentTimeMillis()
         val slot = if (manual) 0L else config.toSchedule()?.dueSlotEnd(now) ?: 0L
         if (!manual && slot == 0L) return
         val binding = AiConfig.capture(purpose)?.takeIf { it.account == key.account }
+        if (!AiConfig.isMasterEnabled) return
         if (binding == null || (manual && expectedBinding != null && expectedBinding != binding.id) ||
             (!manual && config.scheduleBinding != binding.id)
         ) {

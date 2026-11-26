@@ -12,6 +12,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.Johnny.wcx.features.ai.AiConfig
 import com.Johnny.wcx.ai.AiDates
 import com.Johnny.wcx.ai.AiProfileState
 import com.Johnny.wcx.ai.AiProfileStore
@@ -33,6 +34,7 @@ object AiProfileContactEntries : ApiFeature(), WeContactPrefsScreenApi.IContactI
     override fun onDisable() = WeContactPrefsScreenApi.removeProvider(this)
 
     override fun getContactInfoItem(activity: Activity): List<WeContactPrefsScreenApi.PreferenceItem> {
+        if (!AiConfig.isMasterEnabled) return emptyList()
         val profile = readyProfile(activity) ?: return emptyList()
         return listOf(
             WeContactPrefsScreenApi.PreferenceItem(KEY_TAGS, "AI 标签", "${profile.tags.size} 个"),
@@ -41,6 +43,7 @@ object AiProfileContactEntries : ApiFeature(), WeContactPrefsScreenApi.IContactI
     }
 
     override fun onItemClick(activity: Activity, key: String): Boolean {
+        if (!AiConfig.isMasterEnabled) return false
         if (key != KEY_TAGS && key != KEY_MEMORIES) return false
         val profile = readyProfile(activity)
         if (profile == null) {

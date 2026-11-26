@@ -51,6 +51,10 @@ object GroupDigestScheduler {
     }
 
     private fun checkSchedules(scope: CoroutineScope, wakeAt: (Long?) -> Unit): Long {
+        if (!AiConfig.isMasterEnabled) {
+            wakeAt(null)
+            return MAX_CHECK_DELAY_MS
+        }
         val account = GroupDigestStore.accountId()
         GroupDigestRunner.cancelOtherAccounts(account)
         if (account == null) {

@@ -26,13 +26,18 @@ internal object AiImageSource {
         for (message in messages.asReversed()) {
             if (message.isSend != 0) break
             if (message.typeCode != MessageRendering.TYPE_IMAGE || message.msgSvrId <= 0) continue
-            val jpeg = runCatching {
-                WeMessageApi.cachedAiImagePath(message.msgSvrId, conversationId, account)?.let(::readJpeg)
-            }.getOrNull() ?: continue
-            if (WeDatabaseApi.currentAiAccount() != account) return null
-            return "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
+            selectedDataUrl(message.msgSvrId, conversationId, account)?.let { return it }
         }
         return null
+    }
+
+    fun selectedDataUrl(serverId: Long, talker: String, account: String): String? {
+        if (serverId <= 0 || WeDatabaseApi.currentAiAccount() != account) return null
+        val jpeg = runCatching {
+            WeMessageApi.cachedAiImagePath(serverId, talker, account)?.let(::readJpeg)
+        }.getOrNull() ?: return null
+        if (WeDatabaseApi.currentAiAccount() != account) return null
+        return "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
     }
 
     private fun readJpeg(path: Path): ByteArray? {
