@@ -1,11 +1,13 @@
 package com.Johnny.wcx.features.items.chat
 
 import android.content.Context
+import com.tencent.mm.pluginsdk.ui.chat.ChatFooter
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -17,6 +19,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.Johnny.wcx.ai.AiAssistantTools
+import com.Johnny.wcx.ai.AiProfileStore
 import com.Johnny.wcx.ai.AiTool
 import com.Johnny.wcx.ai.MessageRendering
 import com.Johnny.wcx.features.ai.AiConfig
@@ -62,18 +65,20 @@ object AiAssistantMenus : ApiFeature() {
     private fun available(tool: AiTool): Boolean = AiConfig.isMasterEnabled && AiToolSettings.enabled(tool)
 
     private val inputProvider = WeChatInputBarMenuApi.IActionItemsProvider {
+        val talker = WeCurrentConversationApi.value
         inputTools.map { tool ->
             WeChatInputBarMenuApi.ActionItem(
                 id = "wcx_ai_${tool.name}",
                 icon = MaterialSymbols.Outlined.Send,
                 label = "AI ${tool.title}",
-                isSupported = { _, _ ->
-                    val talker = WeCurrentConversationApi.value
-                    available(tool) && AiAssistantTools.visible(talker) &&
+                isSupported = { _, footer ->
+                    available(tool) && WeCurrentConversationApi.chatFooter === footer && AiAssistantTools.visible(talker) &&
                         (tool !in listOf(AiTool.ANNOUNCEMENT, AiTool.MINUTES) || talker.endsWith("@chatroom"))
                 },
-                onClick = { context, _ ->
-                    showAiTool(context, tool, talker = WeCurrentConversationApi.value)
+                onClick = { context, footer ->
+                    if (WeCurrentConversationApi.chatFooter === footer && WeCurrentConversationApi.value == talker) {
+                        showAiTool(context, tool, talker = talker)
+                    }
                 },
             )
         }
@@ -111,15 +116,25 @@ object AiAssistantMenus : ApiFeature() {
             shouldShow = { _, _ -> available(AiTool.MOMENTS_COMMENT) },
             onClick = { moment ->
                 if (available(AiTool.MOMENTS_COMMENT)) {
-                    val text = runCatching {
-                        WeMomentsApi.getMomentContent(moment.snsInfo, moment.timelineObject)?.contentText
-                    }.getOrNull()
-                    if (text.isNullOrBlank()) showToast(moment.activity, "这条朋友圈没有文字正文")
-                    else showAiTool(moment.activity, AiTool.MOMENTS_COMMENT, selectedText = text)
+                    val post = runCatching { WeMomentsApi.getTimelineProto(moment.snsInfo) }.getOrNull()
+                    val author = post?.userName?.takeIf { it.isNotBlank() }
+                    val text = post?.contentDesc
+                    if (author != null && !AiAssistantTools.visible(author)) {
+                        showToast(moment.activity, "这条朋友圈不适用 AI 评论")
+                    } else if (text.isNullOrBlank()) {
+                        showToast(moment.activity, "这条朋友圈没有文字正文")
+                    } else {
+                        showAiTool(moment.activity, AiTool.MOMENTS_COMMENT, talker = author, selectedText = text)
+                    }
                 }
             },
         ))
     }
+
+    internal fun inputActions(context: Context, footer: ChatFooter): List<WeChatInputBarMenuApi.ActionItem> =
+        if (AiConfig.isMasterEnabled) {
+            inputProvider.getActionItems().filter { it.isSupported(context, footer) }
+        } else emptyList()
 
     override fun onEnable() {
         WeChatInputBarMenuApi.addProvider(inputProvider)
@@ -155,6 +170,12 @@ internal fun showAiTool(
         var result by remember { mutableStateOf("") }
         var errorMessage by remember { mutableStateOf("") }
         var loading by remember { mutableStateOf(false) }
+        var includeProfile by remember { mutableStateOf(false) }
+        val canIncludeProfile by androidx.compose.runtime.produceState(false, talker) {
+            value = tool == AiTool.MOMENTS_COMMENT && talker != null && withContext(Dispatchers.IO) {
+                AiProfileStore.readProfile(talker, selection.account)?.isReady == true
+            }
+        }
 
         AlertDialogContent(
             title = { Text(tool.title) },
@@ -177,6 +198,14 @@ internal fun showAiTool(
                         else -> "当前聊天的部分近期消息"
                     }
                     Text("生成时会发送$scopeDescription 至 ${selection.endpointHost}。")
+                    if (canIncludeProfile) {
+                        androidx.compose.foundation.layout.Row(
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                        ) {
+                            Checkbox(checked = includeProfile, onCheckedChange = { includeProfile = it }, enabled = !loading)
+                            Text("同时发送好友档案摘要，以贴近我的表达方式")
+                        }
+                    }
                     tool.inputLabel?.let { label ->
                         OutlinedTextField(
                             value = input,
@@ -213,7 +242,7 @@ internal fun showAiTool(
                                             "总开关、模型配置或微信账号已变化"
                                         }
                                         AiAssistantTools.run(
-                                            tool, binding, input.trim(), talker, selectedText, imageId, workGoal,
+                                            tool, binding, input.trim(), talker, selectedText, imageId, workGoal, includeProfile,
                                         )
                                     }
                                     check(AiConfig.isMasterEnabled && AiConfig.account() == selection.account) {

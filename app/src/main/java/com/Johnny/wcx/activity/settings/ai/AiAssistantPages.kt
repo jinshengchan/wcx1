@@ -50,7 +50,7 @@ internal fun AiAssistantHelp() {
         Text("模型", style = MaterialTheme.typography.titleSmall)
         Text("在「AI 回复助手」添加 API 配置，再到本页「设置」选择工具模型。好友档案和群聊摘要继续各自选择模型。")
         Text("从微信使用", style = MaterialTheme.typography.titleSmall)
-        Text("长按聊天输入栏可查看聊天总结、待办、问答、群纪要、周报和跨会话工具。长按消息可润色、写备注、读图翻译或速读长消息。长按有文字的朋友圈可生成评论建议。")
+        Text("打开「聊天输入栏增强」，长按发送键或加号可查看聊天总结、待办、问答、群纪要、周报和跨会话工具。长按消息可润色、写备注、读图翻译或速读长消息。长按有文字的朋友圈可生成评论建议。")
         Text("生成与定时", style = MaterialTheme.typography.titleSmall)
         Text("手动工具点击「生成」才会向所选服务发送内容。每日总结、好友档案和群聊摘要的定时运行需要分别开启。关闭总开关会暂停运行并隐藏相关入口。")
     }
@@ -168,7 +168,7 @@ internal fun AiAssistantReports(context: Context, account: String) {
             val scheduledHour = hour ?: return@TextButton
             confirmAiAction(
                 context, "开启每日总结",
-                "每天 ${scheduledHour}:00 会向 ${model.endpointHost} 发送当天活跃会话的部分近期消息，以生成总结。",
+                "每天 ${scheduledHour}:00 会向 ${model.endpointHost} 发送当天活跃会话的部分近期消息和当天已更新的工作群进度，以生成总结。",
                 "开启",
             ) {
                 scope.launch {

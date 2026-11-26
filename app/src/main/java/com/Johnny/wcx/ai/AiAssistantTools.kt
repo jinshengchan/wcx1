@@ -1,6 +1,7 @@
 // AI tool behavior adapted from Johnny520/wcx v348 (GPL-3.0).
 package com.Johnny.wcx.ai
 
+import com.Johnny.wcx.ai.group.GroupDigestStore
 import com.Johnny.wcx.features.ai.AiConfig
 import com.Johnny.wcx.features.api.core.WeDatabaseApi
 import com.Johnny.wcx.features.api.core.models.WeMessage
@@ -87,9 +88,11 @@ internal object AiAssistantTools {
         selectedText: String? = null,
         imageId: Long? = null,
         workGoal: String = "",
+        includeProfile: Boolean = false,
     ): String {
         check(AiConfig.isCurrent(binding)) { "总开关、模型配置或微信账号已变化" }
         check(talker == null || visible(talker)) { "当前会话不可用于 AI 工具" }
+        check(tool.inputLabel == null || input.isNotBlank()) { "请填写生成主题或关键词" }
         val account = binding.account
         val today = LocalDate.now()
         val image = imageId?.let { id ->
@@ -100,7 +103,22 @@ internal object AiAssistantTools {
         val context = when (tool) {
             AiTool.MOMENTS_COPY, AiTool.ANNOUNCEMENT -> input
             AiTool.UNREAD -> multiConversation(account, dayStart(today.minusDays(7)), unreadOnly = true, waiting = false)
-            AiTool.TODAY, AiTool.DAILY_REPORT -> multiConversation(account, dayStart(today), unreadOnly = false, waiting = false)
+            AiTool.TODAY -> multiConversation(account, dayStart(today), unreadOnly = false, waiting = false)
+            AiTool.DAILY_REPORT -> {
+                val conversations = multiConversation(account, dayStart(today), unreadOnly = false, waiting = false)
+                val progress = GroupDigestStore.loadGroups(account).asSequence()
+                    .filter { visible(it.groupId) }
+                    .take(MAX_CONVERSATIONS)
+                    .mapNotNull { group ->
+                        GroupDigestStore.readConfig(group.groupId, account)?.takeIf {
+                            it.workGroup && it.workProgressAt / 1000 >= dayStart(today) && it.workProgress.isNotBlank()
+                        }?.let { "【${group.name.take(60)}】${it.workProgress.take(500)}" }
+                    }.joinToString("\n").take(3000)
+                listOf(
+                    progress.takeIf { it.isNotBlank() }?.let { "今日已更新的工作群进度：\n$it" }.orEmpty(),
+                    conversations,
+                ).filter { it.isNotBlank() }.joinToString("\n\n")
+            }
             AiTool.WEEKLY -> multiConversation(account, dayStart(today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))), false, false)
             AiTool.NEED_REPLY -> multiConversation(account, dayStart(today.minusDays(7)), false, true)
             AiTool.SEARCH -> WeDatabaseApi.findAiText(account, input, dayStart(today.minusDays(30)))
@@ -112,6 +130,22 @@ internal object AiAssistantTools {
                 listOf(workGoal, lines).filter { it.isNotBlank() }.joinToString("\n\n")
             }
             AiTool.IMAGE -> "请处理这张图片"
+            AiTool.MOMENTS_COMMENT -> {
+                val post = selectedText.orEmpty().take(3000)
+                val profile = talker?.takeIf { includeProfile }?.let {
+                    AiProfileStore.readProfile(it, account)?.takeIf(AiProfile::isReady)
+                }
+                if (profile == null) post else buildString {
+                    append("朋友圈正文：").append(post)
+                    if (profile.style.summary.isNotBlank()) append("\n我的表达风格：").append(profile.style.summary.take(600))
+                    profile.tags.take(5).forEach {
+                        append("\n好友档案：").append(it.key.take(50)).append("：").append(it.value.take(100))
+                    }
+                    profile.memories.takeLast(3).forEach {
+                        append("\n近期记忆：").append(it.title.take(60)).append("：").append(it.detail.take(120))
+                    }
+                }
+            }
             else -> selectedText ?: render(
                 messages(account, requireNotNull(talker), dayStart(today.minusDays(30)), 30).asReversed(),
             )

@@ -51,6 +51,7 @@ object ChatInputBarEnhancements : SwitchFeature(), IResolveDex {
     }
 
     fun showMenu(context: Context, chatFooter: ChatFooter) {
+        val aiActions = AiAssistantMenus.inputActions(context, chatFooter)
         showComposeDialog(context) {
             AlertDialogContent(
                 title = { Text("聊天功能") },
@@ -140,6 +141,15 @@ object ChatInputBarEnhancements : SwitchFeature(), IResolveDex {
                                     onSuccess { _ ->
                                         showToast("已发送 (自己无法看到该消息)")
                                     }
+                                }
+                            }
+                        }
+
+                        aiActions.forEach { action ->
+                            item(key = action.id) {
+                                ActionItem(icon = action.icon, label = action.label) {
+                                    onDismiss()
+                                    action.onClick(context, chatFooter)
                                 }
                             }
                         }
