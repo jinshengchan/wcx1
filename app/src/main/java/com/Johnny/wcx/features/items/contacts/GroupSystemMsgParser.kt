@@ -93,6 +93,8 @@ internal object GroupSystemMsgParser {
         "加入了群聊",
         "加入群聊",
         "加入了该群聊",
+        "通过扫描",
+        "通过群聊邀请",
         "joined the group",
     )
 
@@ -109,6 +111,11 @@ internal object GroupSystemMsgParser {
         "left the group",
     )
 
+    private val ENGLISH_INVITE = Regex("\\binvited\\b.*\\bgroup\\b", RegexOption.IGNORE_CASE)
+    private val ENGLISH_KICK = Regex("\\bkicked\\b.*\\bgroup\\b", RegexOption.IGNORE_CASE)
+    private val PASSIVE_ACTION = Regex("\\b(?:was|were) (?:invited|kicked|removed)\\b", RegexOption.IGNORE_CASE)
+    private val SELF_OPERATOR = Regex("^(?:你|you\\b)", RegexOption.IGNORE_CASE)
+
     fun isSystemMessage(typeCode: Int): Boolean = typeCode == SYSTEM_MSG_TYPE
 
     /**
@@ -119,10 +126,13 @@ internal object GroupSystemMsgParser {
         if (raw.isEmpty() || raw.length > MAX_CONTENT_LENGTH) return null
 
         val actionText = QUOTED_NAME.replace(raw, "").trim()
+        val englishInvite = ENGLISH_INVITE.containsMatchIn(actionText)
         val kind = when {
-            KICK_KEYWORDS.any { actionText.contains(it, ignoreCase = true) } -> GroupSystemEventKind.KICK
+            KICK_KEYWORDS.any { actionText.contains(it, ignoreCase = true) } ||
+                ENGLISH_KICK.containsMatchIn(actionText) -> GroupSystemEventKind.KICK
             LEAVE_KEYWORDS.any { actionText.contains(it, ignoreCase = true) } -> GroupSystemEventKind.LEAVE
-            JOIN_KEYWORDS.any { actionText.contains(it, ignoreCase = true) } -> GroupSystemEventKind.JOIN
+            JOIN_KEYWORDS.any { actionText.contains(it, ignoreCase = true) } ||
+                englishInvite -> GroupSystemEventKind.JOIN
             else -> return null
         }
 
@@ -132,33 +142,16 @@ internal object GroupSystemMsgParser {
             .toList()
         if (names.isEmpty()) return null
 
-        val targets = pickTargets(kind, raw, names)
-        if (targets.isEmpty()) return null
-
-        val operator = if (raw.startsWith("你")) "你" else names.firstOrNull { it !in targets }
-        return GroupSystemEvent(kind, targets, operator, raw)
-    }
-
-    /**
-     * 从成对引号里的昵称列表中挑出「变动对象」。
-     *
-     * - `你邀请"A"加入了群聊`：操作者是「你」，对象是第一个昵称；
-     * - `"A"邀请"B"加入了群聊`：对象是**最后一个**昵称；
-     * - `"A"通过扫描"B"分享的二维码加入群聊`：对象是**第一个**昵称（A 自己扫的码）；
-     * - `你已将"A"移出了群聊`：对象是第一个；`"A"将"B"移出了群聊`：对象是最后一个。
-     */
-    private fun pickTargets(
-        kind: GroupSystemEventKind,
-        raw: String,
-        names: List<String>,
-    ): List<String> {
-        val selfOperated = raw.startsWith("你")
-        return when {
+        val selfOperated = SELF_OPERATOR.containsMatchIn(raw)
+        val targets = when {
             names.size == 1 -> names
             selfOperated -> if (kind == GroupSystemEventKind.JOIN) names else names.take(1)
-            raw.contains("通过") -> names.take(1)
-            kind == GroupSystemEventKind.JOIN && raw.contains("邀请") -> names.drop(1)
-            else -> listOf(names.last())
+            PASSIVE_ACTION.containsMatchIn(actionText) -> names.take(1)
+            kind == GroupSystemEventKind.JOIN && actionText.contains("通过") -> names.take(1)
+            kind == GroupSystemEventKind.JOIN && (actionText.contains("邀请") || englishInvite) -> names.drop(1)
+            else -> names.takeLast(1)
         }
+        val operator = if (selfOperated) "你" else names.firstOrNull { it !in targets }
+        return GroupSystemEvent(kind, targets, operator, raw)
     }
 }

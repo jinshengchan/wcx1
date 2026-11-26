@@ -43,6 +43,7 @@ import com.Johnny.wcx.utils.WeLogger
 import com.Johnny.wcx.utils.android.showToast
 import com.Johnny.wcx.utils.strings.isGroupChatWxId
 import org.json.JSONObject
+import java.math.BigDecimal
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.thread
 import kotlin.random.Random
@@ -105,6 +106,7 @@ object AutoOpenRedPackets : ClickableFeature(), WeDatabaseListenerApi.IInsertLis
     private var packetDelayMaxPrivate by WePrefs.prefOption("red_packet_delay_max_private", "500")
     private var packetDelayMinGroup by WePrefs.prefOption("red_packet_delay_min_group", "300")
     private var packetDelayMaxGroup by WePrefs.prefOption("red_packet_delay_max_group", "800")
+    private var packetDelaySecondMode by WePrefs.prefOption("red_packet_delay_second_mode", false)
 
     // ── 极速模式 ──────────────────────────────────────────────────────────────────
     private var packetSpeedMode by WePrefs.prefOption("red_packet_speed_mode", false)
@@ -221,7 +223,7 @@ object AutoOpenRedPackets : ClickableFeature(), WeDatabaseListenerApi.IInsertLis
 
             // 抢红包金额统计：开关开启才写入（关闭时不执行任何读写）；
             // 金额<=0/解析异常已在上方短路；任一异常仅记日志，绝不影响抢红包核心流程。
-            if (RedPacketStatsManager.isEnabled()) {
+            if (!info.isSelfSender && RedPacketStatsManager.isEnabled()) {
                 RedPacketStatsManager.addSuccessRecord(
                     senderName = info.nickName,
                     chatName = runCatching { WeDatabaseApi.getDisplayName(info.talker) }.getOrDefault(""),
@@ -481,13 +483,32 @@ object AutoOpenRedPackets : ClickableFeature(), WeDatabaseListenerApi.IInsertLis
         showComposeDialog(context) {
             var notification by remember { mutableStateOf(packetNotif) }
             var self by remember { mutableStateOf(packetSelf) }
-            var delayMinPrivateInput by remember { mutableStateOf(packetDelayMinPrivate) }
-            var delayMaxPrivateInput by remember { mutableStateOf(packetDelayMaxPrivate) }
-            var delayMinGroupInput by remember { mutableStateOf(packetDelayMinGroup) }
-            var delayMaxGroupInput by remember { mutableStateOf(packetDelayMaxGroup) }
+            var secondMode by remember { mutableStateOf(packetDelaySecondMode) }
+            var delayInputs by remember {
+                val saved = listOf(packetDelayMinPrivate, packetDelayMaxPrivate, packetDelayMinGroup, packetDelayMaxGroup)
+                mutableStateOf(saved.map { input ->
+                    input.toLongOrNull()?.let { formatDelay(it.coerceAtLeast(0), secondMode) }.orEmpty()
+                })
+            }
             var speedMode by remember { mutableStateOf(packetSpeedMode) }
             var useWhitelist by remember { mutableStateOf(packetUseWhitelist) }
             var autoReplyInput by remember { mutableStateOf(packetAutoReply) }
+
+            fun readDelayInputs(): List<Long>? = delayInputs.mapIndexed { index, input ->
+                if (input.isBlank()) DEFAULT_DELAYS_MS[index]
+                else parseDelay(input, secondMode) ?: return null
+            }
+
+            fun switchDelayUnit(value: Boolean) {
+                val millis = readDelayInputs() ?: run {
+                    showToast("请先填写有效的延迟")
+                    return
+                }
+                delayInputs = millis.map { formatDelay(it, value) }
+                secondMode = value
+            }
+
+            val delayUnit = if (secondMode) "秒" else "毫秒"
 
             AlertDialogContent(
                 title = { Text("自动抢红包") },
@@ -552,41 +573,35 @@ object AutoOpenRedPackets : ClickableFeature(), WeDatabaseListenerApi.IInsertLis
                         ListItem(
                             modifier = Modifier.clickable { self = !self },
                             trailingContent = { Switch(checked = self, onCheckedChange = { self = it }) },
-                            supportingContent = { Text("默认情况下不抢自己发出的红包") },
+                            supportingContent = { Text("领取自己发出的红包时跳过自动回复和金额统计") },
                             headlineContent = { Text("抢自己的红包") },
                         )
-                        TextField(
-                            value = delayMinPrivateInput,
-                            onValueChange = { delayMinPrivateInput = it.filter { c -> c.isDigit() }.take(5) },
-                            label = { Text("私聊最小延迟 (毫秒)") },
-                            supportingText = { Text("私聊抢红包随机延迟下限, 内置最小保护 ${MIN_DELAY_MS}ms") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine = true,
+                        ListItem(
+                            modifier = Modifier.clickable { switchDelayUnit(!secondMode) },
+                            trailingContent = { Switch(checked = secondMode, onCheckedChange = ::switchDelayUnit) },
+                            headlineContent = { Text("延迟按秒填写") },
+                            supportingContent = { Text("当前单位 $delayUnit，切换单位会换算已填写的延迟") },
                         )
-                        TextField(
-                            value = delayMaxPrivateInput,
-                            onValueChange = { delayMaxPrivateInput = it.filter { c -> c.isDigit() }.take(5) },
-                            label = { Text("私聊最大延迟 (毫秒)") },
-                            supportingText = { Text("私聊抢红包随机延迟上限, 实际在 [最小, 最大] 区间随机") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine = true,
-                        )
-                        TextField(
-                            value = delayMinGroupInput,
-                            onValueChange = { delayMinGroupInput = it.filter { c -> c.isDigit() }.take(5) },
-                            label = { Text("群聊最小延迟 (毫秒)") },
-                            supportingText = { Text("群聊抢红包随机延迟下限, 内置最小保护 ${MIN_DELAY_MS}ms") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine = true,
-                        )
-                        TextField(
-                            value = delayMaxGroupInput,
-                            onValueChange = { delayMaxGroupInput = it.filter { c -> c.isDigit() }.take(5) },
-                            label = { Text("群聊最大延迟 (毫秒)") },
-                            supportingText = { Text("群聊抢红包随机延迟上限, 实际在 [最小, 最大] 区间随机") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine = true,
-                        )
+                        DELAY_FIELD_LABELS.forEachIndexed { index, label ->
+                            TextField(
+                                value = delayInputs[index],
+                                onValueChange = { value ->
+                                    val input = value.replace(',', '.')
+                                    val pattern = if (secondMode) SECONDS_INPUT else MILLIS_INPUT
+                                    if (pattern.matches(input)) {
+                                        delayInputs = delayInputs.toMutableList().apply { set(index, input) }
+                                    }
+                                },
+                                label = { Text("$label ($delayUnit)") },
+                                supportingText = {
+                                    Text("默认 ${formatDelay(DEFAULT_DELAYS_MS[index], secondMode)} $delayUnit")
+                                },
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = if (secondMode) KeyboardType.Decimal else KeyboardType.Number,
+                                ),
+                                singleLine = true,
+                            )
+                        }
                         ListItem(
                             modifier = Modifier.clickable { speedMode = !speedMode },
                             trailingContent = { Switch(checked = speedMode, onCheckedChange = { speedMode = it }) },
@@ -614,12 +629,17 @@ object AutoOpenRedPackets : ClickableFeature(), WeDatabaseListenerApi.IInsertLis
                 },
                 confirmButton = {
                     Button(onClick = {
+                        val (privateMin, privateMax, groupMin, groupMax) = readDelayInputs() ?: run {
+                            showToast("请先填写有效的延迟")
+                            return@Button
+                        }
                         packetNotif = notification
                         packetSelf = self
-                        packetDelayMinPrivate = delayMinPrivateInput.ifBlank { "200" }
-                        packetDelayMaxPrivate = delayMaxPrivateInput.ifBlank { "500" }
-                        packetDelayMinGroup = delayMinGroupInput.ifBlank { "300" }
-                        packetDelayMaxGroup = delayMaxGroupInput.ifBlank { "800" }
+                        packetDelayMinPrivate = privateMin.toString()
+                        packetDelayMaxPrivate = privateMax.toString()
+                        packetDelayMinGroup = groupMin.toString()
+                        packetDelayMaxGroup = groupMax.toString()
+                        packetDelaySecondMode = secondMode
                         packetSpeedMode = speedMode
                         packetUseWhitelist = useWhitelist
                         packetAutoReply = autoReplyInput
@@ -629,6 +649,21 @@ object AutoOpenRedPackets : ClickableFeature(), WeDatabaseListenerApi.IInsertLis
                 dismissButton = { TextButton(onDismiss) { Text("取消") } }
             )
         }
+    }
+
+    private val DELAY_FIELD_LABELS = listOf("私聊最小延迟", "私聊最大延迟", "群聊最小延迟", "群聊最大延迟")
+    private val DEFAULT_DELAYS_MS = listOf(200L, 500L, 300L, 800L)
+    private val MILLIS_INPUT = Regex("[0-9]{0,19}")
+    private val SECONDS_INPUT = Regex("[0-9]{0,16}(?:\\.[0-9]{0,3})?")
+
+    // Store milliseconds so toggling the unit never changes the configured delay.
+    private fun formatDelay(millis: Long, inSeconds: Boolean): String =
+        if (inSeconds) BigDecimal.valueOf(millis, 3).stripTrailingZeros().toPlainString() else millis.toString()
+
+    private fun parseDelay(input: String, inSeconds: Boolean): Long? {
+        if (!inSeconds) return input.toLongOrNull()
+        val seconds = input.toBigDecimalOrNull() ?: return null
+        return runCatching { seconds.movePointRight(3).longValueExact() }.getOrNull()
     }
 
     override fun onBeforeToggle(newState: Boolean, context: Context): Boolean {

@@ -2,7 +2,14 @@ package com.Johnny.wcx.features.items.chat
 
 import android.annotation.SuppressLint
 import android.content.ContentValues
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.TextPaint
+import android.text.TextUtils
+import android.text.method.LinkMovementMethod
+import android.text.style.ClickableSpan
 import android.view.View
+import android.widget.TextView
 import dev.ujhhgtg.reflekt.reflekt
 import dev.ujhhgtg.reflekt.utils.Modifiers
 import com.Johnny.wcx.dexkit.abc.IResolveDex
@@ -24,6 +31,13 @@ import kotlinx.serialization.protobuf.ProtoBuf
 @Feature(name = "群成员行为监控", categories = ["聊天"], description = "监控群成员的退群与修改群昵称行为")
 object MonitorGroupMemberOperations : SwitchFeature(), IResolveDex, WeDatabaseListenerApi.IUpdateListener {
 
+    private const val PROFILE_LINK_PREFIX = "weixin://weixinhongbao/wekit/chatroom_userinfo/"
+    private const val LINK_TAG = "<_wc_custom_link_"
+    private val profileLink = Regex(
+        """${LINK_TAG}\s+color="#28C445"\s+href="${Regex.escape(PROFILE_LINK_PREFIX)}([\w@.-]+)">([\s\S]*?)</_wc_custom_link_>""",
+    )
+    private val escapedText = Regex("&(?:amp|lt|gt|quot|apos|#39);")
+
     override fun onEnable() {
         WeDatabaseListenerApi.addListener(this)
 
@@ -32,13 +46,15 @@ object MonitorGroupMemberOperations : SwitchFeature(), IResolveDex, WeDatabaseLi
                 type = BString
                 modifiers(Modifiers.FINAL)
             }.get()!! as String
-            if (!url.startsWith("weixin://weixinhongbao/wekit/chatroom_userinfo/")) return@hookBefore
+            if (!url.startsWith(PROFILE_LINK_PREFIX)) return@hookBefore
 
             val wxId = url.substringAfterLast('/')
             val context = (args[0] as View).context
 
             WeApi.openContact(context, wxId, WeApi.OpenContactDestination.HOMEPAGE)
         }
+
+        installLinkRenderingFallback()
     }
 
     override fun onDisable() {
@@ -106,8 +122,8 @@ object MonitorGroupMemberOperations : SwitchFeature(), IResolveDex, WeDatabaseLi
             val displayName = (origDisplayNames[wxId] ?: "").ifEmpty { WeDatabaseApi.getDisplayName(wxId) }
             val displayString = if (displayName.isNotEmpty()) "$displayName ($wxId)" else wxId
 
-            val href = "weixin://weixinhongbao/wekit/chatroom_userinfo/$wxId"
-            val content = """<_wc_custom_link_ color="#28C445" href="$href">${android.text.TextUtils.htmlEncode(displayString)}</_wc_custom_link_> 退出了群组"""
+            val href = "$PROFILE_LINK_PREFIX$wxId"
+            val content = """<_wc_custom_link_ color="#28C445" href="$href">${TextUtils.htmlEncode(displayString)}</_wc_custom_link_> 退出了群组"""
 
             WeMessageApi.createSimpleMsgInfoAndInsert(
                 type = MessageType.SYSTEM.code,
@@ -134,8 +150,8 @@ object MonitorGroupMemberOperations : SwitchFeature(), IResolveDex, WeDatabaseLi
             val oldShow = oldName.ifEmpty { "(无)" }
             val newShow = newName.ifEmpty { "(无)" }
 
-            val href = "weixin://weixinhongbao/wekit/chatroom_userinfo/$wxId"
-            val content = """<_wc_custom_link_ color="#28C445" href="$href">${android.text.TextUtils.htmlEncode(displayString)}</_wc_custom_link_> 修改群昵称：${android.text.TextUtils.htmlEncode(oldShow)} → ${android.text.TextUtils.htmlEncode(newShow)}"""
+            val href = "$PROFILE_LINK_PREFIX$wxId"
+            val content = """<_wc_custom_link_ color="#28C445" href="$href">${TextUtils.htmlEncode(displayString)}</_wc_custom_link_> 修改群昵称：${TextUtils.htmlEncode(oldShow)} → ${TextUtils.htmlEncode(newShow)}"""
 
             WeMessageApi.createSimpleMsgInfoAndInsert(
                 type = MessageType.SYSTEM.code,
@@ -153,6 +169,53 @@ object MonitorGroupMemberOperations : SwitchFeature(), IResolveDex, WeDatabaseLi
             ProtoBuf.decodeFromByteArray<ChatRoomDataProto>(blob)
                 .members.associate { it.wxId to it.displayName }
         }.getOrElse { emptyMap() }
+    }
+
+    private fun installLinkRenderingFallback() {
+        runCatching {
+            TextView::class.java.getMethod("setText", CharSequence::class.java, TextView.BufferType::class.java)
+                .hookBefore {
+                    val text = args.getOrNull(0) as? CharSequence ?: return@hookBefore
+                    if (!text.startsWith(LINK_TAG)) return@hookBefore
+                    val rendered = renderProfileLink(text) ?: return@hookBefore
+                    val view = thisObject as? TextView ?: return@hookBefore
+                    args[0] = rendered
+                    if (view.movementMethod == null) view.movementMethod = LinkMovementMethod.getInstance()
+                }
+        }.onFailure { WeLogger.e(TAG, "failed to install group profile link fallback", it) }
+    }
+
+    private fun renderProfileLink(text: CharSequence): SpannableString? {
+        val match = profileLink.matchAt(text, 0) ?: return null
+        val suffix = text.subSequence(match.range.last + 1, text.length)
+        if (!suffix.startsWith(" 退出了群组") && !suffix.startsWith(" 修改群昵称：")) return null
+
+        val (wxId, label) = match.destructured
+        val displayName = decodeLinkText(label)
+        if (displayName.isEmpty()) return null
+
+        return SpannableString(displayName + decodeLinkText(suffix)).apply {
+            setSpan(object : ClickableSpan() {
+                override fun onClick(widget: View) {
+                    WeApi.openContact(widget.context, wxId, WeApi.OpenContactDestination.HOMEPAGE)
+                }
+
+                override fun updateDrawState(ds: TextPaint) {
+                    ds.color = 0xFF28C445.toInt()
+                    ds.isUnderlineText = false
+                }
+            }, 0, displayName.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+    }
+
+    private fun decodeLinkText(text: CharSequence): String = escapedText.replace(text) {
+        when (it.value) {
+            "&amp;" -> "&"
+            "&lt;" -> "<"
+            "&gt;" -> ">"
+            "&quot;" -> "\""
+            else -> "'"
+        }
     }
 
     private const val TAG = "MonitorGroupMemberOperations"
