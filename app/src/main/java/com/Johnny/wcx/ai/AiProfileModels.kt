@@ -75,13 +75,22 @@ data class AiProfile(
     val visionEnabled: Boolean = false,
     val visionBinding: String = "",
     val autoIncremental: AiAutoIncrementalSchedule? = null,
+    val autoReplyDelaySeconds: Int = DEFAULT_AUTO_REPLY_DELAY_SECONDS,
 ) {
     val isReady: Boolean get() = state == AiProfileState.READY
+
+    internal val effectiveAutoReplyDelaySeconds: Int
+        get() = autoReplyDelaySeconds.coerceIn(AUTO_REPLY_DELAY_RANGE)
 
     /**
      * 正在整理或审查，阻止两条写流水线同时修改档案。
      */
     val busy: Boolean get() = state == AiProfileState.INITIALIZING || auditing
+
+    companion object {
+        internal const val DEFAULT_AUTO_REPLY_DELAY_SECONDS = 8
+        internal val AUTO_REPLY_DELAY_RANGE = 3..60
+    }
 }
 
 @Serializable

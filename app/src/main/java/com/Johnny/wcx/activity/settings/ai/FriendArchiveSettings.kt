@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
@@ -25,6 +26,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.Johnny.wcx.ai.AiAutoIncrementalSchedule
@@ -127,6 +129,17 @@ internal fun LazyListScope.friendArchiveSettings(
         profile.autoReplyEnabled,
         profile.autoReplyBinding,
     ) { current, enabled, binding -> current.copy(autoReplyEnabled = enabled, autoReplyBinding = binding) }
+    item {
+        val delay = profile.effectiveAutoReplyDelaySeconds
+        TextButton(enabled = canEdit, onClick = {
+            editAutoReplyDelay(context, delay) { seconds ->
+                save {
+                    it.takeIf { it.autoReplyDelaySeconds == profile.autoReplyDelaySeconds }
+                        ?.copy(autoReplyDelaySeconds = seconds)
+                }
+            }
+        }) { Text("自动回复延迟 · $delay 秒") }
+    }
     setConsent(
         "发送最近图片",
         "为「$name」生成智能建议或自动回复时，会把近期私聊中对方最近发送且已保存在本机的一张图片上传到模型。启用好友自动回复后，图片也可能在后台上传。",
@@ -208,6 +221,41 @@ private fun ConsentRow(
 
 private fun bindingStillSelected(account: String, binding: String): Boolean =
     AiConfig.selection(AiConfig.Purpose.FRIEND_PROFILE)?.let { it.account == account && it.id == binding } == true
+
+private fun editAutoReplyDelay(context: Context, current: Int, save: (Int) -> Unit) = showComposeDialog(context) {
+    var input by remember { mutableStateOf(current.toString()) }
+    val range = AiProfile.AUTO_REPLY_DELAY_RANGE
+    val seconds = input.trim().toIntOrNull()?.takeIf { it in range }
+    AlertDialogContent(
+        title = { Text("好友自动回复延迟") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("好友发来消息后，至少等待设定的秒数再开始生成回复。")
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it },
+                    label = { Text("等待秒数（${range.first}–${range.last}）") },
+                    isError = input.isNotBlank() && seconds == null,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row {
+                    listOf(range.first, AiProfile.DEFAULT_AUTO_REPLY_DELAY_SECONDS, 30).forEach { preset ->
+                        TextButton(onClick = { input = preset.toString() }) { Text("$preset 秒") }
+                    }
+                }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        confirmButton = {
+            Button(enabled = seconds != null, onClick = {
+                save(seconds ?: return@Button)
+                onDismiss()
+            }) { Text("保存") }
+        },
+    )
+}
 
 private fun editGoal(context: Context, current: ChatGoal?, save: (ChatGoal?) -> Unit) = showComposeDialog(context) {
     var goal by remember { mutableStateOf(current ?: ChatGoal()) }

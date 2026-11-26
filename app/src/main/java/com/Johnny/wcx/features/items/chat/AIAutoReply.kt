@@ -94,7 +94,6 @@ import java.util.Collections
 object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
 
     private const val TAG = "AIAutoReply"
-    private const val FRIEND_QUIET_MS = 8_000L
 
     private var contextEnabled by prefOption("ai_reply_context", false)
     private var systemPrompt by prefOption(
@@ -785,7 +784,7 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
     private suspend fun replyToFriend(
         msg: MessageInfo, ticket: AutoReplyTasks.Ticket, access: AiSuggestEngine.Access, imageMessageId: Long? = null,
     ) {
-        delay(maxOf(FRIEND_QUIET_MS, replyDelay.coerceIn(0, 10_000).toLong()))
+        delay(access.profile.effectiveAutoReplyDelaySeconds * 1_000L)
         requestSlots.withPermit {
             fun current() = tasks.current(ticket)
             fun permitted() = current() && AiSuggestEngine.isCurrent(access) && isLatest(msg, access.binding.account) && current()

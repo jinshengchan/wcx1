@@ -19,6 +19,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.Johnny.wcx.ai.AiAssistantTools
+import com.Johnny.wcx.ai.AiDailyReport
 import com.Johnny.wcx.ai.AiProfileStore
 import com.Johnny.wcx.ai.AiTool
 import com.Johnny.wcx.ai.MessageRendering
@@ -38,6 +39,7 @@ import com.Johnny.wcx.utils.android.copyToClipboard
 import com.Johnny.wcx.utils.android.showToast
 import com.composables.icons.materialsymbols.MaterialSymbols
 import com.composables.icons.materialsymbols.outlined.Send
+import java.time.LocalDate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -156,12 +158,17 @@ internal fun showAiTool(
     selectedText: String? = null,
     imageId: Long? = null,
     workGoal: String = "",
+    expectedAccount: String? = null,
     onResult: ((String) -> Unit)? = null,
 ) {
     if (!AiConfig.isMasterEnabled || !AiToolSettings.enabled(tool)) return
     val selection = AiConfig.selection(AiConfig.Purpose.TOOLS)
     if (selection == null) {
         showToast(context, "请在「AI 助手 → 设置」选择工具模型")
+        return
+    }
+    if (expectedAccount != null && selection.account != expectedAccount) {
+        showToast(context, "微信账号已切换，请重新打开 AI 助手")
         return
     }
     showComposeDialog(context) {
@@ -230,6 +237,7 @@ internal fun showAiTool(
                         enabled = !loading && (tool.inputLabel == null || input.isNotBlank()),
                         onClick = {
                             if (loading) return@TextButton
+                            val reportDate = if (tool == AiTool.DAILY_REPORT) LocalDate.now() else null
                             loading = true
                             errorMessage = ""
                             scope.launch {
@@ -241,9 +249,16 @@ internal fun showAiTool(
                                         check(binding.id == selection.id && binding.account == selection.account) {
                                             "总开关、模型配置或微信账号已变化"
                                         }
-                                        AiAssistantTools.run(
+                                        val response = AiAssistantTools.run(
                                             tool, binding, input.trim(), talker, selectedText, imageId, workGoal, includeProfile,
+                                            reportDate = reportDate,
                                         )
+                                        if (reportDate != null) {
+                                            check(AiDailyReport.saveReport(binding, reportDate, response)) {
+                                                "总结保存失败，请检查模型和微信账号"
+                                            }
+                                        }
+                                        response
                                     }
                                     check(AiConfig.isMasterEnabled && AiConfig.account() == selection.account) {
                                         "总开关或微信账号已变化"

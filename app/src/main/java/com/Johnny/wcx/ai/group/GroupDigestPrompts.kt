@@ -7,7 +7,6 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -101,14 +100,19 @@ object GroupDigestPrompts {
     /**
      * 解析模型输出。返回 null 表示完全不是 JSON —— 调用方用原文兜底，不整条丢。
      *
-     * 先剥 ``` 围栏：部分服务商会把 JSON 包进 markdown，直接 parse 会失败。
+     * 取 JSON 对象，兼容模型额外加上的代码围栏和前后说明。
      */
     fun parse(raw: String): Parsed? {
-        val text = raw.trim()
-            .removePrefix("```json").removePrefix("```")
-            .removeSuffix("```")
-            .trim()
-        val obj = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return null
+        fun decode(text: String) = runCatching { json.parseToJsonElement(text) }.getOrNull()
+        val block = jsonFence.find(raw)?.groupValues?.get(1)
+        val value = decode(raw) ?: block?.let(::decode) ?: run {
+            val text = block ?: raw
+            val start = text.indexOf('{')
+            val end = text.lastIndexOf('}')
+            if (start < 0 || end <= start) return null
+            decode(text.substring(start, end + 1))
+        }
+        val obj = value as? JsonObject ?: return null
         return Parsed(
             significant = obj.bool("significant") ?: true,
             headline = obj.string("headline").take(HEADLINE_MAX),
@@ -148,4 +152,5 @@ object GroupDigestPrompts {
         }.getOrDefault(emptyList())
 
     private val json = Json { ignoreUnknownKeys = true }
+    private val jsonFence = Regex("""```(?:json)?\s*([\s\S]*?)```""", RegexOption.IGNORE_CASE)
 }

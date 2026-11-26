@@ -11,6 +11,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import com.Johnny.wcx.features.api.core.WeApi
 import com.Johnny.wcx.features.api.core.WeDatabaseApi
 import com.Johnny.wcx.features.api.core.WeDatabaseListenerApi
 import com.Johnny.wcx.features.api.core.WeMessageApi
@@ -26,9 +27,14 @@ import com.Johnny.wcx.ui.content.TextButton
 import com.Johnny.wcx.ui.utils.showComposeDialog
 import com.Johnny.wcx.utils.WeLogger
 import com.Johnny.wcx.utils.android.showToast
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 @Feature(name = "自动缓存图片", categories = ["聊天"], description = "监听接收到的图片消息, 自动触发微信从 CDN 下载, 将原图缓存到本地")
 object AutoCacheImages : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
@@ -39,19 +45,28 @@ object AutoCacheImages : ClickableFeature(), WeDatabaseListenerApi.IInsertListen
     private var whitelist by WePrefs.prefOption("autocache_images_whitelist", emptySet())
     private var blacklist by WePrefs.prefOption("autocache_images_blacklist", emptySet())
 
-    /** 正在缓存中的 msgSvrId，避免同一张图被重复触发下载。 */
-    private val inFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
+    /** 同一账号下排队或下载中的图片消息。 */
+    private val inFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<String, Long>>()
+    private val downloadGate = Semaphore(2)
+
+    @Volatile
+    private var scope: CoroutineScope? = null
 
     override fun onEnable() {
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         WeDatabaseListenerApi.addListener(this)
     }
 
     override fun onDisable() {
+        val cachingScope = scope
+        scope = null
         WeDatabaseListenerApi.removeListener(this)
+        cachingScope?.cancel()
     }
 
     override fun onInsert(table: String, values: ContentValues) {
         if (table != "message") return
+        val cachingScope = scope ?: return
 
         val type = values.getAsInteger("type") ?: return
         if (type != MessageType.IMAGE.code) return
@@ -69,22 +84,32 @@ object AutoCacheImages : ClickableFeature(), WeDatabaseListenerApi.IInsertListen
 
         val msgSvrId = values.getAsLong("msgSvrId") ?: return
         if (msgSvrId == 0L) return
+        val account = WeApi.selfWxId
+        if (account.isBlank()) return
 
         // 高频 INFO 日志（每张图 2~3 条）会淹没真实报错，这里只留在 logcat，不落盘。
         WeLogger.d(TAG, "detected image message; msgSvrId=$msgSvrId, auto caching")
         // 同一条消息可能被数据库回调触发多次，去重避免重复触发原图下载。
-        if (!inFlight.add(msgSvrId)) return
-        CoroutineScope(Dispatchers.IO).launch {
+        val key = account to msgSvrId
+        if (!inFlight.add(key)) return
+        cachingScope.launch {
             try {
-                val path = WeMessageApi.cacheImage(msgSvrId)
-                if (path != null) {
-                    WeLogger.d(TAG, "cached image to $path")
-                } else {
-                    WeLogger.w(TAG, "failed to auto-cache image msgSvrId=$msgSvrId")
+                downloadGate.withPermit {
+                    if (scope !== cachingScope || !configuredEnabled || WeApi.selfWxId != account) return@withPermit
+                    val path = WeMessageApi.cacheImage(msgSvrId)
+                    if (path != null) {
+                        WeLogger.d(TAG, "cached image to $path")
+                    } else {
+                        WeLogger.w(TAG, "failed to auto-cache image msgSvrId=$msgSvrId")
+                    }
                 }
-            } finally {
-                inFlight.remove(msgSvrId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                WeLogger.w(TAG, "failed to auto-cache image msgSvrId=$msgSvrId", e)
             }
+        }.invokeOnCompletion {
+            inFlight.remove(key)
         }
     }
 

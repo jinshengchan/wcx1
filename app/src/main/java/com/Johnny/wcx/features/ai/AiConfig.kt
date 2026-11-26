@@ -11,6 +11,8 @@ import com.Johnny.wcx.preferences.WePrefs
 import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -31,6 +33,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 /** Message types used by the business modules adapted from AARCNoa/zhiyou (GPL-3.0). */
 internal object AiConfig {
     private const val MASTER_KEY = "ai_workbench_master_enabled"
+    private val compatibilityParameters = setOf("thinking", "reasoning_effort", "max_tokens")
     val isMasterEnabled: Boolean get() = WePrefs.getBoolOrDef(MASTER_KEY, false)
 
     fun setMasterEnabled(enabled: Boolean) {
@@ -162,11 +165,12 @@ internal object AiConfig {
         readTimeoutMs: Int = 60_000,
         purpose: Purpose = Purpose.FRIEND_PROFILE,
         binding: Binding? = null,
+        canContinue: () -> Boolean = { true },
     ): ChatResult = withContext(Dispatchers.IO) {
         if (!isMasterEnabled) return@withContext ChatResult(null, "AI 助手总开关已关闭")
         val selected = binding ?: capture(purpose)
             ?: return@withContext ChatResult(null, "请先选择模型，等待当前微信账号的消息库就绪")
-        if (selected.purpose != purpose || !isCurrent(selected)) {
+        if (selected.purpose != purpose) {
             return@withContext ChatResult(null, "模型配置或微信账号已变更，请重新启动任务")
         }
         try {
@@ -175,17 +179,41 @@ internal object AiConfig {
                 else -> null
             }
             val body = requestBody(selected.model, messages, tools, temperature, replyOptions)
-            val request = Request.Builder().url(selected.endpoint)
-                .header("Authorization", "Bearer ${selected.apiKey}")
-                .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
-                .build()
-            val response = SmartReplyClient.request(request, purpose.owner, readTimeoutMs)
-            if (!isCurrent(selected)) ChatResult(null, "模型配置或微信账号已变更，请重新启动任务")
+            val response = compatibleRequest(selected, body, readTimeoutMs, canContinue)
+            if (response == null) ChatResult(null, "请求授权、模型配置或微信账号已变更，请重新启动任务")
+            else if (!isCurrent(selected)) ChatResult(null, "模型配置或微信账号已变更，请重新启动任务")
             else parseResponse(response)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             ChatResult(null, SmartReplyClient.errorText(e))
+        }
+    }
+
+    private suspend fun compatibleRequest(
+        binding: Binding,
+        initialBody: JsonObject,
+        timeoutMs: Int,
+        canContinue: () -> Boolean,
+    ): String? {
+        var body = initialBody
+        val requestBuilder = Request.Builder().url(binding.endpoint)
+            .header("Authorization", "Bearer ${binding.apiKey}")
+        while (true) {
+            val sent = body.keys.intersect(compatibilityParameters)
+            val request = requestBuilder
+                .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+            currentCoroutineContext().ensureActive()
+            if (!isCurrent(binding) || !canContinue()) return null
+            try {
+                return SmartReplyClient.request(request, binding.purpose.owner, timeoutMs, sent)
+            } catch (failure: SmartReplyClient.Failure) {
+                val rejected = sent.intersect(failure.rejectedParameters)
+                if (rejected.isEmpty()) throw failure
+                // A rejected option can be removed once. Never retry a chargeable or uncertain result.
+                body = JsonObject(body - rejected)
+            }
         }
     }
 

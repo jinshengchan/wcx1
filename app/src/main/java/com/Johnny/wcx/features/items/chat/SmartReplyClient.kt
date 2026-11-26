@@ -3,6 +3,8 @@ package com.Johnny.wcx.features.items.chat
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -26,9 +28,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-/** Shared transport for explicitly enabled reply features. Never retry, follow redirects or log credentials / chat content. */
+/** Shared transport. Each call makes at most one attempt and never follows redirects or logs the payload. */
 internal object SmartReplyClient {
-    class Failure(message: String) : IOException(message)
+    class Failure(message: String, val rejectedParameters: Set<String> = emptySet()) : IOException(message)
     /** Only fixed descriptions and exception type names; never include exception.message. */
     fun errorText(error: Throwable): String {
         if (error is Failure) return error.message ?: "请求失败 [API]"
@@ -90,7 +92,12 @@ internal object SmartReplyClient {
         return url.newBuilder().encodedPath(base + if (models) "/models" else "/chat/completions").build()
     }
 
-    suspend fun request(request: Request, owner: Owner = Owner.MANUAL, readTimeoutMs: Int? = null): String = suspendCancellableCoroutine { continuation ->
+    suspend fun request(
+        request: Request,
+        owner: Owner = Owner.MANUAL,
+        readTimeoutMs: Int? = null,
+        optionalParameters: Set<String> = emptySet(),
+    ): String = suspendCancellableCoroutine { continuation ->
         val client = if (readTimeoutMs == null) http else {
             val timeout = readTimeoutMs.coerceIn(1000, 180_000).toLong()
             http.newBuilder().readTimeout(timeout, TimeUnit.MILLISECONDS)
@@ -115,7 +122,10 @@ internal object SmartReplyClient {
             override fun onResponse(call: Call, response: Response) {
                 val result = runCatching {
                     response.use {
-                        if (!it.isSuccessful) throw Failure("HTTP ${it.code}，请检查地址、密钥、模型及服务配额")
+                        if (!it.isSuccessful) throw Failure(
+                            "HTTP ${it.code}，请检查地址、密钥、模型及服务配额",
+                            it.rejectedOptionalParameters(optionalParameters),
+                        )
                         val source = it.body.source()
                         if (source.request(256 * 1024L + 1)) throw Failure("API 响应过大")
                         source.readUtf8()
@@ -128,6 +138,35 @@ internal object SmartReplyClient {
                 )
             }
         })
+    }
+
+    private val parameterRejectionCodes = setOf(
+        "unsupported_parameter", "unsupported_value", "unknown_parameter", "unrecognized_parameter",
+    )
+    private val genericRequestCodes = setOf("invalid_request_error", "invalid_request", "bad_request", "400", "422")
+
+    private fun Response.rejectedOptionalParameters(sent: Set<String>): Set<String> {
+        if (sent.isEmpty() || (code != 400 && code != 422)) return emptySet()
+        val raw = runCatching { peekBody(8 * 1024L).string() }.getOrNull() ?: return emptySet()
+        val json = runCatching { Json.parseToJsonElement(raw) }.getOrNull()
+        val error = (json as? JsonObject)?.get("error") ?: json
+        val fields = error as? JsonObject
+        val parameter = (fields?.get("param") as? JsonPrimitive)?.contentOrNull
+        val reason = (fields?.get("code") as? JsonPrimitive)?.contentOrNull
+            ?: (fields?.get("type") as? JsonPrimitive)?.contentOrNull
+        if (reason in parameterRejectionCodes && parameter != null) return sent.intersect(setOf(parameter))
+        // Explicit errors such as authentication, quota and context limits are terminal.
+        if (reason != null && reason !in genericRequestCodes && reason !in parameterRejectionCodes) return emptySet()
+
+        val message = (fields?.get("message") as? JsonPrimitive)?.contentOrNull
+            ?: (error as? JsonPrimitive)?.contentOrNull
+            ?: if (json == null) raw else return emptySet()
+        return sent.filterTo(mutableSetOf()) { parameterName ->
+            val name = Regex.escape(parameterName)
+            val before = """\b(?:unsupported|unknown|unrecognized|unexpected) (?:request )?(?:parameter|argument|field)(?: supplied)?\s*[:=]?\s*['"\x60]?$name\b(?![./-]\w|\[)"""
+            val after = """(?<![\w.])$name\b['"\x60]?\s+(?:is (?:not supported|not allowed|unsupported|unrecognized)|must be (?:less than|at most|between))\b"""
+            Regex("$before|$after", RegexOption.IGNORE_CASE).containsMatchIn(message)
+        }
     }
 
     fun parseReplies(body: String, count: Int): List<String> {

@@ -64,17 +64,21 @@ internal object AiAssistantTools {
         }
     }.joinToString("\n").take(MAX_CONTEXT)
 
-    private fun messages(account: String, talker: String, from: Long, limit: Int): List<WeMessage> =
+    private fun messages(
+        account: String, talker: String, from: Long, limit: Int, end: Long = nowEnd(),
+    ): List<WeMessage> =
         WeDatabaseApi.getMessagesBetween(
-            talker, from, nowEnd(), limit, MessageRendering.GROUP_CHAT_TYPES,
+            talker, from, end, limit, MessageRendering.GROUP_CHAT_TYPES,
             newestFirst = true, account = account,
         )
 
-    private fun multiConversation(account: String, from: Long, unreadOnly: Boolean, waiting: Boolean): String =
+    private fun multiConversation(
+        account: String, from: Long, unreadOnly: Boolean, waiting: Boolean, end: Long? = null,
+    ): String =
         WeDatabaseApi.aiConversationCandidates(account, from, unreadOnly).asSequence()
             .filter(::visible).take(MAX_CONVERSATIONS)
             .mapNotNull { talker ->
-                val recent = messages(account, talker, from, 8)
+                val recent = messages(account, talker, from, 8, end ?: nowEnd())
                 if (waiting && recent.firstOrNull()?.isSend != 0) return@mapNotNull null
                 val text = render(recent.asReversed())
                 text.takeIf { it.isNotBlank() }?.let { "【${displayName(talker)}】\n$it" }
@@ -89,6 +93,7 @@ internal object AiAssistantTools {
         imageId: Long? = null,
         workGoal: String = "",
         includeProfile: Boolean = false,
+        reportDate: LocalDate? = null,
     ): String {
         check(AiConfig.isCurrent(binding)) { "总开关、模型配置或微信账号已变化" }
         check(talker == null || visible(talker)) { "当前会话不可用于 AI 工具" }
@@ -105,13 +110,16 @@ internal object AiAssistantTools {
             AiTool.UNREAD -> multiConversation(account, dayStart(today.minusDays(7)), unreadOnly = true, waiting = false)
             AiTool.TODAY -> multiConversation(account, dayStart(today), unreadOnly = false, waiting = false)
             AiTool.DAILY_REPORT -> {
-                val conversations = multiConversation(account, dayStart(today), unreadOnly = false, waiting = false)
+                val date = reportDate ?: today
+                val from = dayStart(date)
+                val end = minOf(nowEnd(), dayStart(date.plusDays(1)))
+                val conversations = multiConversation(account, from, unreadOnly = false, waiting = false, end = end)
                 val progress = GroupDigestStore.loadGroups(account).asSequence()
                     .filter { visible(it.groupId) }
                     .take(MAX_CONVERSATIONS)
                     .mapNotNull { group ->
                         GroupDigestStore.readConfig(group.groupId, account)?.takeIf {
-                            it.workGroup && it.workProgressAt / 1000 >= dayStart(today) && it.workProgress.isNotBlank()
+                            it.workGroup && it.workProgressAt / 1000 in from until end && it.workProgress.isNotBlank()
                         }?.let { "【${group.name.take(60)}】${it.workProgress.take(500)}" }
                     }.joinToString("\n").take(3000)
                 listOf(

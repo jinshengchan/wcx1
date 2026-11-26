@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -16,6 +17,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -106,15 +108,17 @@ private fun AiSettingSwitch(label: String, checked: Boolean, onCheckedChange: (B
 }
 
 @Composable
-internal fun AiAssistantReports(context: Context, account: String) {
+internal fun AiAssistantReports(context: Context, account: String) = key(account) {
     val scope = rememberCoroutineScope()
     var revision by remember { mutableIntStateOf(0) }
+    var selectedDate by remember { mutableStateOf<String?>(null) }
     val report by produceState(AiDailyReportState(), account, revision) {
         while (true) {
             value = withContext(Dispatchers.IO) { AiDailyReport.read(account) }
             delay(2000)
         }
     }
+    val recentReports = remember(report.history) { report.recentReports }
     val alerts by produceState(emptyList<AiImportantAlert>(), account, revision) {
         while (true) {
             value = withContext(Dispatchers.IO) { AiImportantAlerts.pending(account) }
@@ -140,12 +144,7 @@ internal fun AiAssistantReports(context: Context, account: String) {
         Text("每日总结", style = MaterialTheme.typography.titleSmall)
         if (selection == null) Text("请先在设置中选择工具模型。")
         Button(enabled = selection != null, onClick = {
-            showAiTool(context, AiTool.DAILY_REPORT, onResult = { answer ->
-                scope.launch {
-                    withContext(Dispatchers.IO) { AiDailyReport.saveReport(account, answer) }
-                    revision++
-                }
-            })
+            showAiTool(context, AiTool.DAILY_REPORT, expectedAccount = account, onResult = { revision++ })
         }) { Text("生成今天的总结") }
         OutlinedTextField(
             value = hourText,
@@ -182,11 +181,33 @@ internal fun AiAssistantReports(context: Context, account: String) {
             }
         }) { Text(if (configured) "更新定时设置" else "开启定时") }
         if (report.lastError.isNotBlank()) Text(report.lastError)
-        if (report.text.isNotBlank()) {
+        recentReports.firstOrNull()?.let { (date, entry) ->
             HorizontalDivider()
-            Text(timeLabel(report.reportAt))
-            Text(report.text)
+            Text("最新总结 · $date", style = MaterialTheme.typography.titleSmall)
+            Text(timeLabel(entry.reportAt))
+            Text(entry.text)
         }
+        if (recentReports.size > 1) {
+            HorizontalDivider()
+            Text("历史总结", style = MaterialTheme.typography.titleSmall)
+            recentReports.drop(1).forEach { (date, _) ->
+                TextButton(onClick = { selectedDate = date }) { Text(date) }
+            }
+        }
+    }
+    recentReports.firstOrNull { it.key == selectedDate }?.let { (date, entry) ->
+        AlertDialog(
+            onDismissRequest = { selectedDate = null },
+            title = { Text(date) },
+            text = {
+                Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(timeLabel(entry.reportAt))
+                    Text(entry.text)
+                }
+            },
+            confirmButton = { TextButton(onClick = { selectedDate = null }) { Text("关闭") } },
+        )
     }
 }
 

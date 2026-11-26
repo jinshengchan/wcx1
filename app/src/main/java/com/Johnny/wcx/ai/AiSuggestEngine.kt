@@ -101,7 +101,7 @@ internal object AiSuggestEngine {
                     if (closing) messages += AiConfig.ChatMessage("user", "请按要求输出解读和回复候选的 JSON。")
                     val result = AiConfig.requestWithTools(
                         messages, if (closing) null else tools, readTimeoutMs = 45_000,
-                        purpose = binding.purpose, binding = binding,
+                        purpose = binding.purpose, binding = binding, canContinue = ::current,
                     )
                     if (!current()) return@withTimeoutOrNull changed
                     if (manual) {
