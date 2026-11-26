@@ -373,7 +373,7 @@ object SportLikeAll : ClickableFeature(), IResolveDex {
         val rankId = sessionRankId
         val appUsername = sessionAppUsername
         if (account.isBlank() || account != sessionRankAccount || rankId.isBlank()) {
-            showToastSafe("请先打开当前微信运动排行榜")
+            showToast("请先打开当前微信运动排行榜")
             return
         }
         previewPending = true
@@ -382,7 +382,7 @@ object SportLikeAll : ClickableFeature(), IResolveDex {
                 val rows = runCatching { queryUnlikedRows(account, rankId, appUsername) }.getOrDefault(emptyList())
                 withContext(Dispatchers.Main) {
                     if (rows.isEmpty() || WeApi.selfWxId != account || sessionRankId != rankId || !isActive) {
-                        showToastSafe("当前排行没有可点赞的好友")
+                        showToast("当前排行没有可点赞的好友")
                         return@withContext
                     }
                     showComposeDialog(context) {
@@ -491,7 +491,8 @@ object SportLikeAll : ClickableFeature(), IResolveDex {
         val pending = queue.size
         queue.clear()
         val status = reason ?: "点赞完成"
-        showToastSafe("$status：成功 $successCount，失败 $failCount，待确认 $unconfirmedCount，未提交 $pending")
+        val message = "$status：成功 $successCount，失败 $failCount，待确认 $unconfirmedCount，未提交 $pending"
+        mainHandler.post { showToast(message) }
     }
 
     private fun stopSession() {
