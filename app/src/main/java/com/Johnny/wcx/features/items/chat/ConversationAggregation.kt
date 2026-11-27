@@ -52,6 +52,7 @@ import com.tencent.mm.ui.LauncherUI
 import com.tencent.mm.ui.conversation.BaseConversationUI
 import com.tencent.mm.ui.conversation.ConvBoxServiceConversationUI
 import com.tencent.mm.ui.conversation.MainUI
+import com.tencent.wcdb.database.SQLiteDatabase
 import dev.ujhhgtg.reflekt.reflekt
 import dev.ujhhgtg.reflekt.utils.Modifiers
 import dev.ujhhgtg.reflekt.utils.isSubclassOf
@@ -62,6 +63,7 @@ import com.Johnny.wcx.features.api.core.WeDatabaseApi
 import com.Johnny.wcx.features.api.core.models.SelfProfileField
 import com.Johnny.wcx.features.api.core.WeDatabaseListenerApi
 import com.Johnny.wcx.features.api.core.models.IWeContact
+import com.Johnny.wcx.features.api.ui.WeConversationContextMenuApi
 import com.Johnny.wcx.features.api.ui.WeStartActivityApi
 import com.Johnny.wcx.features.api.ui.WeMainActivityBeautifyApi
 import com.Johnny.wcx.features.core.ClickableFeature
@@ -103,7 +105,7 @@ import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import java.lang.reflect.Modifier as JavaModifier
 
-@Feature(name = "对话归拢", categories = ["聊天"], description = "将多个对话归拢在一个文件夹内\n设置对话头像需同时启用「自定义好友本地头像」")
+@Feature(name = "对话归拢", categories = ["聊天"], description = "将多个对话归拢在一个文件夹内，支持长按加入和设置文件夹头像")
 object ConversationAggregation : ClickableFeature(),
     WeDatabaseListenerApi.IQueryListener,
     WeDatabaseListenerApi.IInsertListener,
@@ -172,6 +174,8 @@ object ConversationAggregation : ClickableFeature(),
     private val MENTION_MEMBER: Int get() = parseColor(mentionMemberColor, DEFAULT_MEMBER_COLOR)
     private val MEMBER_PAREN_REGEX = Regex("[（(][^（）()]+[）()]")
     private val CHAT_COUNT_REGEX = Regex("\\[[^\\]]*\\u4e2a(?:\\u804a\\u5929|\\u6d88\\u606f)\\]")
+    private val AVATAR_SENDER_ID = Regex("[A-Za-z0-9_@-]{1,64}")
+    private val GROUP_AVATAR_SENDER_PREFIX = Regex("^([A-Za-z0-9_@-]{1,64}):\\r?\\n")
 
     // 归拢配置按账号隔离：每个账号独立配置文件，避免切换账号后
     // 显示其他账号的归拢文件夹（成员存的是该账号的联系人/群聊）。
@@ -315,7 +319,11 @@ object ConversationAggregation : ClickableFeature(),
     private const val SQLITE_BIND_CHUNK_SIZE = 900
     private val pendingRefreshMembers = ConcurrentHashMap.newKeySet<String>()
     private val pendingRefreshLock = Any()
+    private val folderWriteLock = Any()
     private val refreshAllFolders = AtomicBoolean(false)
+
+    @Volatile
+    private var folderAvatarSnapshot: FolderAvatarSnapshot? = null
 
     @Volatile
     private var refreshThread: HandlerThread? = null
@@ -371,13 +379,8 @@ object ConversationAggregation : ClickableFeature(),
         WeLogger.i(TAG, "onEnable: done")
         diagFile("onEnable: done")
 
-        CustomLocalFriendAvatars.fallbackUsernameProvider = { folderId ->
-            if (isFolderId(folderId) && !CustomLocalFriendAvatars.avatarMap.containsKey(folderId)) {
-                getFallbackAvatarMember(folderId)
-            } else {
-                null
-            }
-        }
+        CustomLocalFriendAvatars.setFolderAvatarFallback(::getFallbackAvatarMember)
+        WeConversationContextMenuApi.addProvider(AddToAggregationFolder)
 
         // Restore the materialized folder rows when re-enabled at runtime (DB already up), since
         // onDisable released them. On cold startup the DB isn't ready yet and this is a no-op —
@@ -391,13 +394,17 @@ object ConversationAggregation : ClickableFeature(),
         WeDatabaseListenerApi.removeListener(this)
         WeStartActivityApi.removeListener(this)
         WeDatabaseApi.removeDatabaseSwitchListener(::onDatabaseSwitched)
-        CustomLocalFriendAvatars.fallbackUsernameProvider = null
+        WeConversationContextMenuApi.removeProvider(AddToAggregationFolder)
+        CustomLocalFriendAvatars.setFolderAvatarFallback(null)
         stopRefreshThread()
 
         // Release every folder back to the homepage — unmap members and delete all wekit_folder_*
         // rows — so disabling doesn't leave ghost aggregate conversations behind, exactly as if the
         // user had deleted every folder. The saved config is left untouched so onEnable can restore.
-        releaseAllFolders()
+        synchronized(folderWriteLock) {
+            folderAvatarSnapshot = null
+            releaseAllFolders()
+        }
     }
 
     /**
@@ -417,6 +424,7 @@ object ConversationAggregation : ClickableFeature(),
             foldersCache = null
             foldersCacheWxid = null
             folderMembersCache.clear()
+            folderAvatarSnapshot = null
             if (WeDatabaseApi.isReady && isFolderSchemaReady()) {
                 syncFoldersToDatabase()
                 WeConversationApi.reloadConversations()
@@ -554,6 +562,7 @@ object ConversationAggregation : ClickableFeature(),
      * auto mode (members are computed, not hand-picked); callers surface that to the user.
      */
     fun showAddToFolderDialog(context: Context, folderId: String, talker: String): Boolean {
+        if (!isActive) return false
         val folder = folderById(folderId) ?: return false
         if (folder.type != FolderType.MANUAL) return false
         val updated = folder.copy(members = (folder.members + talker).distinct().sorted())
@@ -576,6 +585,7 @@ object ConversationAggregation : ClickableFeature(),
      * folder is missing or in an auto mode (members are computed, not hand-picked).
      */
     fun addToFolder(folderId: String, talker: String): Boolean {
+        if (!isActive || talker.isBlank() || isFolderId(talker)) return false
         val folder = folderById(folderId) ?: return false
         if (folder.type != FolderType.MANUAL) return false
         if (talker !in folder.members) {
@@ -690,6 +700,9 @@ object ConversationAggregation : ClickableFeature(),
 
     private fun doRefreshFolderSummaries() {
         if (!WeDatabaseApi.isReady) return
+        val handler = refreshHandler ?: return
+        if (handler.looper.thread !== Thread.currentThread()) return
+        val database = WeDatabaseApi.db
         val folders = loadFolders()
         if (folders.isEmpty()) return
         val changedMembers = synchronized(pendingRefreshLock) {
@@ -718,14 +731,19 @@ object ConversationAggregation : ClickableFeature(),
             withQueryRewriteSuppressed {
                 if (!isFolderSchemaReady()) return@withQueryRewriteSuppressed
                 val affectedMembers = membersByFolder.filterKeys { it in affectedFolderIds }
-                WeDatabaseApi.transaction {
-                    affectedMembers.forEach { (folderId, members) ->
-                        reanchorFolderMembers(folderId, members)
+                val (summaries, avatars) = readFolderSummaries(affectedMembers)
+                synchronized(folderWriteLock) {
+                    if (refreshHandler !== handler || WeDatabaseApi.db !== database) return
+                    WeDatabaseApi.transaction {
+                        affectedMembers.forEach { (folderId, members) ->
+                            reanchorFolderMembers(folderId, members)
+                        }
+                        affectedFolderIds.forEach { folderId ->
+                            writeFolderSummaryRow(folderId, summaries[folderId] ?: FolderSummary())
+                        }
                     }
-                    val summaries = readFolderSummaries(affectedMembers)
-                    affectedFolderIds.forEach { folderId ->
-                        writeFolderSummaryRow(folderId, summaries[folderId] ?: FolderSummary())
-                    }
+                    val current = folderAvatarSnapshot?.takeIf { it.database === database }?.senders.orEmpty()
+                    folderAvatarSnapshot = FolderAvatarSnapshot(database, (current - affectedFolderIds) + avatars)
                 }
             }
             WeConversationApi.reloadConversations()
@@ -769,8 +787,9 @@ object ConversationAggregation : ClickableFeature(),
     }
 
     private fun stopRefreshThread() {
-        refreshHandler?.removeCallbacksAndMessages(null)
+        val handler = refreshHandler
         refreshHandler = null
+        handler?.removeCallbacksAndMessages(null)
         refreshThread?.quitSafely()
         refreshThread = null
         synchronized(pendingRefreshLock) { pendingRefreshMembers.clear() }
@@ -1849,18 +1868,29 @@ object ConversationAggregation : ClickableFeature(),
 
     private fun reconcileFolders(folders: List<ChatFolder>) {
         if (!WeDatabaseApi.isReady) return
+        val handler = refreshHandler ?: return
+        if (handler.looper.thread !== Thread.currentThread()) return
+        val database = WeDatabaseApi.db
+        val previousAvatars = folderAvatarSnapshot?.takeIf { it.database === database }?.senders
         val startedAt = SystemClock.elapsedRealtime()
-        var databaseChanged = false
+        var reload = false
         runCatching {
             withQueryRewriteSuppressed {
                 if (!isFolderSchemaReady()) return@withQueryRewriteSuppressed
                 folderMembersCache.clear()
                 val desiredMembers = resolveOwnedMembers(folders)
+                if (previousAvatars == null) synchronized(folderWriteLock) {
+                    if (refreshHandler !== handler || WeDatabaseApi.db !== database) return
+                    folderAvatarSnapshot = FolderAvatarSnapshot(
+                        database,
+                        desiredMembers.mapNotNull { (folderId, members) -> members.firstOrNull()?.let { folderId to it } }
+                            .toMap()
+                    )
+                }
                 val desiredOwners = reverseMemberIndex(desiredMembers)
                 val currentOwners = readCurrentMemberOwners()
                 val storedRows = readStoredFolderRows()
                 val liveFlags = storedRows.mapValues { it.value.flag }
-                persistChangedPinFlags(folders, liveFlags)
 
                 val desiredFolderIds = folders.mapTo(linkedSetOf()) { it.id }
                 val storedFolderIds = readStoredFolderIds()
@@ -1874,7 +1904,7 @@ object ConversationAggregation : ClickableFeature(),
                 }
                 val existingContacts = readFolderContactNames(desiredFolderIds)
                 val existingAvatarRows = readExistingAvatarRows(desiredFolderIds)
-                val summaries = readFolderSummaries(desiredMembers, storedRows)
+                val (summaries, avatars) = readFolderSummaries(desiredMembers, storedRows)
                 val changedSummaries = folders.mapNotNull { folder ->
                     val summary = summaries[folder.id] ?: FolderSummary()
                     val stored = storedRows[folder.id]
@@ -1888,41 +1918,47 @@ object ConversationAggregation : ClickableFeature(),
                         null
                     }
                 }
-                databaseChanged = changedBindings.isNotEmpty() || changedSummaries.isNotEmpty() ||
+                val databaseChanged = changedBindings.isNotEmpty() || changedSummaries.isNotEmpty() ||
                         removedMembers.isNotEmpty() || removedFolderIds.isNotEmpty() ||
                         folders.any { it.id !in storedRows || existingContacts[it.id] != it.name } ||
                         desiredFolderIds.any { it !in existingAvatarRows }
 
-                if (databaseChanged) {
-                    WeDatabaseApi.transaction {
-                        deleteEmptyPlaceholderRows(removedMembers)
-                        unbindMembers(removedMembers)
-                        ensureManualMemberRows(folders, changedBindings.keys)
-                        bindMembers(changedBindings)
-                        deleteStoredFolders(removedFolderIds)
+                synchronized(folderWriteLock) {
+                    if (refreshHandler !== handler || WeDatabaseApi.db !== database) return
+                    persistChangedPinFlags(folders, liveFlags)
+                    if (databaseChanged) {
+                        WeDatabaseApi.transaction {
+                            deleteEmptyPlaceholderRows(removedMembers)
+                            unbindMembers(removedMembers)
+                            ensureManualMemberRows(folders, changedBindings.keys)
+                            bindMembers(changedBindings)
+                            deleteStoredFolders(removedFolderIds)
 
-                        folders.forEach { folder ->
-                            if (folder.id !in storedRows) {
-                                ensureFolderConversationRow(folder)
+                            folders.forEach { folder ->
+                                if (folder.id !in storedRows) {
+                                    ensureFolderConversationRow(folder)
+                                }
+                                if (existingContacts[folder.id] != folder.name) {
+                                    writeFolderContact(folder)
+                                }
+                                if (folder.id !in existingAvatarRows) {
+                                    writeFolderAvatar(folder.id)
+                                }
                             }
-                            if (existingContacts[folder.id] != folder.name) {
-                                writeFolderContact(folder)
-                            }
-                            if (folder.id !in existingAvatarRows) {
-                                writeFolderAvatar(folder.id)
-                            }
-                        }
 
-                        changedSummaries.forEach { (folderId, summary) ->
-                            writeFolderSummaryRow(folderId, summary)
+                            changedSummaries.forEach { (folderId, summary) ->
+                                writeFolderSummaryRow(folderId, summary)
+                            }
                         }
                     }
-                }
 
-                membersByFolder = desiredMembers
-                folderByMember = desiredOwners
-                desiredMembers.forEach { (folderId, members) ->
-                    folderMembersCache[folderId] = members
+                    membersByFolder = desiredMembers
+                    folderByMember = desiredOwners
+                    desiredMembers.forEach { (folderId, members) ->
+                        folderMembersCache[folderId] = members
+                    }
+                    folderAvatarSnapshot = FolderAvatarSnapshot(database, avatars)
+                    reload = databaseChanged || avatars != previousAvatars
                 }
 
                 WeLogger.i(
@@ -1932,7 +1968,7 @@ object ConversationAggregation : ClickableFeature(),
                             "elapsed=${SystemClock.elapsedRealtime() - startedAt}ms"
                 )
             }
-            if (databaseChanged) WeConversationApi.reloadConversations()
+            if (reload) WeConversationApi.reloadConversations()
         }.onFailure {
             WeLogger.e(TAG, "failed to sync folders", it)
         }
@@ -2239,7 +2275,7 @@ object ConversationAggregation : ClickableFeature(),
     private fun readFolderSummaries(
         byFolder: Map<String, List<String>>,
         storedRows: Map<String, StoredFolderRow> = emptyMap()
-    ): Map<String, FolderSummary> {
+    ): FolderSummaryBatch {
         val ownerByMember = reverseMemberIndex(byFolder)
         val states = byFolder.mapValuesTo(linkedMapOf()) { SummaryAccumulator() }
         val members = ownerByMember.keys.toList()
@@ -2294,6 +2330,7 @@ object ConversationAggregation : ClickableFeature(),
                         val remark = cursor.getStringOrEmpty(ContactTable.CON_REMARK)
                         val displayName = if (username.endsWith("@chatroom")) nickname else remark.ifBlank { nickname }
                         state.latest = MemberSummaryRow(
+                            username = username,
                             digest = prefixWithConversationName(
                                 displayName.takeIf { it.isNotBlank() && it != username },
                                 stripWxidPrefix(cursor.getStringOrEmpty(ConversationTable.DIGEST)),
@@ -2314,7 +2351,7 @@ object ConversationAggregation : ClickableFeature(),
             }
         }
 
-        return states.mapValues { (folderId, state) ->
+        val summaries = states.mapValues { (folderId, state) ->
             val latest = state.latest
             if (latest == null) {
                 FolderSummary(
@@ -2347,7 +2384,28 @@ object ConversationAggregation : ClickableFeature(),
                 )
             }
         }
+        val selfWxid = if (states.values.any { it.latest?.isSend == 1 }) currentAccountWxid() else null
+        val avatarSenders = states.mapNotNull { (folderId, state) ->
+            val sender = state.latest?.takeIf { it.conversationTime > 0 }?.let { latest ->
+                resolveFolderAvatarSender(latest, selfWxid)
+            } ?: byFolder[folderId]?.firstOrNull()
+            sender?.let { folderId to it }
+        }.toMap()
+        return FolderSummaryBatch(summaries, avatarSenders)
     }
+
+    private fun resolveFolderAvatarSender(latest: MemberSummaryRow, selfWxid: String?): String {
+        if (latest.isSend == 1) return selfWxid ?: latest.username
+        if (!latest.username.endsWith("@chatroom")) return latest.username
+        // digestUser is WeChat's sender account; some message types leave it empty and
+        // put the account before the group-message prefix instead.
+        val sender = latest.digestUser.trim().takeIf(::validFolderAvatarSender)
+            ?: GROUP_AVATAR_SENDER_PREFIX.find(latest.content)?.groupValues?.get(1)?.takeIf(::validFolderAvatarSender)
+        return sender ?: latest.username
+    }
+
+    private fun validFolderAvatarSender(value: String): Boolean =
+        value.matches(AVATAR_SENDER_ID) && !value.endsWith("@chatroom") && value != "system" && !isFolderId(value)
 
     /** 判断最新摘要/消息是否为「@所有人」群发提及，用于把 [有人@我] 换成 [全体]。
      *  微信摘要的 @所有人 形式多样（"@所有人"、"所有人:"、"全体成员" 等），
@@ -2563,6 +2621,7 @@ object ConversationAggregation : ClickableFeature(),
             var titleEnabled by remember { mutableStateOf(folderTitleEnabled) }
             var selfEnabled by remember { mutableStateOf(mentionSelfEnabled) }
             var memberEnabled by remember { mutableStateOf(mentionMemberEnabled) }
+            var openSettingsAfterAdd by remember { mutableStateOf(AddToAggregationFolder.showConfigDialog) }
 
             AlertDialogContent(
                 modifier = Modifier
@@ -2577,6 +2636,10 @@ object ConversationAggregation : ClickableFeature(),
                         ) {
                             item {
                                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("添加后打开文件夹配置", modifier = Modifier.weight(1f))
+                                        Switch(checked = openSettingsAfterAdd, onCheckedChange = { openSettingsAfterAdd = it })
+                                    }
                                     Text("摘要颜色")
                                     WeColorField(label = "[全体]/[有人@我]", value = atColor, onValueChange = { atColor = it })
                                     WeColorField(label = "[N个聊天]/[N个消息]", value = countColor, onValueChange = { countColor = it })
@@ -2643,6 +2706,7 @@ object ConversationAggregation : ClickableFeature(),
                         folderTitleEnabled = titleEnabled
                         mentionSelfEnabled = selfEnabled
                         mentionMemberEnabled = memberEnabled
+                        AddToAggregationFolder.showConfigDialog = openSettingsAfterAdd
                         saveFolders(folders)
                         syncFoldersToDatabase()
                         showToast(context, "已保存, 重启微信生效")
@@ -2857,11 +2921,9 @@ object ConversationAggregation : ClickableFeature(),
                                     }
                                 }
                                 Button(onClick = {
-                                    if (!CustomLocalFriendAvatars.isEnabled) {
-                                        showToast("请启用「自定义好友本地头像」以使用头像相关功能!")
+                                    CustomLocalFriendAvatars.selectAvatarImage(HostInfo.application, folderId) {
+                                        hasAvatar = true
                                     }
-
-                                    CustomLocalFriendAvatars.selectAvatarImage(HostInfo.application, folderId)
                                 }) {
                                     Text(if (hasAvatar) "更换头像" else "设置头像")
                                 }
@@ -2943,7 +3005,9 @@ object ConversationAggregation : ClickableFeature(),
                                 Button(
                                     modifier = Modifier.weight(1f),
                                     onClick = {
-                                        CustomLocalFriendAvatars.selectAvatarImage(HostInfo.application, folderId)
+                                        CustomLocalFriendAvatars.selectAvatarImage(HostInfo.application, folderId) {
+                                            hasAvatar = true
+                                        }
                                     }
                                 ) {
                                     Text(if (hasAvatar) "更换头像" else "设置头像")
@@ -2968,7 +3032,9 @@ object ConversationAggregation : ClickableFeature(),
                                 Button(
                                     modifier = Modifier.weight(1f),
                                     onClick = {
-                                        CustomLocalFriendAvatars.selectAvatarImage(HostInfo.application, folderId)
+                                        CustomLocalFriendAvatars.selectAvatarImage(HostInfo.application, folderId) {
+                                            hasAvatar = true
+                                        }
                                     }
                                 ) {
                                     Text(if (hasAvatar) "更换头像" else "设置头像")
@@ -3016,7 +3082,9 @@ object ConversationAggregation : ClickableFeature(),
                                 Button(
                                     modifier = Modifier.weight(1f),
                                     onClick = {
-                                        CustomLocalFriendAvatars.selectAvatarImage(HostInfo.application, folderId)
+                                        CustomLocalFriendAvatars.selectAvatarImage(HostInfo.application, folderId) {
+                                            hasAvatar = true
+                                        }
                                     }
                                 ) {
                                     Text(if (hasAvatar) "更换头像" else "设置头像")
@@ -3118,42 +3186,8 @@ object ConversationAggregation : ClickableFeature(),
         return resolved
     }
 
-    private fun getFallbackAvatarMember(folderId: String): String? {
-        val folder = folderById(folderId) ?: return null
-        val members = getFolderMembers(folder).filterNot(::isFolderId).distinct()
-        if (members.isEmpty()) return null
-        // Prefer the member whose conversation most recently saw activity: WeChat bumps
-        // rconversation.conversationTime on every sent or received message, so the folder
-        // borrows the avatar of the chat that last lit up rather than an arbitrary first
-        // member. Falls back to the first member when none of them has any message yet.
-        return latestActiveMember(members) ?: members.firstOrNull()
-    }
-
-    /** Member with the newest conversationTime (latest sent/received message), or null. */
-    private fun latestActiveMember(members: List<String>): String? {
-        if (members.isEmpty() || !WeDatabaseApi.isReady) return null
-        return runCatching {
-            // Suppress the container SQL fallback while querying aggregate members directly.
-            withQueryRewriteSuppressed {
-                val placeholders = members.joinToString(",") { "?" }
-                val cursor = WeDatabaseApi.rawQuery(
-                    """
-                    SELECT ${ConversationTable.USERNAME}
-                    FROM ${ConversationTable.NAME}
-                    WHERE ${ConversationTable.USERNAME} IN ($placeholders) AND ${ConversationTable.CONVERSATION_TIME} > 0
-                    ORDER BY ${ConversationTable.CONVERSATION_TIME} DESC
-                    LIMIT 1
-                    """.trimIndent(),
-                    arrayOf(*members.toTypedArray())
-                )
-                cursor.use { c ->
-                    if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null
-                }
-            }
-        }.onFailure {
-            WeLogger.w(TAG, "failed to resolve latest active member", it)
-        }.getOrNull()
-    }
+    private fun getFallbackAvatarMember(folderId: String): String? =
+        folderAvatarSnapshot?.takeIf { WeDatabaseApi.isReady && it.database === WeDatabaseApi.db }?.senders?.get(folderId)
 
     private fun loadFolders(): List<ChatFolder> {
         val wxid = currentAccountWxid()
@@ -3244,6 +3278,7 @@ object ConversationAggregation : ClickableFeature(),
     )
 
     private data class MemberSummaryRow(
+        val username: String,
         val digest: String,
         val digestUser: String,
         val isSend: Int,
@@ -3253,6 +3288,10 @@ object ConversationAggregation : ClickableFeature(),
         val msgType: String,
         val chatMode: Int
     )
+
+    private data class FolderAvatarSnapshot(val database: SQLiteDatabase, val senders: Map<String, String>)
+
+    private data class FolderSummaryBatch(val summaries: Map<String, FolderSummary>, val avatarSenders: Map<String, String>)
 
     private class SummaryAccumulator {
         var latest: MemberSummaryRow? = null

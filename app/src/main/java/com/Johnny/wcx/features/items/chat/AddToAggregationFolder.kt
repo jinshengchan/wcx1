@@ -1,7 +1,6 @@
 package com.Johnny.wcx.features.items.chat
 
 import android.content.Context
-import androidx.activity.ComponentActivity
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -10,71 +9,22 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.Johnny.wcx.features.api.ui.WeConversationContextMenuApi
-import com.Johnny.wcx.features.core.ClickableFeature
-import com.Johnny.wcx.features.core.Feature
 import com.Johnny.wcx.features.items.chat.ConversationAggregation.FolderChoice
 import com.Johnny.wcx.preferences.WePrefs.Companion.prefOption
 import com.Johnny.wcx.ui.content.AlertDialogContent
-import com.Johnny.wcx.ui.content.Button
 import com.Johnny.wcx.ui.content.TextButton
 import com.Johnny.wcx.ui.utils.FolderAddIcon
 import com.Johnny.wcx.ui.utils.showComposeDialog
 import com.Johnny.wcx.utils.android.showToast
 
-@Feature(
-    name = "添加对话至归拢文件夹",
-    categories = ["聊天"],
-    description = "在首页对话列表长按菜单添加菜单项, 可将该对话加入「对话归拢」的手动文件夹\n需启用「对话归拢」"
-)
-object AddToAggregationFolder : ClickableFeature(), WeConversationContextMenuApi.IMenuItemsProvider {
-
-    private var showConfigDialog by prefOption("add_to_folder_show_config_dialog", false)
-
-    override fun onEnable() {
-        WeConversationContextMenuApi.addProvider(this)
-    }
-
-    override fun onDisable() {
-        WeConversationContextMenuApi.removeProvider(this)
-    }
-
-    override fun onClick(context: ComponentActivity) {
-        showComposeDialog(context) {
-            var showConfigInput by remember { mutableStateOf(showConfigDialog) }
-            AlertDialogContent(
-                title = { Text("添加对话至归拢文件夹") },
-                text = {
-                    ListItem(
-                        modifier = Modifier.clickable { showConfigInput = !showConfigInput },
-                        trailingContent = {
-                            Switch(checked = showConfigInput, onCheckedChange = null)
-                        },
-                        supportingContent = { Text("将对话加入文件夹后, 自动打开该文件夹的编辑对话框") },
-                        headlineContent = { Text("添加后打开配置对话框") },
-                    )
-                },
-                dismissButton = { TextButton(onDismiss) { Text("取消") } },
-                confirmButton = {
-                    Button({
-                        showConfigDialog = showConfigInput
-                        onDismiss()
-                    }) { Text("确定") }
-                }
-            )
-        }
-    }
+internal object AddToAggregationFolder : WeConversationContextMenuApi.IMenuItemsProvider {
+    var showConfigDialog by prefOption("add_to_folder_show_config_dialog", false)
 
     override fun getMenuItems(): List<WeConversationContextMenuApi.MenuItem> {
         return listOf(
@@ -84,7 +34,8 @@ object AddToAggregationFolder : ClickableFeature(), WeConversationContextMenuApi
                 drawable = FolderAddIcon,
                 shouldShow = { context, _ ->
                     val talker = context.talker
-                    talker.isNotEmpty() && !ConversationAggregation.isAggregationFolderId(talker)
+                    ConversationAggregation.isActive && talker.isNotEmpty() &&
+                        !ConversationAggregation.isAggregationFolderId(talker)
                 },
             ) { context ->
                 onMenuClick(context.activity, context.talker)
@@ -93,7 +44,7 @@ object AddToAggregationFolder : ClickableFeature(), WeConversationContextMenuApi
     }
 
     private fun onMenuClick(context: Context, talker: String) {
-        if (!ConversationAggregation.isEnabled) {
+        if (!ConversationAggregation.isActive) {
             showToast(context, "请先启用「对话归拢」!")
             return
         }

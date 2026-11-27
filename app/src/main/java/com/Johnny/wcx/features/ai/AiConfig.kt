@@ -97,6 +97,7 @@ internal object AiConfig {
         val finishReason: String? = null,
         val reasoning: String? = null,
         val rejectedImageInput: Boolean = false,
+        val rejectedToolInput: Boolean = false,
     )
 
     internal fun account(): String? = runCatching { WeApi.selfWxId.takeIf { it.isNotBlank() } }.getOrNull()
@@ -183,14 +184,18 @@ internal object AiConfig {
             }
             val body = requestBody(selected.model, messages, tools, temperature, replyOptions, reasoningEffort)
             val hasImageInput = messages.any { it.dataImageUrls().isNotEmpty() }
-            val response = compatibleRequest(selected, body, readTimeoutMs, hasImageInput, canContinue)
+            val hasToolInput = !tools.isNullOrEmpty() || messages.any { it.toolCallId != null || !it.toolCalls.isNullOrEmpty() }
+            val response = compatibleRequest(selected, body, readTimeoutMs, hasImageInput, hasToolInput, canContinue)
             if (response == null) ChatResult(null, "请求授权、模型配置或微信账号已变更，请重新启动任务")
             else if (!isCurrent(selected)) ChatResult(null, "模型配置或微信账号已变更，请重新启动任务")
             else parseResponse(response)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            ChatResult(null, SmartReplyClient.errorText(e), rejectedImageInput = e is SmartReplyClient.Failure && e.rejectedImageInput)
+            val rejection = e as? SmartReplyClient.Failure
+            ChatResult(null, SmartReplyClient.errorText(e),
+                rejectedImageInput = rejection?.rejectedImageInput == true,
+                rejectedToolInput = rejection?.rejectedToolInput == true)
         }
     }
 
@@ -199,6 +204,7 @@ internal object AiConfig {
         initialBody: JsonObject,
         timeoutMs: Int,
         hasImageInput: Boolean,
+        hasToolInput: Boolean,
         canContinue: () -> Boolean,
     ): String? {
         var body = initialBody
@@ -212,10 +218,10 @@ internal object AiConfig {
             currentCoroutineContext().ensureActive()
             if (!isCurrent(binding) || !canContinue()) return null
             try {
-                return SmartReplyClient.request(request, binding.purpose.owner, timeoutMs, sent, hasImageInput)
+                return SmartReplyClient.request(request, binding.purpose.owner, timeoutMs, sent, hasImageInput, hasToolInput)
             } catch (failure: SmartReplyClient.Failure) {
                 val rejected = sent.intersect(failure.rejectedParameters)
-                if (failure.rejectedImageInput || rejected.isEmpty()) throw failure
+                if (failure.rejectedImageInput || failure.rejectedToolInput || rejected.isEmpty()) throw failure
                 // A rejected option can be removed once. Never retry a chargeable or uncertain result.
                 body = JsonObject(body - rejected)
             }

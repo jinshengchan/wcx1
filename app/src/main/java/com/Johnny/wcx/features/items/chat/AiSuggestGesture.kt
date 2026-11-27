@@ -68,7 +68,8 @@ object AiSuggestGesture : ApiFeature() {
         val rect = Rect()
         if (footer.getGlobalVisibleRect(rect) && rect.contains(event.x.toInt(), event.y.toInt())) return
         val talker = conversation(activity, footer) ?: return
-        if (AiSuggestOverlay.isShowingFor(talker)) return
+        if (!isCurrentFooter(activity, footer, talker)) return
+        if (AiSuggestOverlay.refreshFor(footer, talker)) return
         val seq = ++sequence
         scope.launch {
             val lookup = withContext(Dispatchers.IO) {
@@ -84,21 +85,47 @@ object AiSuggestGesture : ApiFeature() {
                 Lookup(access?.takeIf { it.binding.account == account },
                     failure ?: "请在好友档案重新确认智能建议的模型")
             } ?: return@launch
-            if (!isActive || !AiConfig.isMasterEnabled || !AiToolSettings.doubleTapEnabled || seq != sequence || activity.isFinishing || activity.isDestroyed ||
-                visibleFooter(activity) !== footer || conversation(activity, footer) != talker) return@launch
+            if (!isActive || !AiConfig.isMasterEnabled || !AiToolSettings.doubleTapEnabled || seq != sequence ||
+                !isCurrentFooter(activity, footer, talker) || visibleFooter(activity) !== footer ||
+                conversation(activity, footer) != talker) return@launch
             val access = lookup.access
             if (access == null) {
                 showToast(lookup.failure)
             } else {
                 AiCueSound.play()
-                AiSuggestOverlay.show(activity, footer, access) {
-                    visibleFooter(activity) === footer && conversation(activity, footer) == talker
+                AiSuggestOverlay.show(activity, footer, access, isChatVisible = {
+                    isCurrentFooter(activity, footer, talker)
+                }) {
+                    conversation(activity, footer) == talker
                 }
             }
         }
     }
 
     private class Lookup(val access: AiSuggestEngine.Access?, val failure: String)
+
+    private fun isCurrentFooter(activity: Activity, footer: ChatFooter, talker: String): Boolean {
+        val window = activity.window?.decorView ?: return false
+        if (activity.isFinishing || activity.isDestroyed) return false
+
+        val rect = Rect()
+        fun visibleInChatWindow(candidate: ChatFooter): Boolean {
+            if (!candidate.isAttachedToWindow || candidate.windowVisibility != View.VISIBLE ||
+                !candidate.isShown || !candidate.getGlobalVisibleRect(rect)) return false
+            var ancestor: View? = candidate
+            while (ancestor != null) {
+                if (ancestor.alpha <= 0f) return false
+                if (ancestor === window) return true
+                ancestor = ancestor.parent as? View
+            }
+            return false
+        }
+        if (!visibleInChatWindow(footer)) return false
+
+        val tracked = WeCurrentConversationApi.chatFooter
+        if (tracked === footer) return WeCurrentConversationApi.value == talker
+        return tracked == null || !visibleInChatWindow(tracked)
+    }
 
     private fun visibleFooter(activity: Activity): ChatFooter? {
         val window = activity.window?.decorView ?: return null

@@ -12,6 +12,8 @@ import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.graphics.RectF
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.widget.BaseAdapter
 import android.widget.ImageView
@@ -35,6 +37,7 @@ import androidx.core.net.toUri
 import coil3.load
 import coil3.request.allowHardware
 import coil3.request.crossfade
+import coil3.request.Disposable
 import dev.ujhhgtg.reflekt.fields
 import dev.ujhhgtg.reflekt.firstField
 import dev.ujhhgtg.reflekt.firstMethod
@@ -48,12 +51,14 @@ import com.Johnny.wcx.dexkit.abc.IResolveDex
 import com.Johnny.wcx.dexkit.dsl.dexClass
 import com.Johnny.wcx.dexkit.dsl.dexMethod
 import com.Johnny.wcx.features.api.core.WeDatabaseApi
+import com.Johnny.wcx.features.api.core.WeConversationApi
 import com.Johnny.wcx.features.api.core.models.IWeContact
 import com.Johnny.wcx.features.api.ui.WeContactPrefsScreenApi
 import com.Johnny.wcx.features.api.ui.WeContactPrefsScreenApi.IContactInfoProvider
 import com.Johnny.wcx.features.api.ui.WeContactPrefsScreenApi.PreferenceItem
 import com.Johnny.wcx.features.core.ClickableFeature
 import com.Johnny.wcx.features.core.Feature
+import com.Johnny.wcx.features.items.chat.ConversationAggregation
 import com.Johnny.wcx.preferences.WePrefs.Companion.prefOption
 import com.Johnny.wcx.ui.content.AlertDialogContent
 import com.Johnny.wcx.ui.content.BaseContactSelector
@@ -90,6 +95,8 @@ import kotlin.math.min
     description = "为指定联系人或群组使用本地图片替换显示的头像"
 )
 object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IResolveDex {
+    // Folder avatars and contact overrides share this hook set but have separate switches.
+    override val keepControllerEnabled: Boolean = true
 
     private const val PREF_KEY = "custom_avatar"
     private const val SEP = ";"
@@ -214,7 +221,7 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
     private var avatarMapCache: Map<String, String>? = null
 
     @Volatile
-    var fallbackUsernameProvider: ((String) -> String?)? = null
+    private var folderAvatarFallback: ((String) -> String?)? = null
 
     private val roundedBitmapCache = ConcurrentHashMap<String, Bitmap>()
     private val originalBitmapCache = ConcurrentHashMap<String, Bitmap>()
@@ -254,6 +261,7 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
             "methodPluginsdkLoadAvatar" to methodPluginsdkLoadAvatar
         )
 
+        val installed = mutableSetOf<Method>()
         for ((name, delegate) in hookTargets) {
             if (delegate.isPlaceholder) {
                 WeLogger.w(TAG, "skipping hook $name: method not found (placeholder) in current WeChat version")
@@ -281,31 +289,26 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
                 continue
             }
             for (target in targets) {
+                if (target in installed) continue
                 try {
                     target.hookBefore {
+                        if (!isEnabled && folderAvatarFallback == null) return@hookBefore
                         val imageView = args.getOrNull(0) as? ImageView ?: return@hookBefore
                         val wxId = args.getOrNull(1) as? String ?: return@hookBefore
+                        discardBinding(imageView)
+                        if (!canReplaceAvatar(wxId)) return@hookBefore
 
-                        val redirectedId = fallbackUsernameProvider?.invoke(wxId)
-                        if (redirectedId != null) {
-                            args[1] = redirectedId
-                            return@hookBefore
-                        }
-
-                        if (applyCustomAvatar(imageView, wxId, roundAvatarRadiusFactor)) {
-                            try {
-                                // 仅当原方法返回 void 时才设置 result = null
-                                if (method is java.lang.reflect.Method) {
-                                    val returnType = (method as java.lang.reflect.Method).returnType
-                                    if (returnType == Void.TYPE) {
-                                        result = null
-                                    }
-                                }
-                            } catch (e: Throwable) {
-                                // 兜底异常捕获，防止单条 Hook 异常导致微信主线程崩溃
+                        val uri = avatarMap[wxId]?.takeIf { it.isNotBlank() }
+                        if (uri == null) {
+                            if (ConversationAggregation.isAggregationFolderId(wxId)) {
+                                folderAvatarFallback?.invoke(wxId)?.let { args[1] = it }
                             }
+                        } else if (applyCustomAvatar(imageView, wxId, uri, roundAvatarRadiusFactor)) {
+                            // All avatar method signatures above return void.
+                            result = null
                         }
                     }
+                    installed += target
                 } catch (e: Exception) {
                     WeLogger.w(TAG, "failed to hook $name on ${target.name}, avatar loading may be affected", e)
                 }
@@ -319,17 +322,7 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
                     val username = args.getOrNull(0) as? String ?: return@hookBefore
                     val gallery = thisObject
                     if (applyCustomHdAvatar(gallery, username)) {
-                        try {
-                            // 仅当原方法返回 void 时才设置 result = null
-                            if (method is java.lang.reflect.Method) {
-                                val returnType = (method as java.lang.reflect.Method).returnType
-                                if (returnType == Void.TYPE) {
-                                    result = null
-                                }
-                            }
-                        } catch (e: Throwable) {
-                            // 兜底异常捕获，防止单条 Hook 异常导致微信主线程崩溃
-                        }
+                        result = null
                         (gallery as? View)?.let { view ->
                             view.post { applyCustomHdAvatar(gallery, username) }
                             view.postDelayed({ applyCustomHdAvatar(gallery, username) }, 300L)
@@ -351,12 +344,13 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
         WeContactPrefsScreenApi.removeProvider(this)
         avatarMapCache = null
         clearBitmapCaches()
-        boundAvatarViews.clear()
+        clearInactiveBindings()
         WeLogger.i(TAG, "CustomLocalFriendAvatars disabled, caches cleared")
     }
 
     override fun getContactInfoItem(activity: Activity): List<PreferenceItem> {
         val wxId = activity.currentWxId ?: return emptyList()
+        if (!isEnabled || ConversationAggregation.isAggregationFolderId(wxId)) return emptyList()
         val hasCustomAvatar = avatarMap.containsKey(wxId)
         return listOf(
             PreferenceItem(
@@ -370,6 +364,7 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
     override fun onItemClick(activity: Activity, key: String): Boolean {
         if (key != PREF_KEY) return false
         val wxId = activity.currentWxId ?: return true
+        if (!isEnabled || ConversationAggregation.isAggregationFolderId(wxId)) return false
 
         if (avatarMap.containsKey(wxId)) {
             showContactAvatarDialog(activity, wxId)
@@ -384,7 +379,7 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
         showComposeDialog(context) {
             CustomAvatarManagerDialog(
                 contacts = remember { loadContacts() },
-                entries = avatarMap,
+                entries = avatarMap.filterKeys { !ConversationAggregation.isAggregationFolderId(it) },
                 onDismiss = onDismiss,
                 onSelectImage = { wxId ->
                     onDismiss()
@@ -399,25 +394,54 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
         }
     }
 
+    override fun onBeforeToggle(newState: Boolean, context: Context): Boolean {
+        Handler(Looper.getMainLooper()).post {
+            clearInactiveBindings()
+            WeConversationApi.reloadConversations()
+        }
+        return true
+    }
+
+    internal fun setFolderAvatarFallback(fallback: ((String) -> String?)?) {
+        folderAvatarFallback = fallback
+        if (fallback == null) Handler(Looper.getMainLooper()).post { clearInactiveBindings() }
+    }
+
+    private fun canReplaceAvatar(username: String): Boolean = isActive &&
+        if (ConversationAggregation.isAggregationFolderId(username)) folderAvatarFallback != null else isEnabled
+
+    private fun discardBinding(view: ImageView) {
+        val binding = boundAvatarViews.remove(view) ?: return
+        binding.request?.dispose()
+        view.setTag(VIEW_TAG_CUSTOM_AVATAR, null)
+    }
+
+    private fun clearInactiveBindings() {
+        val inactive = synchronized(boundAvatarViews) {
+            boundAvatarViews.filterValues { !canReplaceAvatar(it.username) }.keys
+        }
+        inactive.forEach(::discardBinding)
+    }
+
     private var roundAvatarRadiusFactor by prefOption("custom_avatar_round_radius", 0.5f)
 
     private fun effectiveRadiusFactor(loaderRadiusFactor: Float): Float {
         return if (RoundAvatars.isEnabled) roundAvatarRadiusFactor else loaderRadiusFactor
     }
 
-    private fun applyCustomAvatar(imageView: ImageView, username: String, radiusFactor: Float): Boolean {
-        val uri = avatarMap[username]?.takeIf { it.isNotBlank() } ?: return false
+    private fun applyCustomAvatar(imageView: ImageView, username: String, uri: String, radiusFactor: Float): Boolean {
         val effectiveRadiusFactor = effectiveRadiusFactor(radiusFactor)
         val tag = "$username$SEP$uri$SEP$effectiveRadiusFactor"
+        val binding = BoundAvatar(username, uri, radiusFactor)
         imageView.setTag(VIEW_TAG_CUSTOM_AVATAR, tag)
-        boundAvatarViews[imageView] = BoundAvatar(username, uri, radiusFactor)
+        boundAvatarViews[imageView] = binding
 
         // 首次加载：若 bitmap 解码失败（如 content provider 尚未就绪），让原始方法先跑，
         // 避免 ImageView 空白；post 回调会做二次尝试覆盖。
-        val firstAttemptOk = loadAvatarInto(imageView, uri, effectiveRadiusFactor)
+        val firstAttemptOk = loadAvatarInto(imageView, binding, effectiveRadiusFactor)
         imageView.post {
             if (imageView.getTag(VIEW_TAG_CUSTOM_AVATAR) == tag) {
-                loadAvatarInto(imageView, uri, effectiveRadiusFactor)
+                loadAvatarInto(imageView, binding, effectiveRadiusFactor)
             }
         }
 
@@ -431,7 +455,11 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
      * 加载自定义头像到 ImageView。
      * @return true 表示成功设置了自定义头像 bitmap，false 表示需要回退到原始加载逻辑。
      */
-    private fun loadAvatarInto(imageView: ImageView, uri: String, radiusFactor: Float): Boolean {
+    private fun loadAvatarInto(imageView: ImageView, binding: BoundAvatar, radiusFactor: Float): Boolean {
+        if (boundAvatarViews[imageView] !== binding || !canReplaceAvatar(binding.username) ||
+            avatarMap[binding.username] != binding.uri
+        ) return false
+        val uri = binding.uri
         val targetSize = imageView.width
             .takeIf { it > 0 }
             ?: imageView.layoutParams?.width?.takeIf { it > 0 }
@@ -445,9 +473,11 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
             radiusFactor = if (shouldRound) radiusFactor else 0f
         )
 
+        binding.request?.dispose()
+        binding.request = null
         if (bitmap == null) {
             WeLogger.d(TAG, "decodeAvatarBitmap failed for $uri, falling back to Coil")
-            imageView.load(uri) {
+            binding.request = imageView.load(uri) {
                 allowHardware(false)
                 crossfade(false)
             }
@@ -461,6 +491,7 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
     }
 
     private fun applyCustomHdAvatar(gallery: Any?, username: String): Boolean {
+        if (!isActive || !isEnabled || ConversationAggregation.isAggregationFolderId(username)) return false
         val uri = avatarMap[username]?.takeIf { it.isNotBlank() } ?: return false
         val view = gallery as? View ?: return false
         val width = view.resources.displayMetrics.widthPixels.coerceAtLeast(720)
@@ -601,7 +632,7 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
         }
     }
 
-    fun selectAvatarImage(context: Context, wxId: String) {
+    fun selectAvatarImage(context: Context, wxId: String, onSelected: () -> Unit = {}) {
         TransparentActivity.launch(context) {
             val launcher = registerForActivityResult(
                 ActivityResultContracts.PickVisualMedia()
@@ -611,6 +642,8 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
 
                 persistReadPermission(uri)
                 setAvatar(wxId, uri.toString())
+                if (ConversationAggregation.isAggregationFolderId(wxId)) WeConversationApi.reloadConversations()
+                onSelected()
                 showToast("自定义头像已设置, 重新进入页面或重启微信后生效")
             }
             launcher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
@@ -633,6 +666,11 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
     fun removeAvatar(wxId: String) {
         avatarMap = avatarMap - wxId
         clearBitmapCaches()
+        val stale = synchronized(boundAvatarViews) {
+            boundAvatarViews.filterValues { it.username == wxId }.keys
+        }
+        stale.forEach(::discardBinding)
+        if (ConversationAggregation.isAggregationFolderId(wxId)) WeConversationApi.reloadConversations()
     }
 
     private fun clearBitmapCaches() {
@@ -642,15 +680,16 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
 
     fun onRoundAvatarConfigChanged() {
         clearBitmapCaches()
-        boundAvatarViews.entries.toList().forEach { (imageView, binding) ->
-            if (avatarMap[binding.username] != binding.uri) return@forEach
+        val bindings = synchronized(boundAvatarViews) { boundAvatarViews.toMap() }
+        bindings.forEach { (imageView, binding) ->
+            if (!canReplaceAvatar(binding.username) || avatarMap[binding.username] != binding.uri) return@forEach
             val radiusFactor = effectiveRadiusFactor(binding.loaderRadiusFactor)
             val tag = "${binding.username}$SEP${binding.uri}$SEP$radiusFactor"
             imageView.setTag(VIEW_TAG_CUSTOM_AVATAR, tag)
-            loadAvatarInto(imageView, binding.uri, radiusFactor)
+            loadAvatarInto(imageView, binding, radiusFactor)
             imageView.post {
                 if (imageView.getTag(VIEW_TAG_CUSTOM_AVATAR) == tag) {
-                    loadAvatarInto(imageView, binding.uri, radiusFactor)
+                    loadAvatarInto(imageView, binding, radiusFactor)
                 }
             }
         }
@@ -776,6 +815,7 @@ object CustomLocalFriendAvatars : ClickableFeature(), IContactInfoProvider, IRes
     private data class BoundAvatar(
         val username: String,
         val uri: String,
-        val loaderRadiusFactor: Float
+        val loaderRadiusFactor: Float,
+        var request: Disposable? = null
     )
 }

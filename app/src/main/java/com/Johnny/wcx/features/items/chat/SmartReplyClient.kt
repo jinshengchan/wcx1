@@ -34,6 +34,7 @@ internal object SmartReplyClient {
         message: String,
         val rejectedParameters: Set<String> = emptySet(),
         val rejectedImageInput: Boolean = false,
+        val rejectedToolInput: Boolean = false,
     ) : IOException(message)
     /** Only fixed descriptions and exception type names; never include exception.message. */
     fun errorText(error: Throwable): String {
@@ -102,6 +103,7 @@ internal object SmartReplyClient {
         readTimeoutMs: Int? = null,
         optionalParameters: Set<String> = emptySet(),
         hasImageInput: Boolean = false,
+        hasToolInput: Boolean = false,
     ): String = suspendCancellableCoroutine { continuation ->
         val client = if (readTimeoutMs == null) http else {
             val timeout = readTimeoutMs.coerceIn(1000, 180_000).toLong()
@@ -127,7 +129,7 @@ internal object SmartReplyClient {
             override fun onResponse(call: Call, response: Response) {
                 val result = runCatching {
                     response.use {
-                        if (!it.isSuccessful) throw it.requestFailure(optionalParameters, hasImageInput)
+                        if (!it.isSuccessful) throw it.requestFailure(optionalParameters, hasImageInput, hasToolInput)
                         val source = it.body.source()
                         if (source.request(256 * 1024L + 1)) throw Failure("API 响应过大")
                         source.readUtf8()
@@ -159,12 +161,30 @@ internal object SmartReplyClient {
             """(?:模型|接口)不支持(?:图片|图像|视觉|多模态)""",
         RegexOption.IGNORE_CASE,
     )
+    private val toolRejectionCodes = setOf(
+        "unsupported_tools", "tools_not_supported", "unsupported_tool_calling", "tool_calling_not_supported",
+        "unsupported_function_calling", "function_calling_not_supported",
+    )
+    private val toolParameters = setOf("tools", "tool_choice", "tool_calls", "tool_call_id", "functions", "function_call")
+    private const val TOOL_MESSAGE_PARAMETER = """messages\[\d+]\.(?:tool_calls|tool_call_id)"""
+    private const val TOOL_INPUT = """(?:tools|tool[_ -](?:choice|calls?(?:[_ -]id)?|calling|use)|functions|function[_ -](?:calls?|calling))"""
+    private val toolMessageParameter = Regex(TOOL_MESSAGE_PARAMETER)
+    private val toolParameterNames = toolParameters.joinToString("|")
+    private val toolRejectionMessage = Regex(
+        """\b(?:does not support|doesn't support|do not support|unsupported)\s+(?:the\s+)?['"`]?$TOOL_INPUT\b|""" +
+            """\b$TOOL_INPUT\b['"`]?\s+(?:is |are )?(?:not supported|unsupported)\b|""" +
+            """\b(?:unsupported|unknown|unrecognized|unexpected) (?:request )?(?:parameter|argument|field)\s*[:=]?\s*['"`]?(?:$toolParameterNames|$TOOL_MESSAGE_PARAMETER)\b(?![./-]\w|\[)|""" +
+            """(?:模型|接口)不支持(?:工具调用|函数调用)""",
+        RegexOption.IGNORE_CASE,
+    )
 
-    private fun Response.requestFailure(sent: Set<String>, hasImageInput: Boolean): Failure {
+    private fun Response.requestFailure(sent: Set<String>, hasImageInput: Boolean, hasToolInput: Boolean): Failure {
         val summary = "HTTP $code，请检查地址、密钥、模型及服务配额"
-        val canRejectParameter = sent.isNotEmpty() && (code == 400 || code == 422)
+        val invalidRequest = code == 400 || code == 422
+        val canRejectParameter = sent.isNotEmpty() && invalidRequest
         val canRejectImage = hasImageInput && (code == 400 || code == 415 || code == 422)
-        if (!canRejectParameter && !canRejectImage) return Failure(summary)
+        val canRejectTool = hasToolInput && invalidRequest
+        if (!canRejectParameter && !canRejectImage && !canRejectTool) return Failure(summary)
         val raw = runCatching { peekBody(8 * 1024L).string() }.getOrNull() ?: return Failure(summary)
         val json = runCatching { Json.parseToJsonElement(raw) }.getOrNull()
         val error = (json as? JsonObject)?.get("error") ?: json
@@ -181,9 +201,17 @@ internal object SmartReplyClient {
             null, in genericRequestCodes -> message?.let(imageRejectionMessage::containsMatchIn) == true
             else -> false
         }
+        val rejectedTool = canRejectTool && when (reason) {
+            in toolRejectionCodes -> true
+            in parameterRejectionCodes, null, in genericRequestCodes ->
+                (reason in parameterRejectionCodes &&
+                    (parameter in toolParameters || parameter?.matches(toolMessageParameter) == true)) ||
+                    message?.let(toolRejectionMessage::containsMatchIn) == true
+            else -> false
+        }
         val rejectedParameters = if (canRejectParameter) rejectedOptionalParameters(sent, reason, parameter, message)
             else emptySet()
-        return Failure(summary, rejectedParameters, rejectedImage)
+        return Failure(summary, rejectedParameters, rejectedImage, rejectedTool)
     }
 
     private fun rejectedOptionalParameters(

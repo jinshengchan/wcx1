@@ -23,6 +23,8 @@ internal object AiSuggestEngine {
     private const val READ_MEMORY = "read_memory"
     private const val GET_HISTORY = "get_chat_history"
     private const val EARLIER_MEMORIES = "load_earlier_memories"
+    private const val REPLY_FORMAT_ERROR = "模型未按格式返回回复，请重试或更换模型"
+    private const val DIRECT_REPLY_PREFIX = "回复："
 
     data class Access(val profile: AiProfile, val binding: AiConfig.Binding) {
         val vision: Boolean get() = profile.visionEnabled && profile.visionBinding == binding.id
@@ -95,30 +97,56 @@ internal object AiSuggestEngine {
             var toolCount = 0
             val steps = mutableListOf<Step>()
             val recordedEvents = if (access.recordFriendEvents) AiFriendEvents.recordedTitles(account, talker, day) else emptyList()
-            val messages = mutableListOf(
+            val originalMessages = listOf(
                 AiConfig.ChatMessage("system", systemPrompt(profile, recordEvent = access.recordFriendEvents)),
                 AiConfig.ChatMessage(
                     "user", userPrompt(profile, lines, memories.drop(firstMemory), image != null, recordedEvents), imageUrl = image,
                 ),
             )
+            val messages = originalMessages.toMutableList()
             val outcome = withTimeoutOrNull(8 * 60_000L) {
                 for (round in 1..MAX_ROUNDS + 1) {
                     if (!current()) return@withTimeoutOrNull changed
                     val closing = round > MAX_ROUNDS || toolCount >= MAX_TOOL_CALLS
                     if (closing) messages += AiConfig.ChatMessage("user", "请按要求输出解读和回复候选的 JSON。")
-                    val result = AiConfig.requestWithTools(
+                    var result = AiConfig.requestWithTools(
                         messages, if (closing) null else tools, readTimeoutMs = 45_000,
                         purpose = binding.purpose, binding = binding, canContinue = ::current,
                     )
                     if (!current()) return@withTimeoutOrNull changed
+                    val withoutTools = result.rejectedToolInput && !result.rejectedImageInput
+                    if (withoutTools) {
+                        if (manual) steps += Step(round, null, listOf("模型不支持工具调用，改用已有资料生成"))
+                        result = AiConfig.requestWithTools(
+                            originalMessages + AiConfig.ChatMessage(
+                                "user",
+                                "只根据已给出的资料完成，不调用工具。按原要求输出 JSON。" +
+                                    "若无法输出 JSON，只允许以“$DIRECT_REPLY_PREFIX”开头写一条可直接发送的单行回复。",
+                            ),
+                            readTimeoutMs = 45_000, purpose = binding.purpose, binding = binding, canContinue = ::current,
+                        )
+                        if (!current()) return@withTimeoutOrNull changed
+                    }
                     if (manual) {
                         val reasoning = result.reasoning?.trim()?.takeIf { it.isNotEmpty() }
                         val actions = result.toolCalls.mapNotNull { action(it.name) }
-                        if (reasoning != null || actions.isNotEmpty()) steps += Step(round, reasoning, actions)
+                        if (reasoning != null || actions.isNotEmpty()) {
+                            steps += Step(if (withoutTools) round + 1 else round, reasoning, actions)
+                        }
+                    }
+                    when (result.finishReason?.lowercase()) {
+                        "length", "max_tokens", "max_output_tokens", "incomplete" ->
+                            return@withTimeoutOrNull Suggestion(error = "模型回复未生成完整，请重试或提高输出上限")
+                        "content_filter", "safety" ->
+                            return@withTimeoutOrNull Suggestion(error = "模型未返回可用回复，请调整模型或稍后重试")
+                        "tool_calls", "function_call" -> if (result.toolCalls.isEmpty()) {
+                            return@withTimeoutOrNull Suggestion(error = REPLY_FORMAT_ERROR)
+                        }
                     }
                     result.error?.let { return@withTimeoutOrNull Suggestion(error = it) }
-                    if (closing || result.toolCalls.isEmpty()) {
-                        return@withTimeoutOrNull parse(result.text.orEmpty(), access.recordFriendEvents)
+                    if (closing || withoutTools || result.toolCalls.isEmpty()) {
+                        if (result.toolCalls.isNotEmpty()) return@withTimeoutOrNull Suggestion(error = REPLY_FORMAT_ERROR)
+                        return@withTimeoutOrNull parse(result.text.orEmpty(), access.recordFriendEvents, manual)
                     }
                     messages += AiConfig.ChatMessage("assistant", result.text, toolCalls = result.toolCalls)
                     for (call in result.toolCalls) {
@@ -263,22 +291,53 @@ internal object AiSuggestEngine {
 
     private fun parseObject(text: String): JsonObject? = runCatching { Json.parseToJsonElement(text) as? JsonObject }.getOrNull()
 
-    private fun parse(raw: String, recordEvent: Boolean): Suggestion {
+    private fun parse(raw: String, recordEvent: Boolean, manual: Boolean): Suggestion {
         val text = raw.trim().removePrefix("```json").removePrefix("```JSON").removePrefix("```").removeSuffix("```").trim()
         if (text.isEmpty()) return Suggestion(error = "模型返回为空")
         val start = text.indexOf('{')
         val end = text.lastIndexOf('}')
         val parsed = parseObject(text) ?: if (start in 0 until end) parseObject(text.substring(start, end + 1)) else null
-        val read = parsed?.string("read").orEmpty().take(1000)
-        val replies = (parsed?.get("replies") as? JsonArray).orEmpty().mapNotNull { item ->
+        if (parsed == null) {
+            val reply = directReply(raw, manual) ?: return Suggestion(error = REPLY_FORMAT_ERROR)
+            return Suggestion(replies = listOf(reply))
+        }
+        val read = parsed.string("read").orEmpty().take(1000)
+        val candidates = parsed["replies"] as? JsonArray ?: return Suggestion(error = REPLY_FORMAT_ERROR)
+        val replies = candidates.mapNotNull { item ->
             (item as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.let(::oneLine)
                 ?.takeIf { it.isNotEmpty() && it.length <= 4000 }
         }.distinct().take(3)
-        val event = if (recordEvent) (parsed?.get("friendEvent") as? JsonObject)?.let { obj ->
+        if (candidates.isNotEmpty() && replies.isEmpty()) return Suggestion(error = REPLY_FORMAT_ERROR)
+        val event = if (recordEvent) (parsed["friendEvent"] as? JsonObject)?.let { obj ->
             val title = obj.string("title").orEmpty().trim().take(60)
             title.takeIf { it.isNotBlank() }?.let { FriendEvent(it, obj.string("detail").orEmpty().trim().take(240)) }
         } else null
-        return Suggestion(read.ifBlank { if (parsed == null) text.take(120) else "" }, replies, friendEvent = event)
+        return Suggestion(read, replies, friendEvent = event)
+    }
+
+    private val nonReplyPrefix = Regex(
+        """^(?:[-–—+•>#【]|\d+[.)、）]|(?:analysis|thoughts?|reasoning|assistant|system|(?:the )?user|error|response|reply|as an ai)\b|""" +
+            """分析|思考|推理|意图|解读|说明|建议|候选|回复|系统|角色|用户|输出|请输出|无法生成|错误|以下是|作为.{0,8}模型)""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val replyLabel = Regex("""^(?:候选)?回复[：:]\s*""")
+
+    private fun directReply(raw: String, manual: Boolean): String? {
+        val text = raw.trim()
+        if (text.any { it.isISOControl() || it == '\u2028' || it == '\u2029' }) return null
+        val label = replyLabel.find(text)
+        val reply = when {
+            label != null -> text.substring(label.range.last + 1).trim()
+            manual -> text
+            else -> return null
+        }
+        // Automatic delivery requires an explicit reply boundary even when JSON is unavailable.
+        return reply.takeIf {
+            it.length in 1..400 && it.any(Char::isLetterOrDigit) &&
+                it.none { char -> char in "`{}[]<>*\"|" } && "__" !in it && "~~" !in it &&
+                !nonReplyPrefix.containsMatchIn(it) &&
+                "://" !in it
+        }
     }
 
     private fun oneLine(text: String): String = buildString {
