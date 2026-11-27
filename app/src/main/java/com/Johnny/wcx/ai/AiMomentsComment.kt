@@ -2,6 +2,8 @@
 package com.Johnny.wcx.ai
 
 import com.Johnny.wcx.features.ai.AiConfig
+import com.Johnny.wcx.features.ai.AiReplySettings
+import com.Johnny.wcx.features.ai.ReasoningEffort
 import com.Johnny.wcx.features.api.net.models.protobuf.TimelineObjectProto.MediaObjProto
 import com.Johnny.wcx.features.api.ui.WeMomentsApi
 import kotlinx.coroutines.CancellationException
@@ -27,7 +29,15 @@ internal object AiMomentsComment {
         val hasImages: Boolean get() = media.isNotEmpty()
     }
 
-    data class Result(val replies: List<String>, val imagesUsed: Int, val note: String?, val reasoning: String?)
+    data class References(val memories: Int, val tags: Int, val events: Int)
+
+    data class Result(
+        val replies: List<String>,
+        val imagesUsed: Int,
+        val note: String?,
+        val reasoning: String?,
+        val references: References?,
+    )
 
     suspend fun generate(
         post: Post,
@@ -38,12 +48,25 @@ internal object AiMomentsComment {
         val account = binding.account
         fun permitted() = AiConfig.isCurrent(binding) && post.author != account && AiAssistantTools.visible(post.author)
         check(permitted()) { "当前朋友圈、微信账号或模型配置已变化" }
-        val profile = if (includeProfile) AiProfileStore.readProfile(post.author, account)?.takeIf { it.isReady } else null
-        val events = if (includeProfile) AiFriendEvents.overview(account)[post.author].orEmpty().take(40) else emptyList()
-        fun authorized() = permitted() && (!includeProfile ||
-            AiProfileStore.readProfile(post.author, account)?.takeIf { it.isReady } == profile)
-        val images = if (includeImages) imageUrls(post, ::authorized) else emptyList()
-        check(authorized()) { "当前朋友圈、好友档案或模型配置已变化" }
+        fun readyProfile() = AiProfileStore.readProfile(post.author, account)?.takeIf { it.isReady }
+        fun currentEvents() = AiFriendEvents.overview(account)[post.author].orEmpty()
+        val profile = if (includeProfile) checkNotNull(readyProfile()) { "好友档案已不可用，请重新打开评论建议" } else null
+        val tags = profile?.tags.orEmpty().take(24)
+        val memories = profile?.memories.orEmpty().takeLast(40)
+        val events = if (profile != null) currentEvents().take(40) else emptyList()
+        val effort = AiReplySettings.read().effort
+        fun profileAuthorized() = permitted() && (profile == null || readyProfile() == profile)
+        fun authorized(): Boolean {
+            if (!profileAuthorized()) return false
+            if (events.isEmpty()) return true
+            val current = currentEvents().associateBy { it.sourceId }
+            return events.all { event ->
+                current[event.sourceId]?.let { it.at == event.at && it.title == event.title } == true
+            }
+        }
+        val authorizationChanged = "当前朋友圈、好友档案、事件记录或模型配置已变化"
+        val images = if (includeImages) imageUrls(post, ::profileAuthorized) else emptyList()
+        check(authorized()) { authorizationChanged }
         check(post.text.isNotBlank() || images.isNotEmpty()) { "还没有可用的朋友圈图片，请先在微信中打开该图片或封面" }
 
         suspend fun request(attached: List<String>): AiConfig.ChatResult {
@@ -56,8 +79,8 @@ internal object AiMomentsComment {
                 profile?.let {
                     appendLine("<好友档案>")
                     if (it.style.summary.isNotBlank()) appendLine("我的表达风格：${it.style.summary.take(600)}")
-                    it.tags.take(24).forEach { tag -> appendLine("${tag.key.take(50)}：${tag.value.take(100)}") }
-                    it.memories.takeLast(40).forEach { memory -> appendLine("记忆：${memory.title.take(60)}") }
+                    tags.forEach { tag -> appendLine("${tag.key.take(50)}：${tag.value.take(100)}") }
+                    memories.forEach { memory -> appendLine("记忆：${memory.title.take(60)}") }
                     appendLine("</好友档案>")
                 }
                 if (events.isNotEmpty()) {
@@ -75,17 +98,19 @@ internal object AiMomentsComment {
                     """.trimIndent()),
                     AiConfig.ChatMessage("user", material, imageUrls = attached),
                 ),
-                purpose = AiConfig.Purpose.TOOLS, binding = binding, canContinue = ::authorized,
+                purpose = AiConfig.Purpose.TOOLS, binding = binding,
+                reasoningEffort = effort, canContinue = ::authorized,
             )
         }
 
         var used = images.size
         var response = request(images)
-        check(authorized()) { "当前朋友圈、好友档案或模型配置已变化" }
-        if ((response.error != null || response.text.isNullOrBlank()) && used > 0 && post.text.isNotBlank()) {
+        check(authorized()) { authorizationChanged }
+        if (response.rejectedImageInput && used > 0) {
+            check(post.text.isNotBlank()) { "当前模型拒绝图片输入，请更换支持图片的模型后重试" }
             used = 0
             response = request(emptyList())
-            check(authorized()) { "当前朋友圈、好友档案或模型配置已变化" }
+            check(authorized()) { authorizationChanged }
         }
         val raw = checkNotNull(response.text) { response.error ?: "模型没有返回评论建议" }
         val start = raw.indexOf('{')
@@ -98,7 +123,10 @@ internal object AiMomentsComment {
         }.distinct().take(3)
         check(replies.isNotEmpty()) { "没有读到可用的评论建议，请重试" }
         val note = if (includeImages && post.hasImages && used == 0) "本次按正文生成，图片未能使用。" else null
-        return Result(replies, used, note, response.reasoning?.trim()?.take(2_000)?.takeIf { it.isNotEmpty() })
+        val reasoning = response.reasoning?.trim()?.take(2_000)
+            ?.takeIf { it.isNotEmpty() && effort != ReasoningEffort.OFF && AiReplySettings.read().effort != ReasoningEffort.OFF }
+        val references = profile?.let { References(memories.size, tags.size, events.size) }
+        return Result(replies, used, note, reasoning, references)
     }
 
     private suspend fun imageUrls(post: Post, allowed: () -> Boolean): List<String> {

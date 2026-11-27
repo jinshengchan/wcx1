@@ -60,9 +60,16 @@ data class GroupDigestConfig(
     internal val unread: Int get() = digests.count { !it.read }
     val workProgressText: String get() = workDetails?.displayText() ?: workProgress
 
-    internal fun withWorkProgress(progress: GroupWorkProgress, at: Long): GroupDigestConfig =
-        if (workDetails == progress) this
+    internal fun withWorkProgress(update: GroupWorkProgressUpdate, at: Long): GroupDigestConfig {
+        val progress = update.applyTo(workDetails)
+        return if (workDetails == progress) this
         else copy(workDetails = progress, workProgress = "", workProgressAt = at)
+    }
+
+    internal fun withoutDisabledProgress(): GroupDigestConfig =
+        if (!workGroup && (workDetails != null || workProgress.isNotEmpty() || workProgressAt != 0L)) {
+            copy(workDetails = null, workProgress = "", workProgressAt = 0)
+        } else this
 
     fun nextRunAt(nowMs: Long): Long = nextRunAtOf(anchorAt, intervalMinutes, nowMs)
 
@@ -101,7 +108,13 @@ data class GroupDigestConfig(
         groupId, name.ifBlank { groupId }, avatarUrl, enabled, intervalMinutes, anchorAt,
         lastStatus, lastError, digests.lastOrNull()?.headline.orEmpty(), unread,
         workPercent = workDetails?.percent?.takeIf { workGroup },
-        workTask = if (workGroup) workDetails?.goals?.firstOrNull().orEmpty().ifBlank { workGoal } else "",
+        workTask = if (workGroup) {
+            workDetails?.goals?.firstOrNull().orEmpty()
+                .ifBlank { workDetails?.note.orEmpty() }
+                .ifBlank { workProgress.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty() }
+                .ifBlank { workGoal }
+                .take(60)
+        } else "",
         lastDigestAt = digests.lastOrNull()?.createdAt ?: 0,
     )
 }
@@ -134,6 +147,17 @@ data class GroupWorkProgress(
         goals.takeIf { it.isNotEmpty() }?.joinToString("\n") { "• $it" },
         note.takeIf { it.isNotBlank() },
     ).joinToString("\n")
+}
+
+internal data class GroupWorkProgressUpdate(val progress: GroupWorkProgress, val newTask: Boolean) {
+    fun applyTo(previous: GroupWorkProgress?): GroupWorkProgress {
+        if (newTask || previous == null) return progress
+        return GroupWorkProgress(
+            goals = progress.goals.ifEmpty { previous.goals },
+            percent = progress.percent ?: previous.percent,
+            note = progress.note.ifBlank { previous.note },
+        )
+    }
 }
 
 @Serializable

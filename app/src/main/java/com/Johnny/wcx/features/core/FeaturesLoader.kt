@@ -41,7 +41,7 @@ object FeaturesLoader {
         val allBrokenItems = (outdatedItems + cacheFailedItems).distinct()
 
         if (allBrokenItems.isNotEmpty())
-            handleBrokenItems(allBrokenItems)
+            handleBrokenItems(allBrokenItems, allDexItems)
 
         val elapsed = measureTime {
             allFeatures.forEach { feature ->
@@ -108,22 +108,21 @@ object FeaturesLoader {
         return failedItems
     }
 
-    private fun handleBrokenItems(brokenItems: List<IResolveDex>) {
+    private fun handleBrokenItems(brokenItems: List<IResolveDex>, allDexItems: List<IResolveDex>) {
         if (Preferences.noDexResolve) return
         if (!TargetProcesses.isInMain) return
 
-        // 版本兼容性检测：大量Hook失效时输出警告日志并弹窗提示用户
         try {
-            val (compatible, message) = VersionCompat.checkCompatibility(
-                brokenItems.size,
-                FeaturesProvider.ALL_HOOK_ITEMS.filterIsInstance<IResolveDex>().size
-            )
-            if (!compatible) {
-                WeLogger.w(TAG, "版本兼容性警告: $message")
-                // 弹窗提示用户当前微信版本部分功能暂未适配
-                showToast("当前微信版本部分功能暂未适配，等待模块更新")
+            if (brokenItems.size == allDexItems.size && !DexCacheManager.hasItemCache(allDexItems)) {
+                WeLogger.i(TAG, "当前微信版本尚无 Dex 缓存，扫描完成前跳过兼容性提示")
             } else {
-                WeLogger.i(TAG, "版本兼容性: $message")
+                val (compatible, message) = VersionCompat.checkCompatibility(brokenItems.size, allDexItems.size)
+                if (!compatible) {
+                    WeLogger.w(TAG, "版本兼容性警告: $message")
+                    showToast("当前微信版本部分功能暂未适配，等待模块更新")
+                } else {
+                    WeLogger.i(TAG, "版本兼容性: $message")
+                }
             }
         } catch (e: Throwable) {
             WeLogger.e(TAG, "版本兼容性检测异常", e)

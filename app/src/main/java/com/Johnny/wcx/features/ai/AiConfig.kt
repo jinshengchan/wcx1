@@ -96,6 +96,7 @@ internal object AiConfig {
         val toolCalls: List<ToolCall> = emptyList(),
         val finishReason: String? = null,
         val reasoning: String? = null,
+        val rejectedImageInput: Boolean = false,
     )
 
     internal fun account(): String? = runCatching { WeApi.selfWxId.takeIf { it.isNotBlank() } }.getOrNull()
@@ -166,6 +167,7 @@ internal object AiConfig {
         readTimeoutMs: Int = 60_000,
         purpose: Purpose = Purpose.FRIEND_PROFILE,
         binding: Binding? = null,
+        reasoningEffort: ReasoningEffort? = null,
         canContinue: () -> Boolean = { true },
     ): ChatResult = withContext(Dispatchers.IO) {
         if (!isMasterEnabled) return@withContext ChatResult(null, "AI 助手总开关已关闭")
@@ -179,15 +181,16 @@ internal object AiConfig {
                 Purpose.FRIEND_SUGGEST, Purpose.FRIEND_AUTO_REPLY -> AiReplySettings.read()
                 else -> null
             }
-            val body = requestBody(selected.model, messages, tools, temperature, replyOptions)
-            val response = compatibleRequest(selected, body, readTimeoutMs, canContinue)
+            val body = requestBody(selected.model, messages, tools, temperature, replyOptions, reasoningEffort)
+            val hasImageInput = messages.any { it.dataImageUrls().isNotEmpty() }
+            val response = compatibleRequest(selected, body, readTimeoutMs, hasImageInput, canContinue)
             if (response == null) ChatResult(null, "请求授权、模型配置或微信账号已变更，请重新启动任务")
             else if (!isCurrent(selected)) ChatResult(null, "模型配置或微信账号已变更，请重新启动任务")
             else parseResponse(response)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            ChatResult(null, SmartReplyClient.errorText(e))
+            ChatResult(null, SmartReplyClient.errorText(e), rejectedImageInput = e is SmartReplyClient.Failure && e.rejectedImageInput)
         }
     }
 
@@ -195,6 +198,7 @@ internal object AiConfig {
         binding: Binding,
         initialBody: JsonObject,
         timeoutMs: Int,
+        hasImageInput: Boolean,
         canContinue: () -> Boolean,
     ): String? {
         var body = initialBody
@@ -208,10 +212,10 @@ internal object AiConfig {
             currentCoroutineContext().ensureActive()
             if (!isCurrent(binding) || !canContinue()) return null
             try {
-                return SmartReplyClient.request(request, binding.purpose.owner, timeoutMs, sent)
+                return SmartReplyClient.request(request, binding.purpose.owner, timeoutMs, sent, hasImageInput)
             } catch (failure: SmartReplyClient.Failure) {
                 val rejected = sent.intersect(failure.rejectedParameters)
-                if (rejected.isEmpty()) throw failure
+                if (failure.rejectedImageInput || rejected.isEmpty()) throw failure
                 // A rejected option can be removed once. Never retry a chargeable or uncertain result.
                 body = JsonObject(body - rejected)
             }
@@ -224,12 +228,13 @@ internal object AiConfig {
         tools: JsonArray?,
         temperature: Double?,
         replyOptions: AiReplyOptions?,
+        reasoningEffort: ReasoningEffort?,
     ) = buildJsonObject {
         put("model", model)
         put("stream", false)
         (replyOptions?.temperature ?: temperature)?.let { put("temperature", it) }
         replyOptions?.maxTokens?.takeIf { it > 0 }?.let { put("max_tokens", it) }
-        val effort = replyOptions?.effort?.takeUnless { it == ReasoningEffort.OFF }
+        val effort = (reasoningEffort ?: replyOptions?.effort)?.takeUnless { it == ReasoningEffort.OFF }
         if (effort != null) {
             if (model.substringAfterLast('/').startsWith("deepseek", ignoreCase = true)) {
                 put("thinking", buildJsonObject { put("type", "enabled") })
@@ -262,9 +267,12 @@ internal object AiConfig {
         })
     }
 
-    private fun ChatMessage.encodedContent(): JsonElement {
-        val images = if (role == "user") (listOfNotNull(imageUrl) + imageUrls)
+    private fun ChatMessage.dataImageUrls(): List<String> =
+        if (role == "user") (listOfNotNull(imageUrl) + imageUrls)
             .filter { it.startsWith("data:image/jpeg;base64,") }.distinct().take(3) else emptyList()
+
+    private fun ChatMessage.encodedContent(): JsonElement {
+        val images = dataImageUrls()
         if (images.isEmpty()) return content?.let(::JsonPrimitive) ?: JsonNull
         return buildJsonArray {
             add(buildJsonObject {

@@ -27,27 +27,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.Johnny.wcx.ai.AiAssistantTools
-import com.Johnny.wcx.ai.AiDailyReport
 import com.Johnny.wcx.ai.AiFriendEvent
 import com.Johnny.wcx.ai.AiFriendEvents
 import com.Johnny.wcx.ai.AiProfileStore
 import com.Johnny.wcx.ai.AiProfileSummary
-import com.Johnny.wcx.ai.AiTool
+import com.Johnny.wcx.ai.AiTodaySummary
 import com.Johnny.wcx.ai.group.GroupDigestSummary
 import com.Johnny.wcx.features.ai.AiConfig
-import com.Johnny.wcx.features.items.chat.showAiTool
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.time.LocalDate
-import java.time.ZoneId
 
 private data class OverviewSnapshot(
     val friends: List<AiProfileSummary>,
     val events: Map<String, List<AiFriendEvent>>,
-    val day: LocalDate,
-    val todayReport: String,
 )
 
 internal fun AiProfileSummary.overviewName(): String = remark.ifBlank { nickname.ifBlank { wxId } }
@@ -59,20 +54,16 @@ internal fun AiOverviewSections(
     onFriend: (AiProfileSummary) -> Unit,
     onGroup: (GroupDigestSummary) -> Unit,
 ) {
-    var revision by remember(account) { mutableIntStateOf(0) }
     var todayOpen by remember(account) { mutableStateOf(false) }
     var friendsOpen by remember(account) { mutableStateOf(true) }
     var groupsOpen by remember(account) { mutableStateOf(true) }
     var inactiveOpen by remember(account) { mutableStateOf(false) }
-    val overview by produceState<OverviewSnapshot?>(null, account, revision) {
+    val overview by produceState<OverviewSnapshot?>(null, account) {
         while (true) {
             value = withContext(Dispatchers.IO) {
-                val day = LocalDate.now()
                 OverviewSnapshot(
                     AiProfileStore.loadIndex(account).profiles.filter { AiAssistantTools.visible(it.wxId) },
                     AiFriendEvents.overview(account),
-                    day,
-                    AiDailyReport.read(account).history[day.toString()]?.text.orEmpty(),
                 ).takeIf { AiConfig.isMasterEnabled && AiProfileStore.isCurrentAccount(account) }
             }
             delay(1500)
@@ -92,28 +83,7 @@ internal fun AiOverviewSections(
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         item { OverviewHeading("今日总结", todayOpen) { todayOpen = !todayOpen } }
-        if (todayOpen) item {
-            Column {
-                val todaysEvents = snapshot.friends.flatMap { friend ->
-                    snapshot.events[friend.wxId].orEmpty().filter { it.recordedOn(snapshot.day) }
-                        .map { friend.overviewName() to it }
-                }.sortedByDescending { it.second.at }
-                val todayStart = snapshot.day.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-                val todaysGroups = groups.orEmpty().filter { it.lastDigestAt >= todayStart }
-                if (snapshot.todayReport.isNotBlank()) Text(snapshot.todayReport)
-                if (todaysEvents.isEmpty() && todaysGroups.isEmpty() && snapshot.todayReport.isBlank()) {
-                    WorkbenchStatus("今天还没有记录。")
-                }
-                todaysEvents.take(5).forEach { (name, event) -> WorkbenchStatus("$name · ${event.title}") }
-                todaysGroups.take(5).forEach { group ->
-                    WorkbenchStatus("${group.name} · ${group.workTask.ifBlank { group.lastHeadline }}")
-                }
-                TextButton(
-                    enabled = AiConfig.selection(AiConfig.Purpose.TOOLS)?.account == account,
-                    onClick = { showAiTool(context, AiTool.DAILY_REPORT, expectedAccount = account, onResult = { revision++ }) },
-                ) { Text("整理今天") }
-            }
-        }
+        if (todayOpen) item { TodayOverview(context, account) }
         item { OverviewHeading(if (friendUnread == 0) "好友" else "好友 · $friendUnread 未读", friendsOpen) { friendsOpen = !friendsOpen } }
         if (friendsOpen) {
             if (snapshot.friends.isEmpty()) item { WorkbenchStatus("可在 AI 助手的「好友」中添加档案。") }
@@ -134,6 +104,67 @@ internal fun AiOverviewSections(
                 else -> digestGroupItems(currentGroups, onSelect = onGroup)
             }
         }
+    }
+}
+
+@Composable
+private fun TodayOverview(context: Context, account: String) {
+    val scope = rememberCoroutineScope()
+    var revision by remember(account) { mutableIntStateOf(0) }
+    var loaded by remember(account) { mutableStateOf(false) }
+    var generating by remember(account) { mutableStateOf(false) }
+    var error by remember(account) { mutableStateOf("") }
+    val today by produceState<AiTodaySummary.Source?>(null, account, revision) {
+        while (true) {
+            value = withContext(Dispatchers.IO) { AiTodaySummary.read(account) }
+            loaded = true
+            delay(4_000)
+        }
+    }
+    val source = today
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        when {
+            !loaded -> WorkbenchStatus("正在读取今日记录…")
+            source == null -> WorkbenchStatus("今天还没有记录。")
+            else -> {
+                WorkbenchStatus(source.stats)
+                val cached = source.cached
+                if (cached != null) {
+                    Text(cached)
+                } else {
+                    source.preview.forEach { WorkbenchStatus(it) }
+                    val model = AiConfig.selection(AiConfig.Purpose.TOOLS)?.takeIf { it.account == account }
+                    if (model != null) TextButton(enabled = !generating, onClick = {
+                        confirmAiAction(
+                            context, "整理今日记录",
+                            "会把今天已保存的好友事件标题、群摘要与待办，以及当前工作群任务发送给 ${model.displayName()}。",
+                            "整理",
+                        ) {
+                            generating = true
+                            error = ""
+                            scope.launch {
+                                try {
+                                    withContext(Dispatchers.IO) {
+                                        val binding = checkNotNull(AiConfig.capture(AiConfig.Purpose.TOOLS)?.takeIf {
+                                            it.id == model.id && it.account == account
+                                        }) { "微信账号或模型已变化，请重新确认" }
+                                        AiTodaySummary.generate(source, binding)
+                                    }
+                                    revision++
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    error = e.message ?: "今日总结生成失败"
+                                } finally {
+                                    generating = false
+                                }
+                            }
+                        }
+                    }) { Text(if (generating) "正在整理…" else "整理今天") }
+                }
+            }
+        }
+        if (error.isNotBlank()) WorkbenchStatus(error)
     }
 }
 

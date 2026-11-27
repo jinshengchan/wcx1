@@ -111,6 +111,7 @@ object GroupDigestStore {
         val text = AiProfileStore.readText(file) ?: return null
         return runCatching { json.decodeFromString<GroupDigestConfig>(text) }.getOrNull()
             ?.takeIf { it.groupId == groupId }
+            ?.withoutDisabledProgress()
     }
 
     private fun index(config: GroupDigestConfig) {
@@ -143,7 +144,7 @@ object GroupDigestStore {
             lastStatus = if (consentChanged) "" else requested.lastStatus,
             lastError = if (consentChanged) "" else requested.lastError,
             failures = if (consentChanged) 0 else requested.failures,
-        ).trimmed(now)
+        ).withoutDisabledProgress().trimmed(now)
         val text = runCatching { json.encodeToString(next) }.getOrNull() ?: return null
         if (!AiProfileStore.writeAtomic(file, text)) return null
         if (account == indexAccount) index(next)

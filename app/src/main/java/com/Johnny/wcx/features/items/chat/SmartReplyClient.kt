@@ -30,7 +30,11 @@ import kotlin.coroutines.resumeWithException
 
 /** Shared transport. Each call makes at most one attempt and never follows redirects or logs the payload. */
 internal object SmartReplyClient {
-    class Failure(message: String, val rejectedParameters: Set<String> = emptySet()) : IOException(message)
+    class Failure(
+        message: String,
+        val rejectedParameters: Set<String> = emptySet(),
+        val rejectedImageInput: Boolean = false,
+    ) : IOException(message)
     /** Only fixed descriptions and exception type names; never include exception.message. */
     fun errorText(error: Throwable): String {
         if (error is Failure) return error.message ?: "请求失败 [API]"
@@ -97,6 +101,7 @@ internal object SmartReplyClient {
         owner: Owner = Owner.MANUAL,
         readTimeoutMs: Int? = null,
         optionalParameters: Set<String> = emptySet(),
+        hasImageInput: Boolean = false,
     ): String = suspendCancellableCoroutine { continuation ->
         val client = if (readTimeoutMs == null) http else {
             val timeout = readTimeoutMs.coerceIn(1000, 180_000).toLong()
@@ -122,10 +127,7 @@ internal object SmartReplyClient {
             override fun onResponse(call: Call, response: Response) {
                 val result = runCatching {
                     response.use {
-                        if (!it.isSuccessful) throw Failure(
-                            "HTTP ${it.code}，请检查地址、密钥、模型及服务配额",
-                            it.rejectedOptionalParameters(optionalParameters),
-                        )
+                        if (!it.isSuccessful) throw it.requestFailure(optionalParameters, hasImageInput)
                         val source = it.body.source()
                         if (source.request(256 * 1024L + 1)) throw Failure("API 响应过大")
                         source.readUtf8()
@@ -144,23 +146,53 @@ internal object SmartReplyClient {
         "unsupported_parameter", "unsupported_value", "unknown_parameter", "unrecognized_parameter",
     )
     private val genericRequestCodes = setOf("invalid_request_error", "invalid_request", "bad_request", "400", "422")
+    private val imageRejectionCodes = setOf(
+        "invalid_image", "invalid_image_url", "invalid_image_format", "invalid_image_data", "invalid_base64_image",
+        "image_parse_error", "image_decode_failed", "unsupported_image", "unsupported_image_type",
+        "unsupported_image_format", "unsupported_image_input", "vision_not_supported",
+    )
+    private const val IMAGE_INPUT = """(?:images?|image[_ -](?:url|input|data|format|type|content)s?|vision|multimodal(?: input)?)"""
+    private val imageRejectionMessage = Regex(
+        """\b(?:does not support|doesn't support|do not support|not supported:|unsupported|invalid)\s+""" +
+            """(?:the\s+)?(?:(?:content type|input type|parameter)\s*[:=]\s*)?['"`]?\b$IMAGE_INPUT\b|""" +
+            """\b$IMAGE_INPUT\b['"`]?\s+(?:is |are )?(?:not supported|unsupported|invalid|only supported by)\b|""" +
+            """(?:模型|接口)不支持(?:图片|图像|视觉|多模态)""",
+        RegexOption.IGNORE_CASE,
+    )
 
-    private fun Response.rejectedOptionalParameters(sent: Set<String>): Set<String> {
-        if (sent.isEmpty() || (code != 400 && code != 422)) return emptySet()
-        val raw = runCatching { peekBody(8 * 1024L).string() }.getOrNull() ?: return emptySet()
+    private fun Response.requestFailure(sent: Set<String>, hasImageInput: Boolean): Failure {
+        val summary = "HTTP $code，请检查地址、密钥、模型及服务配额"
+        val canRejectParameter = sent.isNotEmpty() && (code == 400 || code == 422)
+        val canRejectImage = hasImageInput && (code == 400 || code == 415 || code == 422)
+        if (!canRejectParameter && !canRejectImage) return Failure(summary)
+        val raw = runCatching { peekBody(8 * 1024L).string() }.getOrNull() ?: return Failure(summary)
         val json = runCatching { Json.parseToJsonElement(raw) }.getOrNull()
         val error = (json as? JsonObject)?.get("error") ?: json
         val fields = error as? JsonObject
         val parameter = (fields?.get("param") as? JsonPrimitive)?.contentOrNull
         val reason = (fields?.get("code") as? JsonPrimitive)?.contentOrNull
             ?: (fields?.get("type") as? JsonPrimitive)?.contentOrNull
+        val message = (fields?.get("message") as? JsonPrimitive)?.contentOrNull
+            ?: (error as? JsonPrimitive)?.contentOrNull
+            ?: raw.takeIf { json == null }
+        val rejectedImage = canRejectImage && when (reason) {
+            in imageRejectionCodes -> true
+            in parameterRejectionCodes -> parameter == "image_url" || message?.let(imageRejectionMessage::containsMatchIn) == true
+            null, in genericRequestCodes -> message?.let(imageRejectionMessage::containsMatchIn) == true
+            else -> false
+        }
+        val rejectedParameters = if (canRejectParameter) rejectedOptionalParameters(sent, reason, parameter, message)
+            else emptySet()
+        return Failure(summary, rejectedParameters, rejectedImage)
+    }
+
+    private fun rejectedOptionalParameters(
+        sent: Set<String>, reason: String?, parameter: String?, message: String?,
+    ): Set<String> {
         if (reason in parameterRejectionCodes && parameter != null) return sent.intersect(setOf(parameter))
         // Explicit errors such as authentication, quota and context limits are terminal.
         if (reason != null && reason !in genericRequestCodes && reason !in parameterRejectionCodes) return emptySet()
-
-        val message = (fields?.get("message") as? JsonPrimitive)?.contentOrNull
-            ?: (error as? JsonPrimitive)?.contentOrNull
-            ?: if (json == null) raw else return emptySet()
+        if (message == null) return emptySet()
         return sent.filterTo(mutableSetOf()) { parameterName ->
             val name = Regex.escape(parameterName)
             val before = """\b(?:unsupported|unknown|unrecognized|unexpected) (?:request )?(?:parameter|argument|field)(?: supplied)?\s*[:=]?\s*['"\x60]?$name\b(?![./-]\w|\[)"""

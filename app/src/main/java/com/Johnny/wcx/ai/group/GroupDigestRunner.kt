@@ -199,8 +199,12 @@ object GroupDigestRunner {
             val points = part.points.ifEmpty { listOfNotNull(part.headline.takeIf { it.isNotBlank() }) }
             val progress = part.workProgress?.takeIf { config.workGroup }
             if (part.significant && (points.isNotEmpty() || part.todos.isNotEmpty() || progress != null)) {
+                val workPoint = progress?.let {
+                    val label = if (it.newTask) "已明确切换到新任务" else "工作进度"
+                    "$label：${it.progress.displayText()}"
+                }
                 parts += (points.map { "要点：$it" } + part.todos.map { "待办：$it" } +
-                    listOfNotNull(progress?.displayText()?.let { "工作进度：$it" })).joinToString("\n")
+                    listOfNotNull(workPoint)).joinToString("\n")
             }
         }
         if (parts.isEmpty()) return GroupDigestPrompts.Parsed(false, "", emptyList(), emptyList())

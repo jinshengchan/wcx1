@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -18,6 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.Johnny.wcx.ai.AiAssistantTools
 import com.Johnny.wcx.ai.AiDailyReport
@@ -27,6 +29,9 @@ import com.Johnny.wcx.ai.AiTool
 import com.Johnny.wcx.ai.MessageRendering
 import com.Johnny.wcx.ai.group.GroupDigestConfig
 import com.Johnny.wcx.features.ai.AiConfig
+import com.Johnny.wcx.features.ai.AiReplySettings
+import com.Johnny.wcx.features.ai.ReasoningEffort
+import com.Johnny.wcx.features.api.core.WeDatabaseApi
 import com.Johnny.wcx.features.api.ui.WeChatInputBarMenuApi
 import com.Johnny.wcx.features.api.ui.WeChatMessageContextMenuApi
 import com.Johnny.wcx.features.api.ui.WeCurrentConversationApi
@@ -196,6 +201,14 @@ internal fun showAiTool(
                 AiProfileStore.readProfile(talker, selection.account)?.isReady == true
             }
         }
+        val authorName by androidx.compose.runtime.produceState("", momentsPost?.author, selection.account) {
+            val author = momentsPost?.author ?: return@produceState
+            value = withContext(Dispatchers.IO) {
+                if (AiConfig.account() != selection.account || !AiAssistantTools.visible(author)) return@withContext ""
+                runCatching { WeDatabaseApi.getDisplayName(author).trim() }.getOrDefault("")
+                    .takeUnless { it == author }.orEmpty().take(60)
+            }
+        }
 
         AlertDialogContent(
             title = { Text(tool.title) },
@@ -204,6 +217,15 @@ internal fun showAiTool(
                     modifier = Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    momentsPost?.let { post ->
+                        Text(authorName.ifBlank { "发布者" }, style = MaterialTheme.typography.titleSmall)
+                        val preview = post.text.take(240).let { if (post.text.length > it.length) "$it…" else it }
+                        Text(
+                            preview.ifBlank { if (post.video) "视频动态" else "图片动态" },
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                     val scopeDescription = when (tool) {
                         AiTool.UNREAD -> "近期未读会话的部分消息"
                         AiTool.NEED_REPLY -> "最近七天内活跃会话的部分消息"
@@ -244,6 +266,9 @@ internal fun showAiTool(
                     if (errorMessage.isNotBlank()) Text(errorMessage)
                     if (result.isNotBlank()) Text(result)
                     comment?.let { generated ->
+                        generated.references?.let {
+                            Text("参考档案  记忆 ${it.memories} · 标签 ${it.tags} · 事件 ${it.events}")
+                        }
                         generated.note?.let { Text(it) }
                         if (generated.imagesUsed > 0) Text("已参考 ${generated.imagesUsed} 张图片")
                         generated.replies.forEachIndexed { index, reply ->
@@ -257,7 +282,7 @@ internal fun showAiTool(
                                 }
                             }) { Text(if (copiedIndex == index) "已复制" else "复制这条") }
                         }
-                        generated.reasoning?.let { reasoning ->
+                        generated.reasoning?.takeIf { AiReplySettings.read().effort != ReasoningEffort.OFF }?.let { reasoning ->
                             TextButton(onClick = { showReasoning = !showReasoning }) {
                                 Text(if (showReasoning) "收起思考过程" else "查看思考过程")
                             }

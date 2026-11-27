@@ -21,7 +21,7 @@ import java.util.Locale
  * 2. 判断标准只写在 system，输出格式只写在 user 末尾，一件事只写一处；
  * 3. 不写字数之外的格式要求：points 的条数与长度在 [parse] 里截断，不靠模型自觉。
  */
-object GroupDigestPrompts {
+internal object GroupDigestPrompts {
 
     fun system(): String = """
         你负责把一个微信群一段时间的聊天记录整理成摘要。
@@ -96,8 +96,10 @@ object GroupDigestPrompts {
     internal fun workRule(): String = """
         在 JSON 中添加 "workProgress"。只根据本次材料明确提到的任务或进展填写，没有新任务或进展就写 null。
         如果提取到工作进展，同时在摘要要点中体现；有 significant 字段时写 true。
-        格式 {"goals":["具体目标或阶段"],"percent":null,"note":"已有进展、阻塞或依据"}。
-        只有材料明确给出整体完成比例时才将 percent 写成 0 到 100 的整数。保留完成、阻塞等关键信息，不推测。
+        格式 {"goals":["具体目标或阶段"],"percent":null,"note":"已有进展、阻塞或依据","newTask":false}。
+        只更新材料有明确交代的字段，目标未变写空数组，说明未变写空字符串。
+        仅当材料明确切换到另一项任务时写 newTask=true，并写明新任务目标。继续推进或补充原任务时写 false。
+        只有材料明确给出当前任务的整体完成比例时才填 0 到 100 的整数，否则写 null。不推测百分比。
     """.trimIndent()
 
     // ── 解析 ────────────────────────────────────────────────────────────────
@@ -107,7 +109,7 @@ object GroupDigestPrompts {
         val headline: String,
         val points: List<String>,
         val todos: List<String>,
-        val workProgress: GroupWorkProgress? = null,
+        val workProgress: GroupWorkProgressUpdate? = null,
     )
 
     /**
@@ -126,17 +128,16 @@ object GroupDigestPrompts {
         )
     }
 
-    internal fun parseWorkProgress(raw: String): GroupWorkProgress? =
+    internal fun parseWorkProgress(raw: String): GroupWorkProgressUpdate? =
         parseWorkProgress(parseObject(raw)?.get("workProgress") as? JsonObject)
 
-    private fun parseWorkProgress(obj: JsonObject?): GroupWorkProgress? {
+    private fun parseWorkProgress(obj: JsonObject?): GroupWorkProgressUpdate? {
         if (obj == null) return null
         val goals = obj.strings("goals").distinct().take(5).map { it.take(60) }
         val percent = (obj["percent"] as? JsonPrimitive)?.intOrNull?.takeIf { it in 0..100 }
         val note = obj.string("note").take(200)
-        return GroupWorkProgress(goals, percent, note).takeUnless {
-            goals.isEmpty() && percent == null && note.isBlank()
-        }
+        if (goals.isEmpty() && percent == null && note.isBlank()) return null
+        return GroupWorkProgressUpdate(GroupWorkProgress(goals, percent, note), obj.bool("newTask") == true && goals.isNotEmpty())
     }
 
     private fun parseObject(raw: String): JsonObject? {

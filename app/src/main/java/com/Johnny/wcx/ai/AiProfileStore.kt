@@ -57,7 +57,7 @@ object AiProfileStore {
         val file = profileFile(account, profile.wxId) ?: return false
         // 新建档案只能写空位，避免重复点击覆盖已有档案或损坏后尚可恢复的文件。
         if (file.exists()) return false
-        return save(profile, account, file)
+        return AiFriendEvents.updateArchiveRemovingEvents(account, profile.wxId) { save(profile, account, file) }
     }
 
     private fun save(profile: AiProfile, account: String, file: Path): Boolean {
@@ -85,7 +85,7 @@ object AiProfileStore {
     fun deleteProfile(wxId: String, account: String? = accountId()): Boolean {
         if (account == null || AiRunState.isRunning(account, wxId)) return false
         val file = profileFile(account, wxId) ?: return false
-        if (!delete(file)) return false
+        if (!file.exists() || !AiFriendEvents.updateArchiveRemovingEvents(account, wxId) { delete(file) }) return false
         if (indexedAccount == account) summaries.remove(wxId)
         return true
     }

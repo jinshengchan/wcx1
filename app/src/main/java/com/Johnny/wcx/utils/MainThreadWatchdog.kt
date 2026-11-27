@@ -7,6 +7,7 @@ import android.os.SystemClock
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 主线程卡顿看门狗。
@@ -37,6 +38,7 @@ object MainThreadWatchdog {
     private const val PREFS = "wcx_main_thread_watchdog"
     private const val KEY_RECENT = "recent"
     private const val MAX_KEEP = 5
+    private val captureRunning = AtomicBoolean(false)
 
     @Volatile
     private var installed = false
@@ -81,11 +83,32 @@ object MainThreadWatchdog {
                     val now = SystemClock.uptimeMillis()
                     if (now - lastReportAt < REPORT_GAP_MS) continue
                     lastReportAt = now
-                    runCatching { report(mainThread, cost, msgDesc) }
+                    capture(mainThread, cost, msgDesc)
                 }
             }, "WCX-MainWatchdog").apply { isDaemon = true }.start()
         }.onFailure {
             WeLogger.w(TAG, "install failed: " + (it.message ?: it.javaClass.simpleName))
+        }
+    }
+
+    private fun capture(mainThread: Thread, cost: Long, desc: String) {
+        // Reading a stuck thread's stack may also block its caller.
+        if (!captureRunning.compareAndSet(false, true)) {
+            WeLogger.w(TAG, "主线程卡住 ${cost}ms，仍在等上一次抓栈")
+            return
+        }
+        runCatching {
+            Thread({
+                try {
+                    runCatching { report(mainThread, cost, desc) }
+                        .onFailure { WeLogger.w(TAG, "主线程抓栈失败", it) }
+                } finally {
+                    captureRunning.set(false)
+                }
+            }, "WCX-MainWatchdogDump").apply { isDaemon = true }.start()
+        }.onFailure {
+            captureRunning.set(false)
+            WeLogger.w(TAG, "无法启动主线程抓栈", it)
         }
     }
 

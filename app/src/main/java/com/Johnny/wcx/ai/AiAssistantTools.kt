@@ -190,6 +190,6 @@ internal object AiAssistantTools {
             current.withWorkProgress(progress, System.currentTimeMillis())
         }
         check(saved != null) { "工作群进度保存失败" }
-        return progress.displayText()
+        return saved.workProgressText
     }
 }

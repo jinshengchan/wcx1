@@ -72,6 +72,7 @@ data class AiProfile(
     val suggestBinding: String = "",
     val autoReplyEnabled: Boolean = false,
     val autoReplyBinding: String = "",
+    val friendEventBinding: String = "",
     val visionEnabled: Boolean = false,
     val visionBinding: String = "",
     val autoIncremental: AiAutoIncrementalSchedule? = null,

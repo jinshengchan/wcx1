@@ -26,6 +26,8 @@ internal object AiSuggestEngine {
 
     data class Access(val profile: AiProfile, val binding: AiConfig.Binding) {
         val vision: Boolean get() = profile.visionEnabled && profile.visionBinding == binding.id
+        val recordFriendEvents: Boolean
+            get() = binding.purpose == AiConfig.Purpose.FRIEND_AUTO_REPLY && profile.friendEventBinding == binding.id
     }
 
     data class Step(val round: Int, val reasoning: String?, val actions: List<String>)
@@ -92,9 +94,12 @@ internal object AiSuggestEngine {
             var delivered = firstMemory
             var toolCount = 0
             val steps = mutableListOf<Step>()
+            val recordedEvents = if (access.recordFriendEvents) AiFriendEvents.recordedTitles(account, talker, day) else emptyList()
             val messages = mutableListOf(
-                AiConfig.ChatMessage("system", systemPrompt(profile, recordEvent = !manual)),
-                AiConfig.ChatMessage("user", userPrompt(profile, lines, memories.drop(firstMemory), image != null), imageUrl = image),
+                AiConfig.ChatMessage("system", systemPrompt(profile, recordEvent = access.recordFriendEvents)),
+                AiConfig.ChatMessage(
+                    "user", userPrompt(profile, lines, memories.drop(firstMemory), image != null, recordedEvents), imageUrl = image,
+                ),
             )
             val outcome = withTimeoutOrNull(8 * 60_000L) {
                 for (round in 1..MAX_ROUNDS + 1) {
@@ -112,7 +117,9 @@ internal object AiSuggestEngine {
                         if (reasoning != null || actions.isNotEmpty()) steps += Step(round, reasoning, actions)
                     }
                     result.error?.let { return@withTimeoutOrNull Suggestion(error = it) }
-                    if (closing || result.toolCalls.isEmpty()) return@withTimeoutOrNull parse(result.text.orEmpty(), !manual)
+                    if (closing || result.toolCalls.isEmpty()) {
+                        return@withTimeoutOrNull parse(result.text.orEmpty(), access.recordFriendEvents)
+                    }
                     messages += AiConfig.ChatMessage("assistant", result.text, toolCalls = result.toolCalls)
                     for (call in result.toolCalls) {
                         if (!current()) return@withTimeoutOrNull changed
@@ -169,6 +176,7 @@ internal object AiSuggestEngine {
         if (recordEvent) {
             appendLine("仅在最新一轮出现新的见面提议、对方告知的重要情况或已确认的约定时，记录一条 friendEvent。")
             appendLine("标题简短稳定，细节只写聊天明确说过的内容。旧消息、日常闲聊和没有新的进展写 null。")
+            appendLine("已记录的事件标题仅供去重。同一件事换个说法也不重复记，不在回复里提到记录事件。")
         }
         append("只输出一行 JSON：{\"read\":\"对方的意图\",\"replies\":[\"…\",\"…\",\"…\"]")
         if (recordEvent) append(",\"friendEvent\":{\"title\":\"事件标题\",\"detail\":\"细节\"}")
@@ -180,6 +188,7 @@ internal object AiSuggestEngine {
         lines: List<AiChatHistory.Line>,
         memories: List<Pair<Int, MemoryEntry>>,
         hasImage: Boolean,
+        recordedEvents: List<String>,
     ): String = buildString {
         appendLine("近期聊天记录：")
         appendLine(AiChatHistory.transcript(lines))
@@ -192,6 +201,10 @@ internal object AiSuggestEngine {
         appendLine("对方档案，仅用于理解：")
         profile.tags.forEach { appendLine("${it.category}/${it.key}：${it.value}") }
         appendLine(memoryTitles(memories))
+        if (recordedEvents.isNotEmpty()) {
+            appendLine("今天已记录的事件标题：")
+            recordedEvents.forEach { appendLine("- $it") }
+        }
     }
 
     private val tools = Json.parseToJsonElement("""

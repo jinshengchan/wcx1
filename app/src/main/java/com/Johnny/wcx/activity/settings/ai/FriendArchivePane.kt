@@ -316,7 +316,7 @@ private fun FriendArchiveDetail(
                     confirmAiAction(
                         context,
                         "删除好友档案",
-                        "将删除「$name」的本地标签、记忆和档案设置，并停止此档案的自动功能。此操作无法撤销。",
+                        "将删除「$name」的本地标签、记忆、好友事件和档案设置，并停止此档案的自动功能。此操作无法撤销。",
                         "删除档案",
                     ) {
                         applying = true
@@ -326,7 +326,7 @@ private fun FriendArchiveDetail(
                                 AiAutoIncrementalScheduler.wake()
                                 onDelete()
                             } else {
-                                message = "档案正在处理或账号已切换，无法删除。"
+                                message = "无法删除档案，请检查账号和存储状态后重试。"
                                 applying = false
                             }
                         }

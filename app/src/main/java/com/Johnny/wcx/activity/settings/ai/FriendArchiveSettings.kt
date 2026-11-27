@@ -56,6 +56,7 @@ internal fun LazyListScope.friendArchiveSettings(
         description: String,
         enabled: Boolean,
         binding: String,
+        canAuthorize: (AiProfile, String) -> Boolean = { _, _ -> true },
         write: (AiProfile, Boolean, String) -> AiProfile,
     ) {
         item {
@@ -63,7 +64,7 @@ internal fun LazyListScope.friendArchiveSettings(
                 title,
                 enabled,
                 binding == selection?.id,
-                canEnable && selection != null,
+                canEnable && selection != null && canAuthorize(profile, selection.id),
                 disable = { save { write(it, false, "") } },
                 enable = {
                     val selected = selection ?: return@ConsentRow
@@ -74,7 +75,9 @@ internal fun LazyListScope.friendArchiveSettings(
                         "确认启用",
                     ) {
                         save {
-                            it.takeIf { it.isReady && !it.busy && bindingStillSelected(account, selected.id) }
+                            it.takeIf {
+                                it.isReady && !it.busy && bindingStillSelected(account, selected.id) && canAuthorize(it, selected.id)
+                            }
                                 ?.let { write(it, true, selected.id) }
                         }
                     }
@@ -125,10 +128,22 @@ internal fun LazyListScope.friendArchiveSettings(
     ) { current, enabled, binding -> current.copy(suggestEnabled = enabled, suggestBinding = binding) }
     setConsent(
         "好友自动回复",
-        "「$name」发来新消息时，可能自动发送$requestData，并以你的微信账号向对方发送模型生成的回复。模型识别出的重要事件会记在本机 AI 总览。",
+        "「$name」发来新消息时，可能自动发送$requestData，并以你的微信账号向对方发送模型生成的回复。",
         profile.autoReplyEnabled,
         profile.autoReplyBinding,
-    ) { current, enabled, binding -> current.copy(autoReplyEnabled = enabled, autoReplyBinding = binding) }
+    ) { current, enabled, binding ->
+        current.copy(
+            autoReplyEnabled = enabled, autoReplyBinding = binding,
+            friendEventBinding = current.friendEventBinding.takeIf { enabled && it == binding }.orEmpty(),
+        )
+    }
+    setConsent(
+        "记录好友事件",
+        "自动回复时识别「$name」提出的见面计划、重要近况或明确约定，并把事件保存在本机 AI 总览。为避免重复，会把当天已记录的事件标题发送给所选模型。",
+        profile.friendEventBinding.isNotBlank(),
+        profile.friendEventBinding,
+        canAuthorize = { current, binding -> current.autoReplyEnabled && current.autoReplyBinding == binding },
+    ) { current, _, binding -> current.copy(friendEventBinding = binding) }
     item {
         val delay = profile.effectiveAutoReplyDelaySeconds
         TextButton(enabled = canEdit, onClick = {

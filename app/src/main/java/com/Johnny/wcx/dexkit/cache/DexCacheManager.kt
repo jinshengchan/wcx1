@@ -163,6 +163,9 @@ object DexCacheManager {
     fun getOutdatedItems(items: List<IResolveDex>): List<IResolveDex> =
         items.filter { !isItemCacheValid(it) }
 
+    internal fun hasItemCache(items: List<IResolveDex>): Boolean =
+        items.any { it is BaseFeature && getCacheFile(it.name).exists() }
+
     // ---------------------------------------------------------------------------
 
     private val META_KEYS = setOf("methodHash", "timestamp")

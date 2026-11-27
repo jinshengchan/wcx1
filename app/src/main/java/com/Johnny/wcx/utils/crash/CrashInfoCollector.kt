@@ -40,7 +40,8 @@ object CrashInfoCollector {
                 "WCX Crash Report\n" +
                 "========================================\n\n" +
                 "Crash Time: " + currentTime + "\n" +
-                "Crash Type: " + crashType + "\n\n" +
+                "Crash Type: " + crashType + "\n" +
+                "Crash Classification: " + classifyCrash(throwable) + "\n\n" +
                 "========================================\n" +
                 "Device Information\n" +
                 "========================================\n" +
@@ -74,6 +75,24 @@ object CrashInfoCollector {
                 "========================================\n"
 
         return sb
+    }
+
+    private fun classifyCrash(throwable: Throwable): String {
+        val causes = generateSequence(throwable) { it.cause }.take(16).toList()
+        val frames = causes.asSequence().flatMap { it.stackTrace.asSequence() }.toList()
+        return when {
+            causes.any { it.javaClass.name == "android.os.DeadSystemException" } -> "SYSTEM_RESTART · 系统服务已断开"
+            frames.any {
+                val owner = it.className
+                owner.startsWith("com.Johnny.wcx.") || owner.startsWith("h.Hchat.") ||
+                    owner.startsWith("me.hd.wauxv.") || owner.startsWith("org.luckypray.dexkit.") ||
+                    owner.startsWith("bsh.")
+            } -> "MODULE_STACK · 调用栈包含模块或脚本帧"
+            causes.any { it.javaClass.name == "android.content.res.Resources\$NotFoundException" } ->
+                "RESOURCE_LOAD · 资源加载失败"
+            frames.any { it.className.startsWith("com.tencent.mm.") } -> "HOST_STACK · 调用栈包含微信宿主帧"
+            else -> "UNKNOWN · 调用栈不足以归因"
+        }
     }
 
     private val currentTime: String
