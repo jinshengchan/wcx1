@@ -34,12 +34,15 @@ import com.Johnny.wcx.ai.AiImportantAlerts
 import com.Johnny.wcx.ai.AiTool
 import com.Johnny.wcx.ai.group.GroupDigestConfig
 import com.Johnny.wcx.ai.group.GroupDigestStore
+import com.Johnny.wcx.ai.group.GroupWorkReport
 import com.Johnny.wcx.features.ai.AiConfig
 import com.Johnny.wcx.features.items.ai.GroupDigestEntry
 import com.Johnny.wcx.features.items.chat.AiAssistantMenus
 import com.Johnny.wcx.features.items.chat.AiToolSettings
 import com.Johnny.wcx.features.items.chat.showAiTool
+import com.Johnny.wcx.utils.android.copyToClipboard
 import com.Johnny.wcx.utils.android.showToast
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -223,6 +226,7 @@ internal fun AiWorkGroupSettings(context: Context, account: String, group: Group
         }
     }
     if (group.workGroup) {
+        WorkbenchStatus("群摘要会从同一批消息提取任务和进度，并随摘要保存快照。")
         OutlinedTextField(goal, { goal = it.take(300) }, label = { Text("工作目标") })
         Row {
             TextButton(enabled = goal != group.workGoal, onClick = {
@@ -230,29 +234,93 @@ internal fun AiWorkGroupSettings(context: Context, account: String, group: Group
                 scope.launch {
                     withContext(Dispatchers.IO) {
                         GroupDigestStore.update(group.groupId, account) {
-                            it.copy(workGoal = target, workProgress = "", workProgressAt = 0)
+                            if (it.workGoal == target) it else it.copy(
+                                workGoal = target, workProgress = "", workProgressAt = 0, workDetails = null,
+                            )
                         }
                     }
                 }
             }) { Text("保存目标") }
-            TextButton(onClick = {
-                showAiTool(context, AiTool.WORK_PROGRESS, talker = group.groupId, workGoal = group.workGoal,
-                    onResult = { answer ->
-                        scope.launch {
-                            withContext(Dispatchers.IO) {
-                                GroupDigestStore.update(group.groupId, account) {
-                                    if (it.workGroup && it.workGoal == group.workGoal) it.copy(
-                                        workProgress = answer.take(5_000), workProgressAt = System.currentTimeMillis(),
-                                    ) else it
-                                }
-                            }
-                        }
-                    })
+            TextButton(enabled = AiToolSettings.enabled(AiTool.WORK_PROGRESS), onClick = {
+                showAiTool(context, AiTool.WORK_PROGRESS, talker = group.groupId, workGroup = group, expectedAccount = account)
             }) { Text("更新进度") }
         }
-        if (group.workProgress.isNotBlank()) {
-            Text(timeLabel(group.workProgressAt))
-            Text(group.workProgress)
+        if (group.workProgressText.isNotBlank()) {
+            if (group.workProgressAt > 0) WorkbenchStatus("更新于 ${timeLabel(group.workProgressAt)}")
+            Text(group.workProgressText)
         }
+        WorkGroupReportButton(context, account, group)
+    }
+}
+
+@Composable
+private fun WorkGroupReportButton(context: Context, account: String, group: GroupDigestConfig) {
+    val scope = rememberCoroutineScope()
+    var report by remember(group.recordId) { mutableStateOf<String?>(null) }
+    var loading by remember(group.recordId) { mutableStateOf(false) }
+    var errorMessage by remember(group.recordId) { mutableStateOf("") }
+    val purpose = AiConfig.Purpose.GROUP_DIGEST
+
+    TextButton(enabled = !loading && group.digests.isNotEmpty(), onClick = {
+        loading = true
+        errorMessage = ""
+        scope.launch {
+            try {
+                val source = withContext(Dispatchers.IO) { GroupWorkReport.prepare(group.groupId, account) }
+                if (source.cachedText != null) {
+                    report = source.cachedText
+                } else {
+                    val model = checkNotNull(AiConfig.selection(purpose)?.takeIf { it.account == account }) {
+                        "请先选择群摘要模型"
+                    }
+                    confirmAiAction(
+                        context, "生成项目汇报",
+                        "将此工作群最近 ${source.count} 条已保存的摘要发送给 ${model.displayName()}。",
+                        "生成汇报",
+                    ) {
+                        loading = true
+                        scope.launch {
+                            try {
+                                report = withContext(Dispatchers.IO) {
+                                    val binding = checkNotNull(AiConfig.capture(purpose)?.takeIf {
+                                        it.id == model.id && it.account == account
+                                    }) { "模型或微信账号已变化，请重新确认" }
+                                    GroupWorkReport.generate(source, binding)
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                errorMessage = e.message ?: "生成项目汇报失败"
+                            } finally {
+                                loading = false
+                            }
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                errorMessage = e.message ?: "读取项目汇报失败"
+            } finally {
+                loading = false
+            }
+        }
+    }) { Text(if (loading) "正在整理汇报…" else "项目汇报") }
+    if (group.digests.isEmpty()) WorkbenchStatus("生成群摘要后可查看项目汇报。")
+    if (errorMessage.isNotBlank()) WorkbenchStatus(errorMessage)
+    report?.takeIf { AiConfig.isMasterEnabled && AiConfig.account() == account }?.let { text ->
+        AlertDialog(
+            onDismissRequest = { report = null },
+            title = { Text("项目汇报") },
+            text = {
+                Column(Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState())) { Text(text) }
+            },
+            dismissButton = { TextButton(onClick = { report = null }) { Text("关闭") } },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (AiConfig.isMasterEnabled && AiConfig.account() == account) copyToClipboard(context, text)
+                }) { Text("复制") }
+            },
+        )
     }
 }

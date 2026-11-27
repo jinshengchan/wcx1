@@ -26,6 +26,7 @@ internal data class GroupDigestSummary(
     val lastError: String,
     val lastHeadline: String,
     val unread: Int,
+    val workPercent: Int?,
 )
 
 @Serializable
@@ -50,9 +51,16 @@ data class GroupDigestConfig(
     val workGoal: String = "",
     val workProgress: String = "",
     val workProgressAt: Long = 0,
-
+    val workDetails: GroupWorkProgress? = null,
+    internal val workRevision: String = "",
+    internal val workReport: GroupWorkReportCache? = null,
 ) {
     internal val unread: Int get() = digests.count { !it.read }
+    val workProgressText: String get() = workDetails?.displayText() ?: workProgress
+
+    internal fun withWorkProgress(progress: GroupWorkProgress, at: Long): GroupDigestConfig =
+        if (workDetails == progress) this
+        else copy(workDetails = progress, workProgress = "", workProgressAt = at)
 
     fun nextRunAt(nowMs: Long): Long = nextRunAtOf(anchorAt, intervalMinutes, nowMs)
 
@@ -90,6 +98,7 @@ data class GroupDigestConfig(
     internal fun toSummary() = GroupDigestSummary(
         groupId, name.ifBlank { groupId }, avatarUrl, enabled, intervalMinutes, anchorAt,
         lastStatus, lastError, digests.lastOrNull()?.headline.orEmpty(), unread,
+        workPercent = workDetails?.percent?.takeIf { workGroup },
     )
 }
 
@@ -107,7 +116,24 @@ data class GroupDigest(
     val sampled: Boolean = false,
     // Old files predate unread indicators. Only newly generated summaries raise an alert.
     val read: Boolean = true,
+    val workProgress: GroupWorkProgress? = null,
 )
+
+@Serializable
+data class GroupWorkProgress(
+    val goals: List<String> = emptyList(),
+    val percent: Int? = null,
+    val note: String = "",
+) {
+    fun displayText(): String = listOfNotNull(
+        percent?.let { "整体进度 ${it}%" },
+        goals.takeIf { it.isNotEmpty() }?.joinToString("\n") { "• $it" },
+        note.takeIf { it.isNotBlank() },
+    ).joinToString("\n")
+}
+
+@Serializable
+data class GroupWorkReportCache(val sourceKey: String, val text: String)
 
 object GroupDigestStatus {
     const val OK = "ok"

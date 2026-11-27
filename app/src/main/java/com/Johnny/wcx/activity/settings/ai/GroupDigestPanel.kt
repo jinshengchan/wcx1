@@ -127,6 +127,7 @@ internal fun GroupDigestGroupList(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
+                            group.workPercent?.let { WorkbenchStatus("工作进度 ${it}%") }
                             val subtitle = group.lastHeadline.takeIf { onRemove == null && it.isNotBlank() }
                                 ?: group.statusLabel()
                             Text(

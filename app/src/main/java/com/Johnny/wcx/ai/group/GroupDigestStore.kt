@@ -134,6 +134,9 @@ object GroupDigestStore {
         val next = requested.copy(
             revision = if (scheduleChanged) UUID.randomUUID().toString() else current.revision,
             recordId = current?.recordId ?: UUID.randomUUID().toString(),
+            workRevision = if (current == null || current.workGroup != requested.workGroup || current.workGoal != requested.workGoal) {
+                UUID.randomUUID().toString()
+            } else current.workRevision,
             anchorAt = if (consentChanged) now else requested.anchorAt,
             scheduleFrom = if (consentChanged) now else current?.scheduleFrom ?: 0L,
             lastAttemptedSlotEnd = if (scheduleChanged) 0L else requested.lastAttemptedSlotEnd,

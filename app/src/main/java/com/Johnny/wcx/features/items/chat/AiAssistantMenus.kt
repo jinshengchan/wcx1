@@ -23,6 +23,7 @@ import com.Johnny.wcx.ai.AiDailyReport
 import com.Johnny.wcx.ai.AiProfileStore
 import com.Johnny.wcx.ai.AiTool
 import com.Johnny.wcx.ai.MessageRendering
+import com.Johnny.wcx.ai.group.GroupDigestConfig
 import com.Johnny.wcx.features.ai.AiConfig
 import com.Johnny.wcx.features.api.ui.WeChatInputBarMenuApi
 import com.Johnny.wcx.features.api.ui.WeChatMessageContextMenuApi
@@ -157,7 +158,7 @@ internal fun showAiTool(
     talker: String? = null,
     selectedText: String? = null,
     imageId: Long? = null,
-    workGoal: String = "",
+    workGroup: GroupDigestConfig? = null,
     expectedAccount: String? = null,
     onResult: ((String) -> Unit)? = null,
 ) {
@@ -250,7 +251,7 @@ internal fun showAiTool(
                                             "总开关、模型配置或微信账号已变化"
                                         }
                                         val response = AiAssistantTools.run(
-                                            tool, binding, input.trim(), talker, selectedText, imageId, workGoal, includeProfile,
+                                            tool, binding, input.trim(), talker, selectedText, imageId, workGroup, includeProfile,
                                             reportDate = reportDate,
                                         )
                                         if (reportDate != null) {

@@ -394,6 +394,10 @@ internal fun DigestCard(digest: GroupDigest, collapsible: Boolean = false) {
                     Text("待办", style = MaterialTheme.typography.labelLarge)
                     digest.todos.forEach { Text("• $it") }
                 }
+                digest.workProgress?.let {
+                    Text("当时的工作进度", style = MaterialTheme.typography.labelLarge)
+                    Text(it.displayText())
+                }
             }
             if (digest.sampled) WorkbenchStatus("消息较多，本条摘要按最近的部分消息生成。")
         }

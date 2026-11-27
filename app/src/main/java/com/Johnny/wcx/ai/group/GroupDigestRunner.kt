@@ -128,7 +128,7 @@ object GroupDigestRunner {
             val sampled = transcript.sampled || lines < transcript.lines.size
             val coveredFrom = if (sampled) maxOf(fromSec, chunks.first().first().atSec) else fromSec
             val parsed = withTimeoutOrNull(TOTAL_BUDGET_MS) {
-                generate(key, binding, config.name, chunks, coveredFrom, toSec)
+                generate(key, binding, config, chunks, coveredFrom, toSec)
             }
             ensureCurrent(key, binding)
             if (parsed == null) {
@@ -158,7 +158,15 @@ object GroupDigestRunner {
                 manual = manual,
                 sampled = sampled,
             )
-            update(key, config, manual) { it.withDigest(digest) }
+            update(key, config, manual) { current ->
+                if (!AiConfig.isCurrent(binding)) return@update current
+                if (!current.workGroup || current.workRevision != config.workRevision) return@update current.withDigest(digest)
+                val progress = parsed.workProgress?.takeIf {
+                    config.workGroup && current.workProgressAt == config.workProgressAt && current.workDetails == config.workDetails
+                }
+                val updated = if (progress == null) current else current.withWorkProgress(progress, System.currentTimeMillis())
+                updated.withDigest(digest.copy(workProgress = updated.workDetails))
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -170,31 +178,34 @@ object GroupDigestRunner {
     private suspend fun generate(
         key: GroupKey,
         binding: AiConfig.Binding,
-        name: String,
+        config: GroupDigestConfig,
         chunks: List<List<GroupTranscript.Line>>,
         fromSec: Long,
         toSec: Long,
     ): GroupDigestPrompts.Parsed? {
+        val name = config.name
         if (chunks.size == 1) {
             val raw = call(key, binding, GroupDigestPrompts.system(),
-                GroupDigestPrompts.user(name, fromSec, toSec, GroupTranscript.transcript(chunks.single())))
+                GroupDigestPrompts.user(name, fromSec, toSec, GroupTranscript.transcript(chunks.single()), config.workGroup))
             return raw?.let(::parseFinal)
         }
 
         val parts = mutableListOf<String>()
         for (lines in chunks) {
             val raw = call(key, binding, GroupDigestPrompts.sliceSystem(), GroupDigestPrompts.sliceUser(
-                name, lines.first().atSec, lines.last().atSec + 1, GroupTranscript.transcript(lines),
+                name, lines.first().atSec, lines.last().atSec + 1, GroupTranscript.transcript(lines), config.workGroup,
             )) ?: return null
             val part = GroupDigestPrompts.parse(raw) ?: return null
             val points = part.points.ifEmpty { listOfNotNull(part.headline.takeIf { it.isNotBlank() }) }
-            if (part.significant && (points.isNotEmpty() || part.todos.isNotEmpty())) {
-                parts += (points.map { "要点：$it" } + part.todos.map { "待办：$it" }).joinToString("\n")
+            val progress = part.workProgress?.takeIf { config.workGroup }
+            if (part.significant && (points.isNotEmpty() || part.todos.isNotEmpty() || progress != null)) {
+                parts += (points.map { "要点：$it" } + part.todos.map { "待办：$it" } +
+                    listOfNotNull(progress?.displayText()?.let { "工作进度：$it" })).joinToString("\n")
             }
         }
         if (parts.isEmpty()) return GroupDigestPrompts.Parsed(false, "", emptyList(), emptyList())
         val merged = call(key, binding, GroupDigestPrompts.mergeSystem(),
-            GroupDigestPrompts.mergeUser(name, fromSec, toSec, parts)) ?: return null
+            GroupDigestPrompts.mergeUser(name, fromSec, toSec, parts, config.workGroup)) ?: return null
         return parseFinal(merged)
     }
 
