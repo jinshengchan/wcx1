@@ -589,6 +589,7 @@ data class AiProfileSummary(
     val memoryCount: Int = 0,
     val lastError: String? = null,
     val autoIncremental: AiAutoIncrementalSchedule? = null,
+    val autoReplyEnabled: Boolean = false,
 ) {
     val subtitle: String
         get() = when {

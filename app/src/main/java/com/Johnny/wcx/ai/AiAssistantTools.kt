@@ -96,7 +96,6 @@ internal object AiAssistantTools {
         selectedText: String? = null,
         imageId: Long? = null,
         workGroup: GroupDigestConfig? = null,
-        includeProfile: Boolean = false,
         reportDate: LocalDate? = null,
     ): String {
         check(AiConfig.isCurrent(binding)) { "总开关、模型配置或微信账号已变化" }
@@ -152,22 +151,7 @@ internal object AiAssistantTools {
                 "<聊天记录>\n$lines\n</聊天记录>"
             }
             AiTool.IMAGE -> "请处理这张图片"
-            AiTool.MOMENTS_COMMENT -> {
-                val post = selectedText.orEmpty().take(3000)
-                val profile = talker?.takeIf { includeProfile }?.let {
-                    AiProfileStore.readProfile(it, account)?.takeIf(AiProfile::isReady)
-                }
-                if (profile == null) post else buildString {
-                    append("朋友圈正文：").append(post)
-                    if (profile.style.summary.isNotBlank()) append("\n我的表达风格：").append(profile.style.summary.take(600))
-                    profile.tags.take(5).forEach {
-                        append("\n好友档案：").append(it.key.take(50)).append("：").append(it.value.take(100))
-                    }
-                    profile.memories.takeLast(3).forEach {
-                        append("\n近期记忆：").append(it.title.take(60)).append("：").append(it.detail.take(120))
-                    }
-                }
-            }
+            AiTool.MOMENTS_COMMENT -> error("请从朋友圈打开评论建议")
             else -> selectedText ?: render(
                 messages(account, requireNotNull(talker), dayStart(today.minusDays(30)), 30).asReversed(),
             )

@@ -55,7 +55,8 @@ internal fun AiAssistantHelp() {
         Text("模型", style = MaterialTheme.typography.titleSmall)
         Text("在「AI 回复助手」添加 API 配置，再到本页「设置」选择工具模型。好友档案和群聊摘要继续各自选择模型。")
         Text("从微信使用", style = MaterialTheme.typography.titleSmall)
-        Text("打开「聊天输入栏增强」，长按发送键或加号可查看聊天总结、待办、问答、群纪要、周报和跨会话工具。长按消息可润色、写备注、读图翻译或速读长消息。长按有文字的朋友圈可生成评论建议。")
+        Text("打开「聊天输入栏增强」，长按发送键或加号可查看聊天总结、待办、问答、群纪要、周报和跨会话工具。长按消息可润色、写备注、读图翻译或速读长消息。长按朋友圈可生成评论建议，并选择是否带上图片。")
+        Text("首页的 AI 总览可查看今日总结、好友事件和群摘要。已启用档案自动回复的好友有新约定时，事件会记在总览里。")
         Text("生成与定时", style = MaterialTheme.typography.titleSmall)
         Text("手动工具点击「生成」才会向所选服务发送内容。每日总结、好友档案和群聊摘要的定时运行需要分别开启。关闭总开关会暂停运行并隐藏相关入口。")
     }
@@ -82,7 +83,7 @@ internal fun AiAssistantSettings(context: Context, account: String?, enabled: Bo
             var doubleTap by remember { mutableStateOf(AiToolSettings.doubleTapEnabled) }
             AiSettingSwitch("双击回复建议", doubleTap) { doubleTap = it; AiToolSettings.doubleTapEnabled = it }
             var groupEntry by remember { mutableStateOf(GroupDigestEntry.entryEnabled) }
-            AiSettingSwitch("首页群总结入口", groupEntry) { groupEntry = it; GroupDigestEntry.entryEnabled = it }
+            AiSettingSwitch("首页 AI 总览入口", groupEntry) { groupEntry = it; GroupDigestEntry.entryEnabled = it }
             var alerts by remember { mutableStateOf(AiImportantAlerts.enabled) }
             AiSettingSwitch("重要信息提醒", alerts) { alerts = it; AiImportantAlerts.enabled = it }
             Text("从自动回复处理的来信中按规则提取期限、金额和地点，保存在本机。")
@@ -254,7 +255,7 @@ internal fun AiWorkGroupSettings(context: Context, account: String, group: Group
 }
 
 @Composable
-private fun WorkGroupReportButton(context: Context, account: String, group: GroupDigestConfig) {
+internal fun WorkGroupReportButton(context: Context, account: String, group: GroupDigestConfig) {
     val scope = rememberCoroutineScope()
     var report by remember(group.recordId) { mutableStateOf<String?>(null) }
     var loading by remember(group.recordId) { mutableStateOf(false) }

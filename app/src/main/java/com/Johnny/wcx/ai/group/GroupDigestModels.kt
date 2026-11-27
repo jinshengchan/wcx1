@@ -27,6 +27,8 @@ internal data class GroupDigestSummary(
     val lastHeadline: String,
     val unread: Int,
     val workPercent: Int?,
+    val workTask: String,
+    val lastDigestAt: Long,
 )
 
 @Serializable
@@ -99,6 +101,8 @@ data class GroupDigestConfig(
         groupId, name.ifBlank { groupId }, avatarUrl, enabled, intervalMinutes, anchorAt,
         lastStatus, lastError, digests.lastOrNull()?.headline.orEmpty(), unread,
         workPercent = workDetails?.percent?.takeIf { workGroup },
+        workTask = if (workGroup) workDetails?.goals?.firstOrNull().orEmpty().ifBlank { workGoal } else "",
+        lastDigestAt = digests.lastOrNull()?.createdAt ?: 0,
     )
 }
 

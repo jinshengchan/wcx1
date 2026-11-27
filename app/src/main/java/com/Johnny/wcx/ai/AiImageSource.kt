@@ -7,10 +7,12 @@ import android.util.Base64
 import com.Johnny.wcx.features.api.core.WeDatabaseApi
 import com.Johnny.wcx.features.api.core.WeMessageApi
 import com.Johnny.wcx.features.api.core.models.WeMessage
+import com.Johnny.wcx.features.api.ui.WeMomentsApi
 import com.tencent.mm.plugin.gif.MMWXGFJNI
 import java.io.ByteArrayOutputStream
 import java.nio.file.Path
 import kotlin.io.path.fileSize
+import kotlin.io.path.inputStream
 import kotlin.io.path.readBytes
 
 internal object AiImageSource {
@@ -37,12 +39,36 @@ internal object AiImageSource {
             WeMessageApi.cachedAiImagePath(serverId, talker, account)?.let(::readJpeg)
         }.getOrNull() ?: return null
         if (WeDatabaseApi.currentAiAccount() != account) return null
+        return dataUrl(jpeg)
+    }
+
+    fun momentDataUrl(path: String): String? = runCatching {
+        val input = runCatching { Path.of(path).inputStream() }.getOrNull()
+            ?: WeMomentsApi.openVfsInput(path) ?: return null
+        val bytes = input.use { stream ->
+            val out = ByteArrayOutputStream()
+            val buffer = ByteArray(8192)
+            while (true) {
+                val count = stream.read(buffer)
+                if (count < 0) break
+                if (out.size() + count > MAX_SOURCE_BYTES) return null
+                out.write(buffer, 0, count)
+            }
+            out.toByteArray()
+        }
+        encodeJpeg(bytes)?.let(::dataUrl)
+    }.getOrNull()
+
+    private fun dataUrl(jpeg: ByteArray): String {
         return "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
     }
 
     private fun readJpeg(path: Path): ByteArray? {
         if (path.fileSize() !in 1L..MAX_SOURCE_BYTES) return null
-        val bytes = path.readBytes()
+        return encodeJpeg(path.readBytes())
+    }
+
+    private fun encodeJpeg(bytes: ByteArray): ByteArray? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         val raw = if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {

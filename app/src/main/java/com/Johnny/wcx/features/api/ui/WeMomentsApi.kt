@@ -678,6 +678,9 @@ object WeMomentsApi : ApiFeature(), IResolveDex {
         pendingAlbumRepostText.compareAndSet(text, null)
     }
 
+    internal fun openVfsInput(path: String): InputStream? =
+        runCatching { vfsReadMethod.invoke(null, path) as? InputStream }.getOrNull()
+
     fun copyVfsFile(src: String, dest: String): Boolean {
         return try {
             val input = vfsReadMethod.invoke(null, src) as? InputStream ?: return false

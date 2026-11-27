@@ -176,4 +176,5 @@ private fun AiProfile.toSummary(): AiProfileSummary = AiProfileSummary(
     memoryCount = memories.size,
     lastError = lastError,
     autoIncremental = autoIncremental,
+    autoReplyEnabled = autoReplyEnabled,
 )

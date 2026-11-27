@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Badge
@@ -32,6 +33,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import com.Johnny.wcx.ai.AiProfileSummary
 import com.Johnny.wcx.ai.group.GroupDigestConfig
 import com.Johnny.wcx.ai.group.GroupDigestStatus
 import com.Johnny.wcx.ai.group.GroupDigestStore
@@ -43,7 +45,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
-internal fun showGroupDigestPanel(context: Context) = showComposeDialog(context) {
+internal fun showAiOverview(context: Context) = showComposeDialog(context) {
     val owner by produceState<String?>(null) {
         value = withContext(Dispatchers.IO) { GroupDigestStore.accountId() }
     }
@@ -55,24 +57,24 @@ internal fun showGroupDigestPanel(context: Context) = showComposeDialog(context)
         }
     }
     var selected by remember { mutableStateOf<GroupDigestSummary?>(null) }
+    var selectedFriend by remember { mutableStateOf<AiProfileSummary?>(null) }
     val group = selected
+    val friend = selectedFriend
     AlertDialogContent(
-        title = { Text(group?.name ?: "群聊摘要") },
+        title = { Text(group?.name ?: friend?.overviewName() ?: "AI 总览") },
         text = {
             when {
-                accountChanged -> WorkbenchStatus("微信账号已切换，请重新打开群聊摘要。")
-                account == null -> WorkbenchStatus("请登录微信后重新打开群聊摘要。")
-                group == null -> {
-                    val groups by loadDigestGroups(account)
-                    GroupDigestGroupList(groups, "可在 AI 助手的「群组」中添加群聊。") {
-                        selected = it
-                    }
-                }
-                else -> GroupDigestHistory(account, group.groupId)
+                accountChanged -> WorkbenchStatus("微信账号已切换，请重新打开 AI 总览。")
+                account == null -> WorkbenchStatus("请登录微信后重新打开 AI 总览。")
+                group != null -> GroupDigestHistory(context, account, group.groupId)
+                friend != null -> AiOverviewFriendHistory(context, account, friend)
+                else -> AiOverviewSections(context, account, onFriend = { selectedFriend = it }, onGroup = { selected = it })
             }
         },
         dismissButton = {
-            if (group != null && !accountChanged) TextButton(onClick = { selected = null }) { Text("返回列表") }
+            if ((group != null || friend != null) && !accountChanged) {
+                TextButton(onClick = { selected = null; selectedFriend = null }) { Text("返回总览") }
+            }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
     )
@@ -101,45 +103,56 @@ internal fun GroupDigestGroupList(
             Modifier.fillMaxWidth().heightIn(max = 480.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            items(groups, key = { it.groupId }) { group ->
-                OutlinedCard(Modifier.fillMaxWidth()) {
-                    Row(
-                        Modifier.fillMaxWidth().combinedClickable(
-                            onClick = { onSelect(group) },
-                            onLongClick = onRemove?.let { { it(group) } },
-                            onLongClickLabel = if (onRemove != null) "移除群聊" else null,
-                        ).padding(12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (group.avatarUrl.isNotBlank()) {
-                            AsyncImage(
-                                model = group.avatarUrl,
-                                contentDescription = null,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.size(36.dp).clip(RoundedCornerShape(6.dp)),
-                            )
-                        }
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(
-                                group.name,
-                                style = MaterialTheme.typography.titleSmall,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            group.workPercent?.let { WorkbenchStatus("工作进度 ${it}%") }
-                            val subtitle = group.lastHeadline.takeIf { onRemove == null && it.isNotBlank() }
-                                ?: group.statusLabel()
-                            Text(
-                                subtitle,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                        if (group.unread > 0) Badge { Text(group.unread.toString()) }
-                    }
+            digestGroupItems(groups, onRemove, onSelect)
+        }
+    }
+}
+
+internal fun LazyListScope.digestGroupItems(
+    groups: List<GroupDigestSummary>,
+    onRemove: ((GroupDigestSummary) -> Unit)? = null,
+    onSelect: (GroupDigestSummary) -> Unit,
+) {
+    items(groups, key = { it.groupId }) { group ->
+        OutlinedCard(Modifier.fillMaxWidth()) {
+            Row(
+                Modifier.fillMaxWidth().combinedClickable(
+                    onClick = { onSelect(group) },
+                    onLongClick = onRemove?.let { { it(group) } },
+                    onLongClickLabel = if (onRemove != null) "移除群聊" else null,
+                ).padding(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (group.avatarUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = group.avatarUrl,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.size(36.dp).clip(RoundedCornerShape(6.dp)),
+                    )
                 }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        group.name,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    listOfNotNull(
+                        group.workTask.takeIf { it.isNotBlank() },
+                        group.workPercent?.let { "${it}%" },
+                    ).takeIf { it.isNotEmpty() }?.let { WorkbenchStatus(it.joinToString(" · ")) }
+                    val subtitle = group.lastHeadline.takeIf { onRemove == null && it.isNotBlank() }
+                        ?: group.statusLabel()
+                    Text(
+                        subtitle,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (group.unread > 0) Badge { Text(group.unread.toString()) }
             }
         }
     }
@@ -156,7 +169,7 @@ private fun GroupDigestSummary.statusLabel(): String = when {
 }
 
 @Composable
-private fun GroupDigestHistory(account: String, id: String) {
+private fun GroupDigestHistory(context: Context, account: String, id: String) {
     var loaded by remember(account, id) { mutableStateOf(false) }
     val config by produceState<GroupDigestConfig?>(null, account, id) {
         while (true) {
@@ -165,16 +178,16 @@ private fun GroupDigestHistory(account: String, id: String) {
             delay(1500)
         }
     }
-    val digests = config?.digests
+    val saved = config
     when {
         !loaded -> WorkbenchStatus("正在读取历史摘要…")
-        digests == null -> WorkbenchStatus("群聊已移除或暂时无法读取。")
-        digests.isEmpty() -> WorkbenchStatus("暂无摘要")
-        else -> LazyColumn(
-            Modifier.fillMaxWidth().heightIn(max = 480.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            items(digests.asReversed(), key = { it.id }) { DigestCard(it) }
+        saved == null -> WorkbenchStatus("群聊已移除或暂时无法读取。")
+        saved.digests.isEmpty() -> WorkbenchStatus("暂无摘要")
+        else -> Column(Modifier.heightIn(max = 480.dp)) {
+            if (saved.workGroup) WorkGroupReportButton(context, account, saved)
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(saved.digests.asReversed(), key = { it.id }) { DigestCard(it, collapsible = true) }
+            }
         }
     }
 }

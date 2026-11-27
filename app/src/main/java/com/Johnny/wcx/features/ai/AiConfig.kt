@@ -87,6 +87,7 @@ internal object AiConfig {
         val toolCalls: List<ToolCall>? = null,
         val toolCallId: String? = null,
         val imageUrl: String? = null,
+        val imageUrls: List<String> = emptyList(),
     )
 
     data class ChatResult(
@@ -262,17 +263,20 @@ internal object AiConfig {
     }
 
     private fun ChatMessage.encodedContent(): JsonElement {
-        val image = imageUrl?.takeIf { role == "user" && it.startsWith("data:image/jpeg;base64,") }
-            ?: return content?.let(::JsonPrimitive) ?: JsonNull
+        val images = if (role == "user") (listOfNotNull(imageUrl) + imageUrls)
+            .filter { it.startsWith("data:image/jpeg;base64,") }.distinct().take(3) else emptyList()
+        if (images.isEmpty()) return content?.let(::JsonPrimitive) ?: JsonNull
         return buildJsonArray {
             add(buildJsonObject {
                 put("type", "text")
                 put("text", content.orEmpty())
             })
-            add(buildJsonObject {
-                put("type", "image_url")
-                put("image_url", buildJsonObject { put("url", image) })
-            })
+            images.forEach { image ->
+                add(buildJsonObject {
+                    put("type", "image_url")
+                    put("image_url", buildJsonObject { put("url", image) })
+                })
+            }
         }
     }
 

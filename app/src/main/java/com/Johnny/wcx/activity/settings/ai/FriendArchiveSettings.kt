@@ -125,7 +125,7 @@ internal fun LazyListScope.friendArchiveSettings(
     ) { current, enabled, binding -> current.copy(suggestEnabled = enabled, suggestBinding = binding) }
     setConsent(
         "好友自动回复",
-        "「$name」发来新消息时，可能自动发送$requestData，并以你的微信账号向对方发送模型生成的回复。",
+        "「$name」发来新消息时，可能自动发送$requestData，并以你的微信账号向对方发送模型生成的回复。模型识别出的重要事件会记在本机 AI 总览。",
         profile.autoReplyEnabled,
         profile.autoReplyBinding,
     ) { current, enabled, binding -> current.copy(autoReplyEnabled = enabled, autoReplyBinding = binding) }

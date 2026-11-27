@@ -37,6 +37,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.Johnny.wcx.ai.AiProfileStore
+import com.Johnny.wcx.ai.AiFriendEvents
 import com.Johnny.wcx.ai.AiSuggestEngine
 import com.Johnny.wcx.ai.MessageRendering
 import com.Johnny.wcx.features.ai.AiConfig
@@ -792,10 +793,17 @@ object AIAutoReply : ClickableFeature(), WeDatabaseListenerApi.IInsertListener {
             if (imageMessageId == null) com.Johnny.wcx.ai.AiImportantAlerts.record(msg.talker, msg.actualContent)
             val proposal = AiSuggestEngine.suggest(access, imageMessageId, canContinue = ::current)
             proposal.error?.let { addDebugLog(it) }
-            val reply = proposal.replies.firstOrNull() ?: return@withPermit
+            val reply = proposal.replies.firstOrNull()
+            if (reply == null && proposal.friendEvent == null) return@withPermit
             if (permitted()) {
                 tasks.enqueueIfCurrent(ticket) {
-                    if (AiConfig.isMasterEnabled && WeApi.selfWxId == access.binding.account) enqueueReply(msg.talker, reply)
+                    proposal.friendEvent?.let { event ->
+                        val account = access.binding.account
+                        runCatching {
+                            AiFriendEvents.append(account, msg.talker, msg.id, event.title, event.detail, ::permitted)
+                        }
+                    }
+                    if (reply != null && permitted()) enqueueReply(msg.talker, reply)
                 }
             }
         }

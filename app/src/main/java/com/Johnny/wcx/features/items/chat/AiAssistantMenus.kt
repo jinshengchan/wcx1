@@ -4,6 +4,7 @@ import android.content.Context
 import com.tencent.mm.pluginsdk.ui.chat.ChatFooter
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -20,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.Johnny.wcx.ai.AiAssistantTools
 import com.Johnny.wcx.ai.AiDailyReport
+import com.Johnny.wcx.ai.AiMomentsComment
 import com.Johnny.wcx.ai.AiProfileStore
 import com.Johnny.wcx.ai.AiTool
 import com.Johnny.wcx.ai.MessageRendering
@@ -116,18 +118,23 @@ object AiAssistantMenus : ApiFeature() {
             id = 777075,
             text = "AI 帮我评论",
             drawable = SendIcon,
-            shouldShow = { _, _ -> available(AiTool.MOMENTS_COMMENT) },
+            shouldShow = { _, _ -> available(AiTool.MOMENTS_COMMENT) && AiConfig.isConfigured(AiConfig.Purpose.TOOLS) },
             onClick = { moment ->
                 if (available(AiTool.MOMENTS_COMMENT)) {
-                    val post = runCatching { WeMomentsApi.getTimelineProto(moment.snsInfo) }.getOrNull()
-                    val author = post?.userName?.takeIf { it.isNotBlank() }
-                    val text = post?.contentDesc
-                    if (author != null && !AiAssistantTools.visible(author)) {
+                    val account = AiConfig.account()
+                    val proto = runCatching { WeMomentsApi.getTimelineProto(moment.snsInfo) }.getOrNull()
+                    val author = (proto?.userName ?: WeMomentsApi.getOwnerWxId(moment)).orEmpty()
+                    val text = (proto?.contentDesc ?: WeMomentsApi.getContentText(moment.snsInfo)).orEmpty().trim()
+                    val media = proto?.contentObj?.mediaList.orEmpty()
+                    if (account == null || author == account || !AiAssistantTools.visible(author)) {
                         showToast(moment.activity, "这条朋友圈不适用 AI 评论")
-                    } else if (text.isNullOrBlank()) {
-                        showToast(moment.activity, "这条朋友圈没有文字正文")
+                    } else if (text.isBlank() && media.isEmpty()) {
+                        showToast(moment.activity, "这条朋友圈没有可用的正文或图片，可打开详情后再试")
                     } else {
-                        showAiTool(moment.activity, AiTool.MOMENTS_COMMENT, talker = author, selectedText = text)
+                        val timeline = moment.timelineObject ?: WeMomentsApi.getNativeTimeline(moment.snsInfo)
+                        val native = timeline?.let { runCatching { WeMomentsApi.getNativeMediaList(it) }.getOrNull() }
+                        val post = AiMomentsComment.Post(author, text, media, native, proto?.contentObj?.type in listOf(5, 15))
+                        showAiTool(moment.activity, AiTool.MOMENTS_COMMENT, talker = author, expectedAccount = account, momentsPost = post)
                     }
                 }
             },
@@ -161,6 +168,7 @@ internal fun showAiTool(
     workGroup: GroupDigestConfig? = null,
     expectedAccount: String? = null,
     onResult: ((String) -> Unit)? = null,
+    momentsPost: AiMomentsComment.Post? = null,
 ) {
     if (!AiConfig.isMasterEnabled || !AiToolSettings.enabled(tool)) return
     val selection = AiConfig.selection(AiConfig.Purpose.TOOLS)
@@ -179,6 +187,10 @@ internal fun showAiTool(
         var errorMessage by remember { mutableStateOf("") }
         var loading by remember { mutableStateOf(false) }
         var includeProfile by remember { mutableStateOf(false) }
+        var includeImages by remember { mutableStateOf(momentsPost?.hasImages == true) }
+        var comment by remember { mutableStateOf<AiMomentsComment.Result?>(null) }
+        var copiedIndex by remember { mutableStateOf<Int?>(null) }
+        var showReasoning by remember { mutableStateOf(false) }
         val canIncludeProfile by androidx.compose.runtime.produceState(false, talker) {
             value = tool == AiTool.MOMENTS_COMMENT && talker != null && withContext(Dispatchers.IO) {
                 AiProfileStore.readProfile(talker, selection.account)?.isReady == true
@@ -201,17 +213,23 @@ internal fun showAiTool(
                         AiTool.IMAGE -> "选中的图片"
                         AiTool.WORK_PROGRESS -> "该群最近七天的部分消息和已保存的工作目标"
                         AiTool.ANNOUNCEMENT, AiTool.MOMENTS_COPY -> "你填写的主题"
-                        AiTool.MOMENTS_COMMENT -> "这条朋友圈的正文"
+                        AiTool.MOMENTS_COMMENT -> "这条朋友圈的正文和下方勾选的素材"
                         AiTool.REMARK, AiTool.POLISH, AiTool.LONG_TEXT -> "选中的消息"
                         else -> "当前聊天的部分近期消息"
                     }
                     Text("生成时会发送$scopeDescription 至 ${selection.endpointHost}。")
+                    if (momentsPost?.hasImages == true) {
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            Checkbox(checked = includeImages, onCheckedChange = { includeImages = it }, enabled = !loading && comment == null)
+                            Text(if (momentsPost.video) "同时发送视频封面（如可用）" else "同时发送最多 3 张图片")
+                        }
+                    }
                     if (canIncludeProfile) {
                         androidx.compose.foundation.layout.Row(
                             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                         ) {
-                            Checkbox(checked = includeProfile, onCheckedChange = { includeProfile = it }, enabled = !loading)
-                            Text("同时发送好友档案摘要，以贴近我的表达方式")
+                            Checkbox(checked = includeProfile, onCheckedChange = { includeProfile = it }, enabled = !loading && comment == null)
+                            Text("同时发送好友档案摘要和近期事件标题")
                         }
                     }
                     tool.inputLabel?.let { label ->
@@ -225,6 +243,27 @@ internal fun showAiTool(
                     if (loading) Text("正在生成…")
                     if (errorMessage.isNotBlank()) Text(errorMessage)
                     if (result.isNotBlank()) Text(result)
+                    comment?.let { generated ->
+                        generated.note?.let { Text(it) }
+                        if (generated.imagesUsed > 0) Text("已参考 ${generated.imagesUsed} 张图片")
+                        generated.replies.forEachIndexed { index, reply ->
+                            Text(reply)
+                            TextButton(onClick = {
+                                if (AiConfig.account() == selection.account && AiConfig.isMasterEnabled &&
+                                    momentsPost?.author?.let(AiAssistantTools::visible) == true
+                                ) {
+                                    copyToClipboard(reply)
+                                    copiedIndex = index
+                                }
+                            }) { Text(if (copiedIndex == index) "已复制" else "复制这条") }
+                        }
+                        generated.reasoning?.let { reasoning ->
+                            TextButton(onClick = { showReasoning = !showReasoning }) {
+                                Text(if (showReasoning) "收起思考过程" else "查看思考过程")
+                            }
+                            if (showReasoning) Text(reasoning)
+                        }
+                    }
                 }
             },
             dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
@@ -233,9 +272,10 @@ internal fun showAiTool(
                     TextButton(onClick = {
                         if (AiConfig.account() == selection.account && AiConfig.isMasterEnabled) copyToClipboard(result)
                     }) { Text("复制") }
-                } else {
+                } else if (comment == null) {
                     TextButton(
-                        enabled = !loading && (tool.inputLabel == null || input.isNotBlank()),
+                        enabled = !loading && (tool.inputLabel == null || input.isNotBlank()) &&
+                            (momentsPost == null || momentsPost.text.isNotBlank() || includeImages),
                         onClick = {
                             if (loading) return@TextButton
                             val reportDate = if (tool == AiTool.DAILY_REPORT) LocalDate.now() else null
@@ -243,16 +283,18 @@ internal fun showAiTool(
                             errorMessage = ""
                             scope.launch {
                                 try {
-                                    val answer = withContext(Dispatchers.IO) {
+                                    val generated = withContext(Dispatchers.IO) {
                                         val binding = checkNotNull(AiConfig.capture(AiConfig.Purpose.TOOLS)) {
                                             "AI 助手已关闭或模型不可用"
                                         }
                                         check(binding.id == selection.id && binding.account == selection.account) {
                                             "总开关、模型配置或微信账号已变化"
                                         }
+                                        if (momentsPost != null) return@withContext AiMomentsComment.generate(
+                                            momentsPost, binding, includeImages, includeProfile,
+                                        )
                                         val response = AiAssistantTools.run(
-                                            tool, binding, input.trim(), talker, selectedText, imageId, workGroup, includeProfile,
-                                            reportDate = reportDate,
+                                            tool, binding, input.trim(), talker, selectedText, imageId, workGroup, reportDate,
                                         )
                                         if (reportDate != null) {
                                             check(AiDailyReport.saveReport(binding, reportDate, response)) {
@@ -264,8 +306,13 @@ internal fun showAiTool(
                                     check(AiConfig.isMasterEnabled && AiConfig.account() == selection.account) {
                                         "总开关或微信账号已变化"
                                     }
-                                    result = answer
-                                    onResult?.invoke(answer)
+                                    when (generated) {
+                                        is AiMomentsComment.Result -> comment = generated
+                                        is String -> {
+                                            result = generated
+                                            onResult?.invoke(generated)
+                                        }
+                                    }
                                 } catch (e: CancellationException) {
                                     throw e
                                 } catch (e: Exception) {

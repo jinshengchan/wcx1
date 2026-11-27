@@ -31,7 +31,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.Johnny.wcx.features.ai.AiConfig
 import com.Johnny.wcx.preferences.WePrefs
-import com.Johnny.wcx.activity.settings.ai.showGroupDigestPanel
+import com.Johnny.wcx.activity.settings.ai.showAiOverview
+import com.Johnny.wcx.ai.AiFriendEvents
 import com.Johnny.wcx.ai.group.GroupDigestStore
 import com.Johnny.wcx.features.items.beautify.HomeSidePanelFeature
 import com.Johnny.wcx.ui.style.WxPalette
@@ -92,7 +93,9 @@ internal object GroupDigestEntry : Application.ActivityLifecycleCallbacks {
                     val visible = isVisible(activity, decor)
                     view.visibility = if (visible) View.VISIBLE else View.GONE
                     unread = if (visible) withContext(Dispatchers.IO) {
-                        GroupDigestStore.accountId()?.let(GroupDigestStore::unreadTotal) ?: 0
+                        GroupDigestStore.accountId()?.let { account ->
+                            GroupDigestStore.unreadTotal(account) + AiFriendEvents.unreadTotal(account)
+                        } ?: 0
                     } else 0
                     delay(500)
                 }
@@ -101,13 +104,13 @@ internal object GroupDigestEntry : Application.ActivityLifecycleCallbacks {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     IconButton(
                         onClick = {
-                            if (isVisible(activity, decor)) showGroupDigestPanel(activity)
+                            if (isVisible(activity, decor)) showAiOverview(activity)
                         },
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         Icon(
                             MaterialSymbols.Outlined.Article,
-                            contentDescription = if (unread == 0) "群聊摘要" else "群聊摘要，$unread 条未读",
+                            contentDescription = if (unread == 0) "AI 总览" else "AI 总览，$unread 条未读",
                             tint = WxPalette.textPrimary(),
                             modifier = Modifier.size(22.dp),
                         )
