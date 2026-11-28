@@ -21,6 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -33,6 +34,7 @@ import com.Johnny.wcx.features.ai.AiConfig
 import com.Johnny.wcx.preferences.WePrefs
 import com.Johnny.wcx.activity.settings.ai.showAiOverview
 import com.Johnny.wcx.ai.AiFriendEvents
+import com.Johnny.wcx.ai.AiProfileStore
 import com.Johnny.wcx.ai.group.GroupDigestStore
 import com.Johnny.wcx.features.items.beautify.HomeSidePanelFeature
 import com.Johnny.wcx.ui.style.WxPalette
@@ -88,15 +90,20 @@ internal object GroupDigestEntry : Application.ActivityLifecycleCallbacks {
         view.visibility = View.GONE
         view.setContent {
             var unread by remember { mutableIntStateOf(0) }
+            var visibleAccount by remember { mutableStateOf<String?>(null) }
             LaunchedEffect(activity) {
                 while (true) {
-                    val visible = isVisible(activity, decor)
-                    view.visibility = if (visible) View.VISIBLE else View.GONE
-                    unread = if (visible) withContext(Dispatchers.IO) {
-                        GroupDigestStore.accountId()?.let { account ->
+                    val account = if (isVisible(activity, decor)) GroupDigestStore.accountId() else null
+                    val count = if (account != null) withContext(Dispatchers.IO) {
+                        if (GroupDigestStore.hasEnabledGroup(account) || AiProfileStore.hasReadyAutoReply(account)) {
                             GroupDigestStore.unreadTotal(account) + AiFriendEvents.unreadTotal(account)
-                        } ?: 0
-                    } else 0
+                        } else null
+                    } else null
+                    visibleAccount = account?.takeIf {
+                        count != null && it == GroupDigestStore.accountId() && isVisible(activity, decor)
+                    }
+                    view.visibility = if (visibleAccount != null) View.VISIBLE else View.GONE
+                    unread = if (visibleAccount != null) count ?: 0 else 0
                     delay(500)
                 }
             }
@@ -104,7 +111,9 @@ internal object GroupDigestEntry : Application.ActivityLifecycleCallbacks {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     IconButton(
                         onClick = {
-                            if (isVisible(activity, decor)) showAiOverview(activity)
+                            if (visibleAccount != null && visibleAccount == GroupDigestStore.accountId() &&
+                                isVisible(activity, decor)
+                            ) showAiOverview(activity)
                         },
                         modifier = Modifier.fillMaxSize(),
                     ) {

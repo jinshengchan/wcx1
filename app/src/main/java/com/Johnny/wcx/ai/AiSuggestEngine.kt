@@ -18,6 +18,7 @@ import kotlinx.serialization.json.intOrNull
 
 internal object AiSuggestEngine {
     private const val MAX_RECENT = 400
+    private const val MAX_DEFAULT_MEMORIES = 100
     private const val MAX_ROUNDS = 10
     private const val MAX_TOOL_CALLS = 24
     private const val READ_MEMORY = "read_memory"
@@ -90,9 +91,7 @@ internal object AiSuggestEngine {
             if (imageMessageId != null && image == null) return Suggestion(error = "这张图片尚未保存到本机")
 
             val memories = AiMemoryIndex.numbered(profile.memories)
-            val cutoff = day.minusMonths(6).toString()
-            val recentCount = memories.takeLastWhile { it.second.occurredAt >= cutoff }.size
-            val firstMemory = (memories.size - recentCount.coerceIn(30, 300)).coerceAtLeast(0)
+            val firstMemory = (memories.size - MAX_DEFAULT_MEMORIES).coerceAtLeast(0)
             var delivered = firstMemory
             var toolCount = 0
             val steps = mutableListOf<Step>()
@@ -100,7 +99,8 @@ internal object AiSuggestEngine {
             val originalMessages = listOf(
                 AiConfig.ChatMessage("system", systemPrompt(profile, recordEvent = access.recordFriendEvents)),
                 AiConfig.ChatMessage(
-                    "user", userPrompt(profile, lines, memories.drop(firstMemory), image != null, recordedEvents), imageUrl = image,
+                    "user", userPrompt(profile, lines, memories.drop(firstMemory), firstMemory, image != null, recordedEvents),
+                    imageUrl = image,
                 ),
             )
             val messages = originalMessages.toMutableList()
@@ -215,6 +215,7 @@ internal object AiSuggestEngine {
         profile: AiProfile,
         lines: List<AiChatHistory.Line>,
         memories: List<Pair<Int, MemoryEntry>>,
+        earlierMemoryCount: Int,
         hasImage: Boolean,
         recordedEvents: List<String>,
     ): String = buildString {
@@ -227,8 +228,13 @@ internal object AiSuggestEngine {
             if (samples.isNotEmpty()) appendLine("我最近发过的原话：${samples.joinToString(" / ")}")
         }
         appendLine("对方档案，仅用于理解：")
-        profile.tags.forEach { appendLine("${it.category}/${it.key}：${it.value}") }
+        if (profile.tags.isNotEmpty()) {
+            appendLine(profile.tags.joinToString("、") { "${it.key}=${it.value}" })
+        }
         appendLine(memoryTitles(memories))
+        if (earlierMemoryCount > 0) {
+            appendLine("另有 ${earlierMemoryCount} 条更早的记忆未列出，相关时可用 $EARLIER_MEMORIES 查找标题。")
+        }
         if (recordedEvents.isNotEmpty()) {
             appendLine("今天已记录的事件标题：")
             recordedEvents.forEach { appendLine("- $it") }

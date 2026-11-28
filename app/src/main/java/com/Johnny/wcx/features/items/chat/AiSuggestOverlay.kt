@@ -203,6 +203,53 @@ internal object AiSuggestOverlay {
                 }
                 val result = suggestion
                 val reply = result?.replies?.getOrNull(selected)
+                fun applyReply(send: Boolean) {
+                    if (reply == null || active !== session || session.sending ||
+                        session.refresh != generation) return
+                    if (!session.isChatVisible() || !stillCurrentConversation()) {
+                        dismiss()
+                        showToast("会话已变更")
+                        return
+                    }
+                    session.sending = true
+                    sendScope.launch {
+                        val authorized = withContext(Dispatchers.IO) {
+                            active === session && AiSuggestEngine.isCurrent(access)
+                        }
+                        if (active !== session) return@launch
+                        if (!session.isChatVisible() || !stillCurrentConversation()) {
+                            dismiss()
+                            showToast("会话已变更")
+                            return@launch
+                        }
+                        val binding = access.binding
+                        val selection = if (authorized && AiConfig.isMasterEnabled) {
+                            AiConfig.selection(binding.purpose)
+                        } else null
+                        if (selection == null || selection.account != binding.account || selection.id != binding.id) {
+                            dismiss()
+                            showToast("好友档案或模型配置已变更")
+                            return@launch
+                        }
+                        if (send) {
+                            val sent = WeMessageApi.sendAiReply(profile.wxId, reply)
+                            dismiss()
+                            showToast(if (sent) "回复已交给微信发送" else "发送结果未确认")
+                            return@launch
+                        }
+                        val filled = runCatching {
+                            if (footer.lastText.isNotBlank()) false else {
+                                footer.setMode(1)
+                                footer.lastText = reply
+                                true
+                            }
+                        }.getOrNull()
+                        if (filled == true) dismiss() else {
+                            session.sending = false
+                            showToast(if (filled == false) "输入框已有草稿，请先处理草稿" else "无法填入输入框")
+                        }
+                    }
+                }
                 AlertDialogContent(
                     title = { Text("AI 建议 · $title") },
                     text = {
@@ -245,44 +292,16 @@ internal object AiSuggestOverlay {
                                 TextButton(enabled = !session.sending, onClick = { refresh(session, fromTap = false) }) {
                                     Text("重新生成")
                                 }
+                                TextButton(enabled = reply != null && !session.sending, onClick = {
+                                    applyReply(send = false)
+                                }) { Text("填入输入框") }
                             }
                         }
                     },
                     dismissButton = { TextButton(onClick = { dismiss() }) { Text("关闭") } },
                     confirmButton = {
                         Button(enabled = reply != null && !session.sending, onClick = {
-                            if (reply == null || active !== session || session.sending ||
-                                session.refresh != generation) return@Button
-                            if (!session.isChatVisible() || !stillCurrentConversation()) {
-                                dismiss()
-                                showToast("会话已变更")
-                                return@Button
-                            }
-                            session.sending = true
-                            sendScope.launch {
-                                val authorized = withContext(Dispatchers.IO) {
-                                    active === session && AiSuggestEngine.isCurrent(access)
-                                }
-                                if (active !== session) return@launch
-                                if (!session.isChatVisible() || !stillCurrentConversation()) {
-                                    dismiss()
-                                    showToast("会话已变更")
-                                    return@launch
-                                }
-                                val binding = access.binding
-                                val selection = if (authorized && AiConfig.isMasterEnabled) {
-                                    AiConfig.selection(binding.purpose)
-                                } else null
-                                val sent = if (selection != null && selection.account == binding.account &&
-                                    selection.id == binding.id
-                                ) WeMessageApi.sendAiReply(profile.wxId, reply) else null
-                                dismiss()
-                                showToast(when (sent) {
-                                    true -> "回复已交给微信发送"
-                                    false -> "发送结果未确认"
-                                    null -> "好友档案或模型配置已变更"
-                                })
-                            }
+                            applyReply(send = true)
                         }) { Text("发送所选") }
                     },
                 )

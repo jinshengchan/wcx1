@@ -35,6 +35,10 @@ object GroupDigestStore {
     internal fun unreadTotal(account: String): Int =
         if (ensureIndex(account)) groups.values.sumOf { it.unread } else 0
 
+    @Synchronized
+    internal fun hasEnabledGroup(account: String): Boolean =
+        ensureIndex(account) && groups.values.any { it.enabled }
+
     private fun ensureIndex(account: String): Boolean {
         if (account != accountId()) return false
         if (indexAccount == account) return true

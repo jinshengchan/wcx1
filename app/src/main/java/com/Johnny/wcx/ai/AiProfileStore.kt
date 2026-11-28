@@ -99,16 +99,26 @@ object AiProfileStore {
 
     @Synchronized
     fun loadIndex(account: String? = accountId()): AiProfileIndex {
-        if (account == null || !isCurrentAccount(account)) return AiProfileIndex()
+        return if (account != null && ensureIndex(account)) {
+            AiProfileIndex(summaries.values.sortedWith(summaryOrder))
+        } else AiProfileIndex()
+    }
+
+    @Synchronized
+    internal fun hasReadyAutoReply(account: String): Boolean =
+        ensureIndex(account) && summaries.values.any { it.state == AiProfileState.READY && it.autoReplyEnabled }
+
+    private fun ensureIndex(account: String): Boolean {
+        if (!isCurrentAccount(account)) return false
         if (indexedAccount != account) {
             indexedAccount = null
             summaries.clear()
             val entries = listProfileIds(account).mapNotNull { readProfile(it, account)?.toSummary() }
-            if (!isCurrentAccount(account)) return AiProfileIndex()
+            if (!isCurrentAccount(account)) return false
             entries.associateByTo(summaries) { it.wxId }
             indexedAccount = account
         }
-        return if (isCurrentAccount(account)) AiProfileIndex(summaries.values.sortedWith(summaryOrder)) else AiProfileIndex()
+        return isCurrentAccount(account)
     }
 
     fun loadFriends(account: String? = accountId()): AiFriendSnapshot {
